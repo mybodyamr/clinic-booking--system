@@ -1,0 +1,10 @@
+{
+  "name": "عيادات الجمعية الشرعية",
+  "description": "منظومة رقمية متقدمة لإدارة حجوزات وأدوار عيادات الجمعية الشرعية التخصصية بتجربة PWA متكاملة",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
