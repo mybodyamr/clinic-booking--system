@@ -14,7 +14,8 @@ import {
   DailyClinicScheduleItem,
   DailyScheduleState,
   SystemPermission,
-  RolePermissionsMap
+  RolePermissionsMap,
+  StaffAccount
 } from '../types';
 import { 
   getStoredClinics, 
@@ -41,7 +42,11 @@ import {
   saveStaffPasswordHash,
   checkLoginRateLimit,
   recordFailedLogin,
-  resetLoginAttempts
+  resetLoginAttempts,
+  getStoredStaffAccounts,
+  saveStaffAccounts,
+  deleteStaffAccountById,
+  updateStaffAccountRecoveryEmail
 } from '../services/storage';
 
 interface AppContextType {
@@ -53,6 +58,9 @@ interface AppContextType {
   navigate: (view: AppView, ticketId?: string) => void;
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   resetPasswordByAdmin: (username: string, newPass: string) => Promise<boolean>;
+  staffAccounts: StaffAccount[];
+  deleteStaffAccount: (id: string) => boolean;
+  updateStaffRecoveryEmail: (id: string, email: string) => void;
   logout: () => void;
   clinics: Clinic[];
   doctors: Doctor[];
@@ -122,6 +130,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // نص استفسارات ومساعدة فورية بالرئيسية
   const [supportInfoText, setSupportInfoText] = useState<string>(getStoredSupportInfoText);
+
+  // قائمة حسابات الكادر والمستخدمين الديناميكية
+  const [staffAccounts, setStaffAccounts] = useState<StaffAccount[]>(getStoredStaffAccounts);
 
   // تطبيق كلاس dark على وسم html لضمان التوافق التام مع نمط التصميم وحفظه في localStorage
   useEffect(() => {
@@ -252,50 +263,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: lockMsg };
     }
 
-    // مطابقة الحسابات المصرح بها
-    let matchedUser: UserSession | null = null;
-    let expectedAccountKey = '';
+    // مطابقة الحسابات من قائمة حسابات الكادر المسجلة في النظام
+    const matchedAccount = staffAccounts.find(
+      acc => acc.username.toLowerCase() === cleanUser
+    );
 
-    if (cleanUser === 'admin') {
-      expectedAccountKey = 'admin';
+    let matchedUser: UserSession | null = null;
+    if (matchedAccount) {
       matchedUser = {
-        id: 'usr-admin',
-        username: 'admin',
-        displayName: 'د. أحمد الشناوي',
-        role: 'admin'
-      };
-    } else if (cleanUser === 'reception') {
-      expectedAccountKey = 'reception';
-      matchedUser = {
-        id: 'usr-rec',
-        username: 'reception',
-        displayName: 'أ. سارة مصطفى',
-        role: 'reception'
-      };
-    } else if (cleanUser === 'cashier') {
-      expectedAccountKey = 'cashier';
-      matchedUser = {
-        id: 'usr-cash',
-        username: 'cashier',
-        displayName: 'أ. محمود إبراهيم',
-        role: 'cashier'
-      };
-    } else if (cleanUser === 'doctor' || cleanUser === 'dr_ali') {
-      expectedAccountKey = 'doctor';
-      matchedUser = {
-        id: 'usr-doc-1',
-        username: 'doctor',
-        displayName: 'د. علي عبد الرحمن السقا',
-        role: 'doctor',
-        doctorId: 'doc-1',
-        clinicId: 'clinic-internal'
+        id: matchedAccount.id,
+        username: matchedAccount.username,
+        displayName: matchedAccount.displayName,
+        role: matchedAccount.role,
+        doctorId: matchedAccount.doctorId,
+        clinicId: matchedAccount.clinicId,
       };
     }
 
     // 2. التحقق من صحة كلمة المرور عبر التجزئة المشفرة (SHA-256 Hash Verification)
     const storedHashes = getStoredStaffPasswordHashes();
     const providedHash = await hashPassword(pass);
-    const expectedHash = expectedAccountKey ? storedHashes[expectedAccountKey] : null;
+    const expectedHash = matchedAccount ? storedHashes[matchedAccount.username.toLowerCase()] : null;
 
     // فحص التطابق مع الحساب والهاش
     if (matchedUser && expectedHash && providedHash === expectedHash) {
@@ -349,6 +337,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       return { success: false, error: genericError };
     }
+  };
+
+  const deleteStaffAccount = (id: string): boolean => {
+    const res = deleteStaffAccountById(id);
+    if (!res.success) {
+      addToast({
+        type: 'error',
+        title: 'تعذر الحذف',
+        message: res.error || 'فشلت عملية حذف الحساب.'
+      });
+      return false;
+    }
+    setStaffAccounts(res.remainingAccounts);
+    addToast({
+      type: 'success',
+      title: 'تم الحذف بنجاح',
+      message: 'تمت إزالة الحساب من منظومة الموظفين.'
+    });
+    return true;
+  };
+
+  const updateStaffRecoveryEmail = (id: string, email: string) => {
+    const updated = updateStaffAccountRecoveryEmail(id, email);
+    setStaffAccounts(updated);
+    addToast({
+      type: 'success',
+      title: 'تم حفظ البريد الإلكتروني',
+      message: 'تم تحديث بريد استعادة الحساب بنجاح.'
+    });
   };
 
   const resetPasswordByAdmin = async (targetUser: string, newPass: string): Promise<boolean> => {
@@ -879,6 +896,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addDoctor,
         resetToInitialData,
         resetPasswordByAdmin,
+        staffAccounts,
+        deleteStaffAccount,
+        updateStaffRecoveryEmail,
         toasts,
         addToast,
         removeToast,

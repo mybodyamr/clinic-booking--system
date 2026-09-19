@@ -1,4 +1,4 @@
-import { Clinic, Doctor, Booking, UserSession, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission } from '../types';
+import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
 
@@ -13,6 +13,7 @@ const STORAGE_KEYS = {
   SUPPORT_INFO_TEXT: 'sharaya_support_info_text_v2',
   STAFF_PASSWORDS: 'sharaya_staff_passwords_v2',
   LOGIN_ATTEMPTS: 'sharaya_login_attempts_v2',
+  STAFF_ACCOUNTS: 'sharaya_staff_accounts_v2',
 };
 
 export const DEFAULT_SUPPORT_INFO_TEXT = 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.';
@@ -251,13 +252,105 @@ export async function hashPassword(plainText: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// الكلمات السرية الافتراضية المحمية بالتجزئة للحسابات الإدارية والطبية
+// الكلمات السرية الافتراضية المحمية بالتجزئة للحسابات الإدارية والطبية (SHA-256 مضبوطة بـ 64 خانة مع الملح)
 export const DEFAULT_PASSWORD_HASHES: Record<string, string> = {
-  admin: 'f25292cbb3e85e5d36e8979be6a94f0e527d716503c53573e877e68bc865d6c8', // hash of "123" with salt
-  reception: 'f25292cbb3e85e5d36e8979be6a94f0e527d716503c53573e877e68bc865d6c8',
-  cashier: 'f25292cbb3e85e5d36e8979be6a94f0e527d716503c53573e877e68bc865d6c8',
-  doctor: 'f25292cbb3e85e5d36e8979be6a94f0e527d716503c53573e877e68bc865d6c8',
+  admin: '2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558', // Adm@Sharia2026!
+  reception: '8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804', // Rcp@Sharia2026!
+  cashier: '3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6', // Csh@Sharia2026!
+  doctor: '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
 };
+
+// ==================== قائمة حسابات الكادر والمستخدمين الديناميكية ====================
+export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
+  {
+    id: 'staff-admin',
+    username: 'admin',
+    displayName: 'د. أحمد الشناوي (مدير المنظومة)',
+    role: 'admin',
+    recoveryEmail: 'admin@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-reception',
+    username: 'reception',
+    displayName: 'أ. سارة مصطفى (مسؤولة الاستقبال)',
+    role: 'reception',
+    recoveryEmail: 'reception@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-cashier',
+    username: 'cashier',
+    displayName: 'أ. محمود إبراهيم (أمين الصندوق والخزينة)',
+    role: 'cashier',
+    recoveryEmail: 'cashier@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-doctor',
+    username: 'doctor',
+    displayName: 'د. علي عبد الرحمن (عيادة الباطنة)',
+    role: 'doctor',
+    doctorId: 'doc-1',
+    clinicId: 'clinic-internal',
+    recoveryEmail: 'doctor.internal@sharia-clinics.eg'
+  }
+];
+
+export function getStoredStaffAccounts(): StaffAccount[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.STAFF_ACCOUNTS);
+    if (!raw) {
+      localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(DEFAULT_STAFF_ACCOUNTS));
+      return DEFAULT_STAFF_ACCOUNTS;
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed;
+    }
+    return DEFAULT_STAFF_ACCOUNTS;
+  } catch (e) {
+    console.error('فشل قراءة حسابات الموظفين:', e);
+    return DEFAULT_STAFF_ACCOUNTS;
+  }
+}
+
+export function saveStaffAccounts(accounts: StaffAccount[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(accounts));
+  } catch (e) {
+    console.error('فشل حفظ حسابات الموظفين:', e);
+  }
+}
+
+export function deleteStaffAccountById(id: string): { success: boolean; error?: string; remainingAccounts: StaffAccount[] } {
+  const current = getStoredStaffAccounts();
+  const target = current.find(a => a.id === id);
+  if (!target) {
+    return { success: false, error: 'المستخدم غير موجود', remainingAccounts: current };
+  }
+
+  // منع حذف آخر حساب أدمن في المنظومة
+  if (target.role === 'admin') {
+    const adminCount = current.filter(a => a.role === 'admin').length;
+    if (adminCount <= 1) {
+      return { success: false, error: 'لا يمكن حذف آخر حساب مدير متبقٍ في المنظومة لضمان استمرارية الإدارة.', remainingAccounts: current };
+    }
+  }
+
+  const updated = current.filter(a => a.id !== id);
+  saveStaffAccounts(updated);
+  return { success: true, remainingAccounts: updated };
+}
+
+export function updateStaffAccountRecoveryEmail(id: string, email: string): StaffAccount[] {
+  const current = getStoredStaffAccounts();
+  const updated = current.map(acc => {
+    if (acc.id === id) {
+      return { ...acc, recoveryEmail: email.trim().toLowerCase() };
+    }
+    return acc;
+  });
+  saveStaffAccounts(updated);
+  return updated;
+}
 
 export function getStoredStaffPasswordHashes(): Record<string, string> {
   try {

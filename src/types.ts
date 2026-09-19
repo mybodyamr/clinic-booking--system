@@ -73,6 +73,16 @@ export interface UserSession {
   clinicId?: string;
 }
 
+export interface StaffAccount {
+  id: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  doctorId?: string;
+  clinicId?: string;
+  recoveryEmail?: string;
+}
+
 export type AppView = 
   | 'landing' 
   | 'booking' 

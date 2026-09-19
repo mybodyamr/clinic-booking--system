@@ -305,36 +305,3 @@ export const INITIAL_BOOKINGS: Booking[] = [
     createdAt: todayStr + 'T13:15:00',
   }
 ];
-
-export const DEMO_CREDENTIALS = [
-  {
-    username: 'admin',
-    password: '123',
-    role: 'admin',
-    displayName: 'د. أحمد الشناوي (مدير المنظومة)',
-    description: 'صلاحيات كاملة: الإحصائيات، إدارة الأطباء والعيادات، تصدير البيانات'
-  },
-  {
-    username: 'reception',
-    password: '123',
-    role: 'reception',
-    displayName: 'أ. سارة مصطفى (مسؤولة الاستقبال)',
-    description: 'تسجيل الحضور، مسح QR للتذاكر، ترتيب الطابور، ومتابعة الأطباء'
-  },
-  {
-    username: 'cashier',
-    password: '123',
-    role: 'cashier',
-    displayName: 'أ. محمود إبراهيم (أمين الصندوق والخزينة)',
-    description: 'تسديد الرسوم، إصدار إيصالات الدفع النقدية والخيرية، ومطابقة السجلات'
-  },
-  {
-    username: 'doctor',
-    password: '123',
-    role: 'doctor',
-    doctorId: 'doc-1',
-    clinicId: 'clinic-internal',
-    displayName: 'د. علي عبد الرحمن (عيادة الباطنة)',
-    description: 'شاشة الطبيب: مناداة المرضى، تغيير حالة العيادة، وتدوين الملاحظات'
-  }
-];

@@ -7,22 +7,18 @@ import {
   ArrowRight, 
   KeyRound, 
   AlertCircle,
-  Stethoscope,
-  UserCheck,
-  Receipt,
-  LayoutDashboard,
   Hospital,
   HelpCircle,
   Eye,
   EyeOff,
   CheckCircle2,
+  Mail,
   X
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { DEMO_CREDENTIALS } from '../data/mockData';
 
 export const LoginView: React.FC = () => {
-  const { login, navigate, resetPasswordByAdmin } = useApp();
+  const { login, navigate } = useApp();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -31,7 +27,7 @@ export const LoginView: React.FC = () => {
   const [forgotPasswordOpen, setForgotPasswordOpen] = useState(false);
   const [forgotStep, setForgotStep] = useState<'request' | 'success'>('request');
   const [forgotUsername, setForgotUsername] = useState('');
-  const [forgotPhone, setForgotPhone] = useState('');
+  const [forgotEmail, setForgotEmail] = useState('');
   const [forgotReason, setForgotReason] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -48,22 +44,13 @@ export const LoginView: React.FC = () => {
     setIsLoading(false);
 
     if (!result.success) {
-      setError(result.error || 'بيانات الدخول غير صحيحة، يرجى التحقق من اسم المستخدم أو استخدام الحسابات التجريبية بالأسفل');
+      setError(result.error || 'بيانات الدخول غير صحيحة، يرجى التحقق من اسم المستخدم وكلمة المرور');
     }
-  };
-
-  const handleQuickLogin = async (demoUser: string, demoPass: string) => {
-    setUsername(demoUser);
-    setPassword(demoPass);
-    setError('');
-    setIsLoading(true);
-    await login(demoUser, demoPass);
-    setIsLoading(false);
   };
 
   const handleForgotPasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!forgotUsername.trim()) return;
+    if (!forgotUsername.trim() || !forgotEmail.trim()) return;
     setForgotStep('success');
   };
 
@@ -183,53 +170,6 @@ export const LoginView: React.FC = () => {
           </motion.button>
         </form>
 
-        {/* الحسابات التجريبية للاختبار السريع الفوري (Demo-Only Feature) */}
-        <div className="pt-4 border-t border-slate-200 dark:border-slate-700/60 space-y-3">
-          <div className="p-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 text-amber-900 dark:text-amber-200 text-[11px] leading-relaxed flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <strong className="font-bold block">ملاحظة أمان بيئة العرض التجريبية (Demo-Only):</strong>
-              أزرار الدخول السريع أدناه مخصصة لاختبار المنظومة فقط بدون كلمة مرور. يجب إزالتها بالكامل عند ربط النظام بقاعدة بيانات حقيقية ونشره الفعلي لضمان الأمان.
-            </div>
-          </div>
-
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-700 dark:text-slate-300">
-              حسابات تجريبية سريعة لتجربة الأدوار المختلفة:
-            </span>
-            <span className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold">
-              اضغط للدخول المباشر
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-2.5">
-            {DEMO_CREDENTIALS.map((cred) => (
-              <button
-                key={cred.username}
-                type="button"
-                onClick={() => handleQuickLogin(cred.username, cred.password)}
-                className="p-3 rounded-xl border border-slate-200 dark:border-slate-700 hover:border-emerald-600 dark:hover:border-emerald-500 bg-slate-50 dark:bg-slate-900/60 hover:bg-emerald-50/50 dark:hover:bg-emerald-950/40 text-right transition-all group flex flex-col justify-between"
-              >
-                <div className="flex items-center justify-between mb-1">
-                  <div className="flex items-center gap-1.5">
-                    {cred.role === 'admin' && <LayoutDashboard className="w-4 h-4 text-emerald-600" />}
-                    {cred.role === 'reception' && <UserCheck className="w-4 h-4 text-amber-600" />}
-                    {cred.role === 'cashier' && <Receipt className="w-4 h-4 text-teal-600" />}
-                    {cred.role === 'doctor' && <Stethoscope className="w-4 h-4 text-blue-600" />}
-                    <span className="font-bold text-xs text-slate-900 dark:text-white group-hover:text-emerald-700 dark:group-hover:text-emerald-400">
-                      {cred.role === 'admin' ? 'الإدارة' : cred.role === 'reception' ? 'الاستقبال' : cred.role === 'cashier' ? 'الخزينة' : 'طبيب باطنة'}
-                    </span>
-                  </div>
-                  <span className="text-[10px] font-mono text-slate-400">({cred.username})</span>
-                </div>
-                <div className="text-[11px] text-slate-500 line-clamp-1">
-                  {cred.displayName}
-                </div>
-              </button>
-            ))}
-          </div>
-        </div>
-
       </motion.div>
 
       {/* للمرضى: التذكير بعدم الحاجة لتسجيل الدخول */}
@@ -246,7 +186,7 @@ export const LoginView: React.FC = () => {
         </div>
       </div>
 
-      {/* نافذة استعادة / إعادة تعيين كلمة المرور (Forgot Password Flow) */}
+      {/* نافذة استعادة / إعادة تعيين كلمة المرور (Forgot Password Flow via Email) */}
       {forgotPasswordOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs">
           <motion.div
@@ -276,7 +216,7 @@ export const LoginView: React.FC = () => {
             {forgotStep === 'request' ? (
               <form onSubmit={handleForgotPasswordSubmit} className="space-y-4">
                 <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                  لحماية بيانات المرضى والمنظومة، يتم إعادة تعيين كلمات المرور للكادر الطبي والإداري عبر مراجعة المشرف العام أو تقديم طلب استعادة فوري:
+                  لحماية بيانات المرضى والمنظومة، يتم إرسال رابط تأكيد الاستعادة إلى البريد الإلكتروني المهني المسجل لحساب الموظف:
                 </p>
 
                 <div>
@@ -296,17 +236,20 @@ export const LoginView: React.FC = () => {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-                    رقم الهاتف المسجل لاستلام رمز التحقق:
+                    البريد الإلكتروني المسجل لاستلام رمز الاستعادة:
                   </label>
-                  <input
-                    type="tel"
-                    required
-                    value={forgotPhone}
-                    onChange={(e) => setForgotPhone(e.target.value)}
-                    placeholder="01XXXXXXXXX"
-                    dir="ltr"
-                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white text-xs font-medium focus:ring-2 focus:ring-emerald-500"
-                  />
+                  <div className="relative">
+                    <input
+                      type="email"
+                      required
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      placeholder="name@sharia-clinics.eg"
+                      dir="ltr"
+                      className="w-full pl-9 pr-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white text-xs font-medium focus:ring-2 focus:ring-emerald-500"
+                    />
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                  </div>
                 </div>
 
                 <div>
@@ -334,7 +277,7 @@ export const LoginView: React.FC = () => {
                     type="submit"
                     className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold shadow-md cursor-pointer transition-colors"
                   >
-                    إرسال طلب الاستعادة
+                    إرسال طلب الاستعادة عبر البريد
                   </button>
                 </div>
               </form>
@@ -345,10 +288,10 @@ export const LoginView: React.FC = () => {
                 </div>
                 <div className="space-y-1.5">
                   <h4 className="font-bold text-sm text-slate-900 dark:text-white">
-                    تم استلام طلب استعادة الحساب بنجاح
+                    تم إرسال رابط التحقق إلى بريدك الإلكتروني
                   </h4>
                   <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-w-sm mx-auto">
-                    تم إرسال تعليمات إعادة التعيين ورابط التحقق إلى الهاتف أو المشرف المسؤول عن حساب ({forgotUsername}).
+                    تم إرسال تعليمات إعادة التعيين ورابط التحقق المشفر إلى ({forgotEmail}) لحساب ({forgotUsername}). يرجى فحص صندوق الوارد.
                   </p>
                 </div>
                 <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 text-[11px] text-slate-600 dark:text-slate-400 text-right space-y-1">
