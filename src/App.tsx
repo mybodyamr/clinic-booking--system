@@ -18,6 +18,7 @@ import { ReceptionView } from './views/ReceptionView';
 import { DoctorView } from './views/DoctorView';
 import { CashierView } from './views/CashierView';
 import { AdminView } from './views/AdminView';
+import { OfflineBanner } from './components/OfflineBanner';
 import { Hospital, Moon, Sun } from 'lucide-react';
 
 const AppContent: React.FC = () => {
@@ -51,6 +52,9 @@ const AppContent: React.FC = () => {
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
       
+      {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
+      <OfflineBanner />
+
       {/* الشريط العلوي العام */}
       <Navbar />
 

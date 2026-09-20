@@ -12,6 +12,7 @@ export interface Clinic {
   id: string;
   name: string;
   iconName: string;
+  specialty?: string;
   department?: string;
   description?: string;
   fee: number;
@@ -32,6 +33,8 @@ export interface Doctor {
   title: string;
   scheduleDays: string[];
   scheduleHours: string;
+  shiftStartTime?: string;
+  shiftEndTime?: string;
   status: DoctorStatus;
   unavailableReason?: string;
   maxDailyBookings?: number;
@@ -45,6 +48,7 @@ export interface Booking {
   ticketNumber: string;
   patientName: string;
   patientPhone: string;
+  nationalId?: string;
   clinicId: string;
   clinicName: string;
   doctorId: string;

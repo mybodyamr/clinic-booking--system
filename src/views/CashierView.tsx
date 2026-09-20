@@ -12,20 +12,20 @@ import {
   MessageCircle, 
   Filter,
   Check,
-  Building2,
   FileCheck,
   QrCode,
   Camera,
   X,
   AlertTriangle,
-  RotateCcw
+  RotateCcw,
+  FileText
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { maskPhoneNumber } from '../services/storage';
 import { PaymentStatus, PaymentMethod, Booking } from '../types';
 
 export const CashierView: React.FC = () => {
-  const { bookings, updatePaymentStatus, clinics, addToast } = useApp();
+  const { bookings, updatePaymentStatus, clinics, addToast, setPatientHistoryModalOpen, setPatientHistoryPhone } = useApp();
   const [activeTab, setActiveTab] = useState<'unpaid' | 'paid'>('unpaid');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClinic, setSelectedClinic] = useState<string>('all');
@@ -60,10 +60,13 @@ export const CashierView: React.FC = () => {
 
   const filteredList = currentList.filter(b => {
     const matchClinic = selectedClinic === 'all' || b.clinicId === selectedClinic;
-    const matchSearch = 
+    const cleanSearch = searchQuery.trim().replace(/[\s-]/g, '').toLowerCase();
+    const cleanPhone = b.patientPhone.replace(/[\s-]/g, '');
+    const matchSearch = !cleanSearch ||
       b.patientName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       b.ticketNumber.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      b.patientPhone.includes(searchQuery);
+      cleanPhone.includes(cleanSearch) ||
+      (b.nationalId && b.nationalId.includes(cleanSearch));
     return matchClinic && matchSearch;
   });
 
@@ -191,6 +194,19 @@ export const CashierView: React.FC = () => {
 
         {/* أزرار الإجراءات والتبديل */}
         <div className="flex flex-wrap items-center gap-3">
+          {/* زر الاستعلام عن سجل المريض برقم الهاتف */}
+          <button
+            onClick={() => {
+              setPatientHistoryPhone('');
+              setPatientHistoryModalOpen(true);
+            }}
+            className="inline-flex items-center gap-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 px-4 py-2.5 rounded-2xl font-bold text-xs border border-slate-300 dark:border-slate-700 transition-all cursor-pointer hover:shadow-xs"
+            title="استعلام عن جميع حجوزات وكشوفات المريض السابقة برقم هاتفه"
+          >
+            <FileText className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <span>سجل المريض (برقم الهاتف)</span>
+          </button>
+
           {/* زر مسح تذكرة المريض بالباركود / QR */}
           <button
             onClick={() => {

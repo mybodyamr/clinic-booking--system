@@ -22,7 +22,7 @@ import { useApp } from '../context/AppContext';
 import { validateEgyptianPhone, validateTripleName } from '../services/storage';
 
 export const BookingView: React.FC = () => {
-  const { createBooking, navigate, bookings, getActiveClinicsForBooking } = useApp();
+  const { createBooking, navigate, bookings, getActiveClinicsForBooking, checkClinicAvailabilityStatus } = useApp();
 
   const activeClinicsWithDoctors = getActiveClinicsForBooking();
 
@@ -67,9 +67,19 @@ export const BookingView: React.FC = () => {
     b => b.clinicId === selectedClinicId && b.date === bookingDate && b.status !== 'cancelled'
   ).length;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  // الفحص الصارم للركائز الأربعة لتوافر العيادة والحجز
+  const availabilityStatus = (selectedClinicId && selectedDoctor)
+    ? checkClinicAvailabilityStatus(selectedClinicId, selectedDoctor.id, bookingDate)
+    : null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const newErrors: { [key: string]: string } = {};
+
+    if (availabilityStatus && !availabilityStatus.allowed) {
+      setErrors({ form: availabilityStatus.reason || 'العيادة غير متاحة للحجز حالياً.' });
+      return;
+    }
 
     const nameValidation = validateTripleName(patientName);
     if (!nameValidation.valid) {
@@ -97,7 +107,7 @@ export const BookingView: React.FC = () => {
     setErrors({});
     setIsSubmitting(true);
 
-    const result = createBooking({
+    const result = await createBooking({
       patientName,
       patientPhone,
       clinicId: selectedClinicId,
@@ -258,10 +268,27 @@ export const BookingView: React.FC = () => {
                   <Clock className="w-3.5 h-3.5 text-emerald-600" />
                   <span>فترة التواجد والعمل: {selectedDoctor.scheduleHours}</span>
                 </div>
+                {selectedDoctor.scheduleDays && selectedDoctor.scheduleDays.length > 0 && (
+                  <div className="text-xs text-slate-600 dark:text-slate-300 flex items-center gap-2 mt-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>أيام العمل الأسبوعية: {selectedDoctor.scheduleDays.join('، ')}</span>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="p-4 text-xs text-slate-500 bg-slate-50 dark:bg-slate-700/30 rounded-xl border border-slate-200 dark:border-slate-700">
                 يرجى اختيار العيادة أعلاه لعرض الطبيب المكلف.
+              </div>
+            )}
+
+            {/* تنبيه توافر العيادة الصارم بناءً على الركائز الأربعة */}
+            {availabilityStatus && !availabilityStatus.allowed && (
+              <div className="p-3.5 bg-rose-50 dark:bg-rose-950/60 rounded-xl border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2.5">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="block mb-0.5">الحجز غير متاح في هذا التاريخ أو التوقيت:</strong>
+                  <span>{availabilityStatus.reason}</span>
+                </div>
               </div>
             )}
           </div>
@@ -379,13 +406,19 @@ export const BookingView: React.FC = () => {
 
           <motion.button
             type="submit"
-            disabled={isSubmitting}
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-            className="px-8 py-3.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold text-base rounded-xl shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+            disabled={isSubmitting || Boolean(availabilityStatus && !availabilityStatus.allowed)}
+            whileHover={!(availabilityStatus && !availabilityStatus.allowed) ? { scale: 1.02 } : {}}
+            whileTap={!(availabilityStatus && !availabilityStatus.allowed) ? { scale: 0.98 } : {}}
+            className="px-8 py-3.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold text-base rounded-xl shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <CheckCircle2 className="w-5 h-5 text-amber-300" />
-            <span>{isSubmitting ? 'جاري إصدار التذكرة...' : 'تأكيد الحجز واستخراج التذكرة'}</span>
+            <span>
+              {isSubmitting 
+                ? 'جاري إصدار التذكرة...' 
+                : (availabilityStatus && !availabilityStatus.allowed)
+                  ? 'الحجز غير متاح حالياً'
+                  : 'تأكيد الحجز واستخراج التذكرة'}
+            </span>
           </motion.button>
         </div>
 

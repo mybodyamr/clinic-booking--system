@@ -48,6 +48,11 @@ import {
   deleteStaffAccountById,
   updateStaffAccountRecoveryEmail
 } from '../services/storage';
+import { 
+  checkClinicAvailability, 
+  ClinicAvailabilityResult,
+  parseDoctorShiftTimes
+} from '../services/scheduleService';
 
 interface AppContextType {
   theme: 'light' | 'dark';
@@ -84,12 +89,13 @@ interface AppContextType {
     timeSlot: string;
     fee: number;
     notes?: string;
-  }) => { success: boolean; booking?: Booking; error?: string };
+  }) => Promise<{ success: boolean; booking?: Booking; error?: string }>;
   updateBookingStatus: (bookingId: string, status: BookingStatus) => void;
   updatePaymentStatus: (bookingId: string, paymentStatus: PaymentStatus, method?: PaymentMethod) => void;
   updateDoctorStatus: (doctorId: string, status: DoctorStatus, reason?: string) => void;
-  updateDoctorSchedule: (doctorId: string, scheduleDays: string[], scheduleHours: string) => void;
+  updateDoctorSchedule: (doctorId: string, scheduleDays: string[], scheduleHours: string, shiftStartTime?: string, shiftEndTime?: string) => void;
   updateDoctorMaxBookings: (doctorId: string, maxDailyBookings: number) => void;
+  checkClinicAvailabilityStatus: (clinicId: string, doctorId: string, date?: string) => ClinicAvailabilityResult | null;
   admitPatient: (bookingId: string) => void;
   markPatientLate: (bookingId: string) => void;
   restoreLatePatient: (bookingId: string, action: 'admit_now' | 'return_to_queue') => void;
@@ -263,33 +269,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: lockMsg };
     }
 
-    // مطابقة الحسابات من قائمة حسابات الكادر المسجلة في النظام
+    let authSuccess = false;
+    let matchedUser: UserSession | null = null;
+
+    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification)
     const matchedAccount = staffAccounts.find(
       acc => acc.username.toLowerCase() === cleanUser
     );
 
-    let matchedUser: UserSession | null = null;
     if (matchedAccount) {
-      matchedUser = {
-        id: matchedAccount.id,
-        username: matchedAccount.username,
-        displayName: matchedAccount.displayName,
-        role: matchedAccount.role,
-        doctorId: matchedAccount.doctorId,
-        clinicId: matchedAccount.clinicId,
-      };
+      const storedHashes = getStoredStaffPasswordHashes();
+      const providedHash = await hashPassword(pass);
+      const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
+
+      if (expectedHash && providedHash === expectedHash) {
+        authSuccess = true;
+        matchedUser = {
+          id: matchedAccount.id,
+          username: matchedAccount.username,
+          displayName: matchedAccount.displayName,
+          role: matchedAccount.role,
+          doctorId: matchedAccount.doctorId,
+          clinicId: matchedAccount.clinicId,
+        };
+      }
     }
 
-    // 2. التحقق من صحة كلمة المرور عبر التجزئة المشفرة (SHA-256 Hash Verification)
-    const storedHashes = getStoredStaffPasswordHashes();
-    const providedHash = await hashPassword(pass);
-    const expectedHash = matchedAccount ? storedHashes[matchedAccount.username.toLowerCase()] : null;
-
-    // فحص التطابق مع الحساب والهاش
-    if (matchedUser && expectedHash && providedHash === expectedHash) {
-      // إعادة تعيين عداد المحاولات الفاشلة عند النجاح
+    // فحص نجاح تسجيل الدخول
+    if (authSuccess && matchedUser) {
       resetLoginAttempts(cleanUser);
-
       setCurrentUser(matchedUser);
       saveSession(matchedUser);
       addToast({
@@ -317,7 +325,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return { success: true };
     } else {
-      // 3. تسجيل المحاولة الفاشلة وتطبيق الحظر العام المشترك (Generic Error Message)
+      // تسجيل المحاولة الفاشلة وتطبيق الحظر العام المشترك (Generic Error Message)
       const record = recordFailedLogin(cleanUser);
       let genericError = 'اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات.';
       
@@ -401,8 +409,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // إنشاء حجز جديد للمريض (بدون تسجيل دخول مع تطبيق الحماية والحد الأقصى)
-  const createBooking = (data: {
+  // إنشاء حجز جديد للمريض وإصدار التذكرة
+  const createBooking = async (data: {
     patientName: string;
     patientPhone: string;
     clinicId: string;
@@ -411,7 +419,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     timeSlot: string;
     fee: number;
     notes?: string;
-  }) => {
+  }): Promise<{ success: boolean; booking?: Booking; error?: string }> => {
     const cleanName = sanitizeText(data.patientName);
     const cleanPhone = data.patientPhone.trim();
     const cleanNotes = sanitizeText(data.notes || '');
@@ -422,7 +430,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: nameCheck.error || 'يجب كتابة اسم المريض ثلاثياً على الأقل.' };
     }
 
-    // التحقق من الحماية من التكرار والسبام (السماح لنفس الهاتف بأسماء مختلفة، ومنع نفس الاسم)
+    // فحص الحد المسموح ومعدل الحجوزات
     const rateCheck = checkBookingRateLimit(cleanName, cleanPhone, data.clinicId, data.date);
     if (!rateCheck.allowed) {
       return { success: false, error: rateCheck.reason };
@@ -433,6 +441,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (!clinic || !doctor) {
       return { success: false, error: 'العيادة أو الطبيب غير متوفرين حالياً' };
+    }
+
+    // التحقق الصارم من الركائز الأربعة على مستوى النظام وقواعد العمل (Backend/System Logic Level):
+    // 1. حالة التواجد اليومية (متاح / غير متاح)
+    // 2. جدول العمل الأسبوعي (أيام العمل)
+    // 3. انتهاء وقت العيادة الحقيقي
+    // 4. اكتمال العدد الأقصى للحجوزات
+    const bookingDate = data.date || new Date().toISOString().split('T')[0];
+    const availabilityCheck = checkClinicAvailability(doctor, clinic.id, bookingDate, bookings);
+
+    if (!availabilityCheck.allowed) {
+      return {
+        success: false,
+        error: availabilityCheck.reason || 'العيادة غير متاحة للحجز حالياً.'
+      };
     }
 
     // حساب رقم الدور التالي في نفس العيادة ونفس اليوم
@@ -479,9 +502,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateBookingStatus = (bookingId: string, status: BookingStatus) => {
+    const now = new Date().toISOString();
+
     const updated = bookings.map(b => {
       if (b.id === bookingId) {
-        const now = new Date().toISOString();
         return {
           ...b,
           status,
@@ -531,7 +555,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return {
           ...d,
           status,
-          unavailableReason: status === 'available' ? undefined : (reason || d.unavailableReason || 'اعتذار رسمي')
+          unavailableReason: status === 'available' ? undefined : (reason || d.unavailableReason || 'عذر طارئ')
         };
       }
       return d;
@@ -540,25 +564,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDoctors(updated);
 
     const statusNames: Record<DoctorStatus, string> = {
-      available: 'متاح ويستقبل الحالات',
+      available: 'متاح للعمل ويستقبل الحالات',
       break: 'في استراحة مؤقتة',
       busy: 'داخل كشف طبي',
-      offline: 'غير متواجد اليوم'
+      offline: 'غير متاح للعمل اليوم'
     };
 
     addToast({
-      type: status === 'offline' ? 'warning' : 'info',
-      title: 'تحديث حالة الطبيب',
+      type: status === 'offline' ? 'warning' : 'success',
+      title: 'حالة التواجد اليومي',
       message: status === 'offline'
-        ? `تم تسجيل الطبيب: غير متواجد اليوم (تم حجب عيادته تلقائياً من حجز المرضى).`
+        ? `تم تسجيل الطبيب: غير متاح (${reason || 'عذر طارئ'}) — تم حجب العيادة تلقائياً من شاشة حجز المرضى.`
         : `أصبحت حالة الطبيب الآن: ${statusNames[status]}`
     });
   };
 
-  const updateDoctorSchedule = (doctorId: string, scheduleDays: string[], scheduleHours: string) => {
+  const updateDoctorSchedule = (
+    doctorId: string, 
+    scheduleDays: string[], 
+    scheduleHours: string,
+    shiftStartTime?: string,
+    shiftEndTime?: string
+  ) => {
     const updated = doctors.map(d => {
       if (d.id === doctorId) {
-        return { ...d, scheduleDays, scheduleHours };
+        return { 
+          ...d, 
+          scheduleDays, 
+          scheduleHours,
+          ...(shiftStartTime ? { shiftStartTime } : {}),
+          ...(shiftEndTime ? { shiftEndTime } : {})
+        };
       }
       return d;
     });
@@ -566,8 +602,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDoctors(updated);
     addToast({
       type: 'success',
-      title: 'تم تحديث جدول العمل',
-      message: 'تم حفظ أيام ومواعيد تواجد الطبيب الأسبوعية بنجاح.'
+      title: 'الجدول الأسبوعي للطبيب',
+      message: 'تم حفظ أيام العمل ومواعيد بداية ونهاية المناوبة بنجاح.'
     });
   };
 
@@ -766,6 +802,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       return item;
     });
+
     const newSchedule: DailyScheduleState = {
       date: todayStr,
       items: sanitized
@@ -818,12 +855,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   /**
-   * العيادات المتاحة للحجز اليوم:
-   * 1. يحددها الأدمن كـ "مفتوحة اليوم" في جدول اليوم (isOpen: true)
-   * 2. الطبيب المكلف بالعيادة لليوم ليس في حالة "offline" (غير متواجد)
-   * إذا تم تغيير حالة الطبيب إلى "غير متواجد"، تختفي العيادة فوراً وتلقائياً من خيارات الحجز للمريض
+   * العيادات المتاحة للحجز للمريض:
+   * تعتمد بشكل صارم على الركائز الأربعة المطلوبة:
+   * 1. الجدول الأسبوعي (هل هذا اليوم من أيام عمل الطبيب؟)
+   * 2. حالة التواجد اليومية (هل الطبيب "متاح للعمل" وليس "غير متاح" / offline)
+   * 3. انتهاء وقت العيادة (هل انتهت المناوبة ووقت استقبال الحجوزات؟)
+   * 4. اكتمال عدد الحجوزات (هل وصلت الحجوزات المؤكدة إلى الحد الأقصى للطبيب؟)
    */
   const getActiveClinicsForBooking = (): { clinic: Clinic; assignedDoctor?: Doctor }[] => {
+    const todayStr = new Date().toISOString().split('T')[0];
     const openItems = dailySchedule.items.filter(item => item.isOpen);
     const available: { clinic: Clinic; assignedDoctor?: Doctor }[] = [];
 
@@ -836,8 +876,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const assignedDoctor = doctors.find(d => d.id === item.doctorId) || 
                              doctors.find(d => d.clinicId === clinic.id);
 
-      // الشرط الحاسم: لو الطبيب غير متواجد (offline)، تختفي العيادة تلقائياً من خيارات حجز المريض
-      if (!assignedDoctor || assignedDoctor.status === 'offline') {
+      if (!assignedDoctor) continue;
+
+      // تطبيق الفحص الصارم للركائز الأربعة
+      const availabilityCheck = checkClinicAvailability(
+        assignedDoctor,
+        clinic.id,
+        todayStr,
+        bookings
+      );
+
+      // إذا كانت العيادة غير متاحة لأي من الأسباب الأربعة، تختفي فوراً وبشكل تلقائي من حجز المرضى
+      if (!availabilityCheck.allowed) {
         continue;
       }
 
@@ -846,6 +896,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return available;
   };
+
+  const checkClinicAvailabilityStatus = (clinicId: string, doctorId: string, date?: string): ClinicAvailabilityResult | null => {
+    const doctor = doctors.find(d => d.id === doctorId);
+    if (!doctor) return null;
+    const targetDate = date || new Date().toISOString().split('T')[0];
+    return checkClinicAvailability(doctor, clinicId, targetDate, bookings);
+  };
+
+  // مؤقت دوري كل 30 ثانية لتحديث انتهاء مواعيد العمل للعيادات تلقائياً في الواجهات الحية
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setClockTick(prev => prev + 1);
+    }, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   const resetToInitialData = () => {
     localStorage.removeItem('sharaya_clinics_v2');
@@ -887,6 +953,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateDoctorStatus,
         updateDoctorSchedule,
         updateDoctorMaxBookings,
+        checkClinicAvailabilityStatus,
         admitPatient,
         markPatientLate,
         restoreLatePatient,

@@ -13,7 +13,6 @@ import {
   User, 
   Phone, 
   Eye, 
-  Sparkles,
   Camera,
   RotateCcw,
   UserX,
@@ -102,7 +101,7 @@ export const ReceptionView: React.FC = () => {
     }
   }, [walkinClinicId, availableDoctorsInClinic, walkinDoctorId]);
 
-  const handleWalkinSubmit = (e: React.FormEvent) => {
+  const handleWalkinSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const nameCheck = validateTripleName(walkinName);
     if (!nameCheck.valid) {
@@ -127,7 +126,7 @@ export const ReceptionView: React.FC = () => {
     const doc = doctors.find(d => d.id === walkinDoctorId) || availableDoctorsInClinic[0];
     const cln = clinics.find(c => c.id === walkinClinicId);
 
-    const res = createBooking({
+    const res = await createBooking({
       patientName: walkinName,
       patientPhone: walkinPhone,
       clinicId: walkinClinicId,

@@ -6,7 +6,6 @@ import {
   Hospital, 
   Stethoscope, 
   Users, 
-  DollarSign, 
   Download, 
   Plus, 
   Edit2, 
@@ -16,14 +15,9 @@ import {
   AlertCircle,
   FileSpreadsheet,
   Calendar,
-  Sparkles,
-  TrendingUp,
-  Coins,
   CalendarCheck,
-  ShieldAlert,
   Key,
   FileText,
-  Clock,
   UserCheck,
   Power,
   Lock,
@@ -33,7 +27,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { AVAILABLE_PERMISSIONS } from '../services/storage';
-import { DailyClinicScheduleItem, SystemPermission, UserRole, Doctor, StaffAccount } from '../types';
+import { DailyClinicScheduleItem, SystemPermission, UserRole, StaffAccount } from '../types';
 import { DailyScheduleExportModal } from '../components/DailyScheduleExportModal';
 
 export const AdminView: React.FC = () => {

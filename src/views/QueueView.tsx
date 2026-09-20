@@ -2,16 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Tv, 
-  Volume2, 
   Clock, 
   ArrowRight, 
   Maximize2, 
   Minimize2, 
-  Hospital, 
-  Users, 
-  Sparkles,
-  CheckCircle2,
-  Calendar
+  Hospital
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
@@ -19,7 +14,6 @@ export const QueueView: React.FC = () => {
   const { clinics, bookings, doctors, navigate } = useApp();
   const [currentTime, setCurrentTime] = useState(new Date());
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
 
   // تحديث الساعة الرقمية لحظياً
   useEffect(() => {

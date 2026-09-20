@@ -9,19 +9,12 @@ import {
   MapPin, 
   PhoneCall, 
   CheckCircle, 
-  Activity,
-  HeartPulse,
-  Baby,
-  Eye,
-  Bone,
-  Smile,
-  Ear,
-  Search
+  Activity
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const LandingView: React.FC = () => {
-  const { navigate, clinics, doctors, bookings, setPatientHistoryModalOpen, supportInfoText } = useApp();
+  const { navigate, clinics, doctors, bookings, supportInfoText } = useApp();
 
   const todayStr = new Date().toISOString().split('T')[0];
   const todayBookingsCount = bookings.filter(b => b.date === todayStr && b.status !== 'cancelled').length;
@@ -128,17 +121,6 @@ export const LandingView: React.FC = () => {
             </div>
 
           </motion.div>
-
-          {/* خيار سريع للمريض: استعلام عن تذكرة سابقة برقم الهاتف */}
-          <div className="pt-2">
-            <button
-              onClick={() => setPatientHistoryModalOpen(true)}
-              className="inline-flex items-center gap-2 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-300 transition-colors"
-            >
-              <Search className="w-4 h-4 text-emerald-600" />
-              <span>هل حجزت بالفعل؟ ابحث عن تذكرتك السابقة برقم هاتفك</span>
-            </button>
-          </div>
 
         </div>
       </section>
