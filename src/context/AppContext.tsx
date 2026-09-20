@@ -249,55 +249,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const login = async (username: string, pass: string): Promise<{ success: boolean; error?: string }> => {
     const cleanUser = sanitizeText(username).toLowerCase().trim();
-    
+
     if (!cleanUser || !pass) {
       const err = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
       addToast({ type: 'error', title: 'بيانات ناقصة', message: err });
       return { success: false, error: err };
     }
 
-    // 1. فحص حماية القوة العمياء والحد الأقصى للمحاولات (Brute Force Protection)
-    const rateCheck = checkLoginRateLimit(cleanUser);
-    if (!rateCheck.allowed) {
-      const minutes = Math.ceil((rateCheck.remainingSeconds || 60) / 60);
-      const lockMsg = `تم حظر المحاولات مؤقتاً لهذا الحساب لحمايته من التخمين المتكرر. يرجى الانتظار ${minutes} دقيقة والمحاولة لاحقاً.`;
-      addToast({
-        type: 'error',
-        title: 'الحساب مغلق مؤقتاً',
-        message: lockMsg
+    try {
+      // Supabase Auth is the single source of truth for credentials and sessions.
+      const email = `${cleanUser}@accounts.sharaya-clinics.internal`;
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password: pass,
       });
-      return { success: false, error: lockMsg };
-    }
 
-    let authSuccess = false;
-    let matchedUser: UserSession | null = null;
-
-    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification)
-    const matchedAccount = staffAccounts.find(
-      acc => acc.username.toLowerCase() === cleanUser
-    );
-
-    if (matchedAccount) {
-      const storedHashes = getStoredStaffPasswordHashes();
-      const providedHash = await hashPassword(pass);
-      const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
-
-      if (expectedHash && providedHash === expectedHash) {
-        authSuccess = true;
-        matchedUser = {
-          id: matchedAccount.id,
-          username: matchedAccount.username,
-          displayName: matchedAccount.displayName,
-          role: matchedAccount.role,
-          doctorId: matchedAccount.doctorId,
-          clinicId: matchedAccount.clinicId,
-        };
+      if (authError || !authData.user) {
+        const message = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+        addToast({ type: 'error', title: 'فشل تسجيل الدخول', message });
+        return { success: false, error: message };
       }
-    }
 
-    // فحص نجاح تسجيل الدخول
-    if (authSuccess && matchedUser) {
-      resetLoginAttempts(cleanUser);
+      const { data: account, error: accountError } = await supabase
+        .from('staff_accounts')
+        .select('id, username, display_name, role, doctor_id, clinic_id, recovery_email')
+        .eq('auth_user_id', authData.user.id)
+        .single();
+
+      if (accountError || !account) {
+        await supabase.auth.signOut();
+        const message = 'تم التحقق من الحساب لكن لم يتم العثور على بيانات الموظف.';
+        addToast({ type: 'error', title: 'تعذر تحميل الحساب', message });
+        return { success: false, error: message };
+      }
+
+      const matchedUser: UserSession = {
+        id: account.id,
+        username: account.username,
+        displayName: account.display_name,
+        role: account.role,
+        doctorId: account.doctor_id || undefined,
+        clinicId: account.clinic_id || undefined,
+      };
+
       setCurrentUser(matchedUser);
       saveSession(matchedUser);
       addToast({
@@ -306,44 +300,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: `مرحباً بك مجدداً ${matchedUser.displayName}`
       });
 
-      // التوجيه التلقائي المباشر حسب الصلاحية الموحدة
       switch (matchedUser.role) {
-        case 'admin':
-          setActiveView('admin');
-          break;
-        case 'doctor':
-          setActiveView('doctor');
-          break;
-        case 'reception':
-          setActiveView('reception');
-          break;
-        case 'cashier':
-          setActiveView('cashier');
-          break;
-        default:
-          setActiveView('landing');
-      }
-      return { success: true };
-    } else {
-      // تسجيل المحاولة الفاشلة وتطبيق الحظر العام المشترك (Generic Error Message)
-      const record = recordFailedLogin(cleanUser);
-      let genericError = 'اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات.';
-      
-      if (record.locked) {
-        genericError = `تم قفل الحساب مؤقتاً لمدة ${record.lockUntilMinutes} دقيقة بسبب تجاوز الحد المسموح من المحاولات الخاطئة (5 محاولات).`;
-      } else {
-        const remaining = 5 - (record.attempts % 5);
-        if (remaining <= 2) {
-          genericError += ` (تنبيه أمان: متبقي ${remaining} محاولة قبل إغلاق الحساب مؤقتاً)`;
-        }
+        case 'admin': setActiveView('admin'); break;
+        case 'doctor': setActiveView('doctor'); break;
+        case 'reception': setActiveView('reception'); break;
+        case 'cashier': setActiveView('cashier'); break;
+        default: setActiveView('landing');
       }
 
-      addToast({
-        type: 'error',
-        title: 'فشل تسجيل الدخول',
-        message: genericError
-      });
-      return { success: false, error: genericError };
+      return { success: true };
+    } catch (error) {
+      console.error('Supabase login error:', error);
+      const message = 'تعذر الاتصال بخدمة تسجيل الدخول. تأكد من إعداد Supabase ثم حاول مرة أخرى.';
+      addToast({ type: 'error', title: 'خطأ في الاتصال', message });
+      return { success: false, error: message };
     }
   };
 
@@ -399,6 +369,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
+    void supabase.auth.signOut();
     setCurrentUser(null);
     saveSession(null);
     setActiveView('landing');
