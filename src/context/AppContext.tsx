@@ -53,6 +53,24 @@ import {
   ClinicAvailabilityResult,
   parseDoctorShiftTimes
 } from '../services/scheduleService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
+import { 
+  fetchClinicsFromDb, 
+  fetchDoctorsFromDb, 
+  fetchBookingsFromDb, 
+  fetchDailyScheduleFromDb, 
+  fetchStaffAccountsFromDb, 
+  createPublicBookingRpc, 
+  confirmPaymentRpc, 
+  markPatientLateAndCallNextRpc, 
+  updateBookingStatusInDb, 
+  updateDoctorStatusInDb, 
+  saveDailyScheduleToDb, 
+  deleteStaffAccountRpc, 
+  loginWithSupabaseAuth, 
+  logoutFromSupabase, 
+  subscribeToBookingsRealtime 
+} from '../services/supabaseService';
 
 interface AppContextType {
   theme: 'light' | 'dark';
@@ -153,6 +171,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveTheme(theme);
   }, [theme]);
 
+  // مزامنة البيانات مع Supabase عند بدء التشغيل وتفعيل التحديث اللحظي Realtime
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+
+    let isMounted = true;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    async function loadSupabaseData() {
+      try {
+        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff] = await Promise.all([
+          fetchClinicsFromDb(),
+          fetchDoctorsFromDb(),
+          fetchBookingsFromDb(),
+          fetchDailyScheduleFromDb(todayStr),
+          fetchStaffAccountsFromDb()
+        ]);
+
+        if (!isMounted) return;
+
+        if (dbClinics && dbClinics.length > 0) {
+          setClinics(dbClinics);
+          saveClinics(dbClinics);
+        }
+        if (dbDoctors && dbDoctors.length > 0) {
+          setDoctors(dbDoctors);
+          saveDoctors(dbDoctors);
+        }
+        if (dbBookings) {
+          setBookings(dbBookings);
+          saveBookings(dbBookings);
+        }
+        if (dbSchedule && dbSchedule.items.length > 0) {
+          setDailySchedule(dbSchedule);
+          saveDailySchedule(dbSchedule);
+        }
+        if (dbStaff && dbStaff.length > 0) {
+          setStaffAccounts(dbStaff);
+          saveStaffAccounts(dbStaff);
+        }
+      } catch (err) {
+        console.warn('Supabase initial sync error, using local state:', err);
+      }
+    }
+
+    loadSupabaseData();
+
+    // تفعيل التحديث اللحظي عبر Supabase Realtime لجدول bookings
+    const unsubscribe = subscribeToBookingsRealtime(async () => {
+      const freshBookings = await fetchBookingsFromDb();
+      if (freshBookings && isMounted) {
+        setBookings(freshBookings);
+        saveBookings(freshBookings);
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
+
   const toggleTheme = () => {
     setTheme(prev => {
       const nextTheme = prev === 'light' ? 'dark' : 'light';
@@ -249,49 +328,96 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const login = async (username: string, pass: string): Promise<{ success: boolean; error?: string }> => {
     const cleanUser = sanitizeText(username).toLowerCase().trim();
-
+    
     if (!cleanUser || !pass) {
       const err = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
       addToast({ type: 'error', title: 'بيانات ناقصة', message: err });
       return { success: false, error: err };
     }
 
-    try {
-      // Supabase Auth is the single source of truth for credentials and sessions.
-      const email = `${cleanUser}@accounts.sharaya-clinics.internal`;
-      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-        email,
-        password: pass,
+    // 1. فحص حماية القوة العمياء والحد الأقصى للمحاولات (Brute Force Protection)
+    const rateCheck = checkLoginRateLimit(cleanUser);
+    if (!rateCheck.allowed) {
+      const minutes = Math.ceil((rateCheck.remainingSeconds || 60) / 60);
+      const lockMsg = `تم حظر المحاولات مؤقتاً لهذا الحساب لحمايته من التخمين المتكرر. يرجى الانتظار ${minutes} دقيقة والمحاولة لاحقاً.`;
+      addToast({
+        type: 'error',
+        title: 'الحساب مغلق مؤقتاً',
+        message: lockMsg
       });
+      return { success: false, error: lockMsg };
+    }
 
-      if (authError || !authData.user) {
-        const message = 'اسم المستخدم أو كلمة المرور غير صحيحة.';
-        addToast({ type: 'error', title: 'فشل تسجيل الدخول', message });
-        return { success: false, error: message };
+    // التحقق المباشر عبر Supabase Auth عند توفر الإعدادات
+    if (isSupabaseConfigured) {
+      const authRes = await loginWithSupabaseAuth(cleanUser, pass);
+      if (authRes.success && authRes.session) {
+        resetLoginAttempts(cleanUser);
+        setCurrentUser(authRes.session);
+        saveSession(authRes.session);
+        addToast({
+          type: 'success',
+          title: 'تم تسجيل الدخول بنجاح',
+          message: `مرحباً بك مجدداً ${authRes.session.displayName}`
+        });
+
+        switch (authRes.session.role) {
+          case 'admin':
+            setActiveView('admin');
+            break;
+          case 'doctor':
+            setActiveView('doctor');
+            break;
+          case 'reception':
+            setActiveView('reception');
+            break;
+          case 'cashier':
+            setActiveView('cashier');
+            break;
+          default:
+            setActiveView('landing');
+        }
+        return { success: true };
+      } else {
+        const errMsg = authRes.error || 'اسم المستخدم أو كلمة المرور غير صحيحة.';
+        addToast({
+          type: 'error',
+          title: 'فشل تسجيل الدخول',
+          message: errMsg
+        });
+        return { success: false, error: errMsg };
       }
+    }
 
-      const { data: account, error: accountError } = await supabase
-        .from('staff_accounts')
-        .select('id, username, display_name, role, doctor_id, clinic_id, recovery_email')
-        .eq('auth_user_id', authData.user.id)
-        .single();
+    let authSuccess = false;
+    let matchedUser: UserSession | null = null;
 
-      if (accountError || !account) {
-        await supabase.auth.signOut();
-        const message = 'تم التحقق من الحساب لكن لم يتم العثور على بيانات الموظف.';
-        addToast({ type: 'error', title: 'تعذر تحميل الحساب', message });
-        return { success: false, error: message };
+    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification)
+    const matchedAccount = staffAccounts.find(
+      acc => acc.username.toLowerCase() === cleanUser
+    );
+
+    if (matchedAccount) {
+      const storedHashes = getStoredStaffPasswordHashes();
+      const providedHash = await hashPassword(pass);
+      const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
+
+      if (expectedHash && providedHash === expectedHash) {
+        authSuccess = true;
+        matchedUser = {
+          id: matchedAccount.id,
+          username: matchedAccount.username,
+          displayName: matchedAccount.displayName,
+          role: matchedAccount.role,
+          doctorId: matchedAccount.doctorId,
+          clinicId: matchedAccount.clinicId,
+        };
       }
+    }
 
-      const matchedUser: UserSession = {
-        id: account.id,
-        username: account.username,
-        displayName: account.display_name,
-        role: account.role,
-        doctorId: account.doctor_id || undefined,
-        clinicId: account.clinic_id || undefined,
-      };
-
+    // فحص نجاح تسجيل الدخول
+    if (authSuccess && matchedUser) {
+      resetLoginAttempts(cleanUser);
       setCurrentUser(matchedUser);
       saveSession(matchedUser);
       addToast({
@@ -300,24 +426,56 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: `مرحباً بك مجدداً ${matchedUser.displayName}`
       });
 
+      // التوجيه التلقائي المباشر حسب الصلاحية الموحدة
       switch (matchedUser.role) {
-        case 'admin': setActiveView('admin'); break;
-        case 'doctor': setActiveView('doctor'); break;
-        case 'reception': setActiveView('reception'); break;
-        case 'cashier': setActiveView('cashier'); break;
-        default: setActiveView('landing');
+        case 'admin':
+          setActiveView('admin');
+          break;
+        case 'doctor':
+          setActiveView('doctor');
+          break;
+        case 'reception':
+          setActiveView('reception');
+          break;
+        case 'cashier':
+          setActiveView('cashier');
+          break;
+        default:
+          setActiveView('landing');
+      }
+      return { success: true };
+    } else {
+      // تسجيل المحاولة الفاشلة وتطبيق الحظر العام المشترك (Generic Error Message)
+      const record = recordFailedLogin(cleanUser);
+      let genericError = 'اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات.';
+      
+      if (record.locked) {
+        genericError = `تم قفل الحساب مؤقتاً لمدة ${record.lockUntilMinutes} دقيقة بسبب تجاوز الحد المسموح من المحاولات الخاطئة (5 محاولات).`;
+      } else {
+        const remaining = 5 - (record.attempts % 5);
+        if (remaining <= 2) {
+          genericError += ` (تنبيه أمان: متبقي ${remaining} محاولة قبل إغلاق الحساب مؤقتاً)`;
+        }
       }
 
-      return { success: true };
-    } catch (error) {
-      console.error('Supabase login error:', error);
-      const message = 'تعذر الاتصال بخدمة تسجيل الدخول. تأكد من إعداد Supabase ثم حاول مرة أخرى.';
-      addToast({ type: 'error', title: 'خطأ في الاتصال', message });
-      return { success: false, error: message };
+      addToast({
+        type: 'error',
+        title: 'فشل تسجيل الدخول',
+        message: genericError
+      });
+      return { success: false, error: genericError };
     }
   };
 
   const deleteStaffAccount = (id: string): boolean => {
+    if (isSupabaseConfigured) {
+      deleteStaffAccountRpc(id).then(res => {
+        if (!res.success) {
+          console.warn('Supabase delete staff account error:', res.error);
+        }
+      });
+    }
+
     const res = deleteStaffAccountById(id);
     if (!res.success) {
       addToast({
@@ -369,7 +527,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
-    void supabase.auth.signOut();
+    logoutFromSupabase();
     setCurrentUser(null);
     saveSession(null);
     setActiveView('landing');
@@ -429,7 +587,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    // حساب رقم الدور التالي في نفس العيادة ونفس اليوم
+    // إذا كان اتصال Supabase مفعلاً، يتم الحجز واستخراج التذكرة بشكل ذري عبر دالة RPC المعتمدة
+    if (isSupabaseConfigured) {
+      const rpcRes = await createPublicBookingRpc({
+        clinicId: data.clinicId,
+        doctorId: data.doctorId,
+        patientName: cleanName,
+        patientPhone: cleanPhone,
+        timeSlot: data.timeSlot,
+        notes: cleanNotes
+      });
+
+      if (rpcRes.success && rpcRes.data) {
+        const newBooking = rpcRes.data;
+        const updated = [newBooking, ...bookings.filter(b => b.id !== newBooking.id)];
+        setBookings(updated);
+        saveBookings(updated);
+        setSelectedTicket(newBooking);
+
+        addToast({
+          type: 'success',
+          title: 'تم إصدار التذكرة بنجاح',
+          message: `رقم تذكرتك: ${newBooking.ticketNumber} - دورك رقم ${newBooking.queuePosition}`
+        });
+
+        return { success: true, booking: newBooking };
+      } else {
+        const errorMsg = rpcRes.error || 'حدث خطأ أثناء حجز التذكرة.';
+        addToast({
+          type: 'error',
+          title: 'تعذر الحجز',
+          message: errorMsg
+        });
+        return { success: false, error: errorMsg };
+      }
+    }
+
+    // حساب رقم الدور التالي في نفس العيادة ونفس اليوم (المسار المحلي الاحتياطي)
     const sameClinicTodayBookings = bookings.filter(
       b => b.clinicId === data.clinicId && b.date === data.date && b.status !== 'cancelled'
     );
@@ -475,6 +669,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateBookingStatus = (bookingId: string, status: BookingStatus) => {
     const now = new Date().toISOString();
 
+    if (isSupabaseConfigured) {
+      updateBookingStatusInDb(bookingId, {
+        status,
+        calledAt: status === 'in-progress' ? now : undefined,
+        completedAt: status === 'completed' ? now : undefined
+      });
+    }
+
     const updated = bookings.map(b => {
       if (b.id === bookingId) {
         return {
@@ -495,6 +697,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updatePaymentStatus = (bookingId: string, paymentStatus: PaymentStatus, method: PaymentMethod = 'cash') => {
+    if (isSupabaseConfigured) {
+      confirmPaymentRpc(bookingId, method).then(res => {
+        if (!res.success) {
+          console.warn('Supabase confirmPayment error:', res.error);
+        }
+      });
+    }
+
     const updated = bookings.map(b => {
       if (b.id === bookingId) {
         return {
@@ -521,6 +731,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateDoctorStatus = (doctorId: string, status: DoctorStatus, reason?: string) => {
+    if (isSupabaseConfigured) {
+      updateDoctorStatusInDb(doctorId, status, reason);
+    }
+
     const updated = doctors.map(d => {
       if (d.id === doctorId) {
         return {
@@ -602,6 +816,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const now = new Date().toISOString();
     let skippedCount = 0;
 
+    if (isSupabaseConfigured) {
+      updateBookingStatusInDb(targetBookingId, {
+        status: 'in-progress',
+        calledAt: now
+      });
+    }
+
     // الحصول على جميع المرضى في انتظار نفس العيادة اليوم
     const updated = bookings.map(b => {
       // المريض المستدعى للدخول الآن
@@ -624,6 +845,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (isSameClinicAndDate && isWaiting && isEarlier) {
         skippedCount++;
+        if (isSupabaseConfigured) {
+          updateBookingStatusInDb(b.id, { status: 'late' });
+        }
         return {
           ...b,
           status: 'late' as BookingStatus
@@ -652,6 +876,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const markPatientLate = (bookingId: string) => {
+    if (isSupabaseConfigured) {
+      updateBookingStatusInDb(bookingId, { status: 'late' });
+    }
+
     const updated = bookings.map(b => (b.id === bookingId ? { ...b, status: 'late' as BookingStatus } : b));
     setBookings(updated);
     saveBookings(updated);
@@ -667,6 +895,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!target) return;
 
     const now = new Date().toISOString();
+    if (isSupabaseConfigured) {
+      updateBookingStatusInDb(bookingId, {
+        status: action === 'admit_now' ? 'in-progress' : 'waiting',
+        calledAt: action === 'admit_now' ? now : undefined
+      });
+    }
+
     const updated = bookings.map(b => {
       if (b.id === bookingId) {
         if (action === 'admit_now') {
@@ -706,9 +941,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const addDoctorDiagnosis = (bookingId: string, diagnosis: string) => {
     const cleanDiagnosis = sanitizeText(diagnosis);
+    const now = new Date().toISOString();
+
+    if (isSupabaseConfigured) {
+      updateBookingStatusInDb(bookingId, {
+        doctorDiagnosis: cleanDiagnosis,
+        status: 'completed',
+        completedAt: now
+      });
+    }
+
     const updated = bookings.map(b => {
       if (b.id === bookingId) {
-        return { ...b, doctorDiagnosis: cleanDiagnosis };
+        return { 
+          ...b, 
+          doctorDiagnosis: cleanDiagnosis,
+          status: 'completed' as BookingStatus,
+          completedAt: now
+        };
       }
       return b;
     });
@@ -778,6 +1028,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       date: todayStr,
       items: sanitized
     };
+
+    if (isSupabaseConfigured) {
+      saveDailyScheduleToDb(newSchedule);
+    }
+
     setDailySchedule(newSchedule);
     saveDailySchedule(newSchedule);
     addToast({
