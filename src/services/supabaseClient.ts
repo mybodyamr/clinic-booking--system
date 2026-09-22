@@ -1,7 +1,16 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const rawUrl = (import.meta.env.VITE_SUPABASE_URL || '').trim();
-const rawKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
+const rawUrl = (
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) ||
+  process.env.VITE_SUPABASE_URL ||
+  ''
+).trim();
+
+const rawKey = (
+  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) ||
+  process.env.VITE_SUPABASE_ANON_KEY ||
+  ''
+).trim();
 
 // التحقق من أن الرابط ليس الرابط المحذوف القديم أو مجرد قالب وهمي
 const isDefunctOrPlaceholder = 

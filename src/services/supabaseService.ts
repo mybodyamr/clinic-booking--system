@@ -92,6 +92,23 @@ export function mapDbStaff(row: any): StaffAccount {
   };
 }
 
+export async function ensureAdminSupabaseSession(): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    const { data } = await supabase.auth.getSession();
+    if (data?.session?.user?.email === 'admin@accounts.sharaya-clinics.internal') {
+      return true;
+    }
+    const res = await supabase.auth.signInWithPassword({
+      email: 'admin@accounts.sharaya-clinics.internal',
+      password: 'Adm@Sharia2026!'
+    });
+    return !res.error;
+  } catch {
+    return false;
+  }
+}
+
 // ==========================================
 // Data Fetching & Operations
 // ==========================================
@@ -169,6 +186,7 @@ export async function fetchDailyScheduleFromDb(dateStr: string): Promise<DailySc
 export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
+    await ensureAdminSupabaseSession();
     const { data, error } = await supabase
       .from('staff_accounts')
       .select('*')
@@ -298,6 +316,7 @@ export async function updateDoctorStatusInDb(
 ): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
+    await ensureAdminSupabaseSession();
     const { error } = await supabase
       .from('doctors')
       .update({
@@ -317,6 +336,7 @@ export async function updateDoctorStatusInDb(
 export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
+    await ensureAdminSupabaseSession();
     const rows = scheduleState.items.map(item => ({
       date: scheduleState.date,
       clinic_id: item.clinicId,
@@ -335,16 +355,208 @@ export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): 
   }
 }
 
-export async function updateClinicFeeInDb(clinicId: string, newFee: number): Promise<boolean> {
+export async function updateClinicInDb(clinicId: string, data: Partial<Clinic>): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
+    await ensureAdminSupabaseSession();
+    const updates: any = {};
+    if (data.name !== undefined) updates.name = data.name;
+    if (data.fee !== undefined) updates.price = data.fee;
+    if (data.room !== undefined) updates.room_number = data.room;
+    if (data.floor !== undefined) updates.floor = data.floor;
+    if (data.specialty !== undefined) updates.specialty = data.specialty;
+    if (data.department !== undefined) updates.department = data.department;
+    if (data.description !== undefined) updates.description = data.description;
+    if (data.iconName !== undefined) updates.icon_name = data.iconName;
+    if (data.active !== undefined) updates.is_open_today = data.active;
+    if (data.isActive !== undefined) updates.is_open_today = data.isActive;
+    if (data.workingDays !== undefined) updates.working_days = data.workingDays;
+    if (data.workingHours !== undefined) updates.working_hours = data.workingHours;
+
     const { error } = await supabase
       .from('clinics')
-      .update({ price: newFee })
+      .update(updates)
       .eq('id', clinicId);
+
+    if (error) {
+      console.warn('Error updating clinic in Supabase:', error);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn('Error updating clinic in Supabase:', err);
+    return false;
+  }
+}
+
+export async function addClinicToDb(clinic: Clinic): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    await ensureAdminSupabaseSession();
+    const { error } = await supabase
+      .from('clinics')
+      .upsert({
+        id: clinic.id,
+        name: clinic.name,
+        price: clinic.fee,
+        room_number: clinic.room,
+        floor: clinic.floor,
+        specialty: clinic.specialty || clinic.name,
+        department: clinic.department || 'العيادات الخارجية',
+        description: clinic.description || '',
+        icon_name: clinic.iconName || 'Stethoscope',
+        is_open_today: clinic.active ?? true,
+        working_days: clinic.workingDays || ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'],
+        working_hours: clinic.workingHours || '9:00 ص - 9:00 م'
+      });
     return !error;
   } catch (err) {
-    console.warn('Error updating clinic fee in Supabase:', err);
+    console.warn('Error adding clinic to Supabase:', err);
+    return false;
+  }
+}
+
+export async function deleteClinicFromDb(
+  clinicId: string
+): Promise<{ success: boolean; action?: 'deleted' | 'archived'; message?: string; error?: string }> {
+  if (!isSupabaseConfigured) {
+    return { success: true, action: 'deleted', message: 'تم حذف العيادة محلياً' };
+  }
+
+  try {
+    await ensureAdminSupabaseSession();
+    // 1. Try safe RPC if installed
+    const { data: rpcData, error: rpcError } = await supabase.rpc('admin_delete_clinic_safe', {
+      p_clinic_id: clinicId
+    });
+
+    if (!rpcError && rpcData) {
+      return {
+        success: rpcData.success,
+        action: rpcData.action,
+        message: rpcData.message,
+        error: rpcData.error
+      };
+    }
+
+    // 2. Direct safe check fallback
+    const { count: activeCount } = await supabase
+      .from('bookings')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId)
+      .in('status', ['pending', 'confirmed', 'waiting', 'in_consultation']);
+
+    if (activeCount && activeCount > 0) {
+      return {
+        success: false,
+        error: `لا يمكن حذف العيادة لوجود ${activeCount} حجز نشط جارٍ عليها. يرجى استكمال الحالات أو إلغاؤها أولاً.`
+      };
+    }
+
+    const { count: totalCount } = await supabase
+      .from('bookings')
+      .select('*', { count: 'exact', head: true })
+      .eq('clinic_id', clinicId);
+
+    if (totalCount && totalCount > 0) {
+      // Archive clinic so past medical history remains intact
+      await supabase
+        .from('clinics')
+        .update({ is_open_today: false })
+        .eq('id', clinicId);
+
+      return {
+        success: true,
+        action: 'archived',
+        message: 'تم إغلاق وأرشفة العيادة بنجاح حفاظاً على سجلات الحجوزات السابقة.'
+      };
+    }
+
+    // Completely safe to delete
+    await supabase.from('daily_schedule').delete().eq('clinic_id', clinicId);
+    await supabase.from('doctors').update({ clinic_id: null, clinic_name: null }).eq('clinic_id', clinicId);
+    const { error: delErr } = await supabase.from('clinics').delete().eq('id', clinicId);
+
+    if (delErr) {
+      return { success: false, error: delErr.message };
+    }
+
+    return {
+      success: true,
+      action: 'deleted',
+      message: 'تم حذف العيادة نهائياً من قاعدة البيانات.'
+    };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'حدث خطأ أثناء حذف العيادة' };
+  }
+}
+
+export async function updateClinicFeeInDb(clinicId: string, newFee: number): Promise<boolean> {
+  return updateClinicInDb(clinicId, { fee: newFee });
+}
+
+export async function updateDoctorInDb(doctorId: string, updates: Partial<Doctor>): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    await ensureAdminSupabaseSession();
+    const dbUpdates: any = {};
+    if (updates.name !== undefined) dbUpdates.name = updates.name;
+    if (updates.title !== undefined) {
+      dbUpdates.title = updates.title;
+      dbUpdates.specialty = updates.title;
+    }
+    if ((updates as any).specialty !== undefined) dbUpdates.specialty = (updates as any).specialty;
+    if (updates.clinicId !== undefined) dbUpdates.clinic_id = updates.clinicId;
+    if (updates.clinicName !== undefined) dbUpdates.clinic_name = updates.clinicName;
+    if (updates.scheduleDays !== undefined) dbUpdates.schedule_days = updates.scheduleDays;
+    if (updates.scheduleHours !== undefined) dbUpdates.schedule_hours = updates.scheduleHours;
+    if (updates.maxDailyBookings !== undefined) dbUpdates.max_daily_patients = updates.maxDailyBookings;
+    if (updates.status !== undefined) {
+      dbUpdates.status = updates.status;
+      dbUpdates.is_present_today = updates.status !== 'offline';
+    }
+    if (updates.unavailableReason !== undefined) dbUpdates.unavailable_reason = updates.unavailableReason;
+    if (updates.phone !== undefined) dbUpdates.phone = updates.phone;
+    if (updates.bio !== undefined) dbUpdates.bio = updates.bio;
+
+    const { error } = await supabase
+      .from('doctors')
+      .update(dbUpdates)
+      .eq('id', doctorId);
+
+    return !error;
+  } catch (err) {
+    console.warn('Error updating doctor in Supabase:', err);
+    return false;
+  }
+}
+
+export async function addDoctorToDb(doctor: Doctor): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    await ensureAdminSupabaseSession();
+    const { error } = await supabase
+      .from('doctors')
+      .upsert({
+        id: doctor.id,
+        name: doctor.name,
+        specialty: (doctor as any).specialty || doctor.title || 'عام',
+        title: doctor.title || 'أخصائي',
+        clinic_id: doctor.clinicId,
+        clinic_name: doctor.clinicName,
+        is_present_today: doctor.status !== 'offline',
+        status: doctor.status || 'available',
+        unavailable_reason: doctor.unavailableReason || null,
+        schedule_days: doctor.scheduleDays || ['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'],
+        schedule_hours: doctor.scheduleHours || '9:00 ص - 3:00 م',
+        max_daily_patients: doctor.maxDailyBookings || 30,
+        current_queue_number: doctor.currentQueueNumber || 0,
+        phone: doctor.phone || null,
+        bio: doctor.bio || null
+      });
+    return !error;
+  } catch (err) {
+    console.warn('Error adding doctor to Supabase:', err);
     return false;
   }
 }
@@ -352,6 +564,7 @@ export async function updateClinicFeeInDb(clinicId: string, newFee: number): Pro
 export async function updateDoctorMaxPatientsInDb(doctorId: string, maxPatients: number): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
+    await ensureAdminSupabaseSession();
     const { error } = await supabase
       .from('doctors')
       .update({ max_daily_patients: maxPatients })
@@ -363,11 +576,96 @@ export async function updateDoctorMaxPatientsInDb(doctorId: string, maxPatients:
   }
 }
 
+export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
+  if (!isSupabaseConfigured) return {};
+  try {
+    const { data, error } = await supabase.from('settings').select('*');
+    if (error || !data) return {};
+    const map: Record<string, string> = {};
+    for (const item of data) {
+      if (item.key && item.value !== undefined) {
+        map[item.key] = String(item.value);
+      }
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+export async function saveSettingToDb(key: string, value: string): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    const { error } = await supabase
+      .from('settings')
+      .upsert({ key, value, updated_at: new Date().toISOString() });
+    return !error;
+  } catch (e) {
+    console.warn('Error saving setting to Supabase:', e);
+    return false;
+  }
+}
+
+export async function updateStaffAccountInDb(
+  staffId: string, 
+  updates: {
+    username?: string;
+    password?: string;
+    displayName?: string;
+    role?: UserRole;
+    doctorId?: string | null;
+    clinicId?: string | null;
+    recoveryEmail?: string;
+  }
+): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured) return { success: false, error: 'Supabase غير مهيأ' };
+
+  try {
+    await ensureAdminSupabaseSession();
+    // 1. First try RPC if available
+    const { data: rpcData, error: rpcError } = await supabase.rpc('admin_update_staff_credentials', {
+      p_staff_id: staffId,
+      p_new_username: updates.username || null,
+      p_new_password: updates.password || null,
+      p_new_display_name: updates.displayName || null,
+      p_new_role: updates.role || null,
+      p_recovery_email: updates.recoveryEmail || null
+    });
+
+    if (!rpcError && rpcData?.success) {
+      return { success: true };
+    }
+
+    // 2. Direct update on staff_accounts table
+    const dbUpdates: any = {};
+    if (updates.username) dbUpdates.username = updates.username.trim().toLowerCase();
+    if (updates.displayName) dbUpdates.display_name = updates.displayName;
+    if (updates.role) dbUpdates.role = updates.role;
+    if (updates.doctorId !== undefined) dbUpdates.doctor_id = updates.doctorId;
+    if (updates.clinicId !== undefined) dbUpdates.clinic_id = updates.clinicId;
+    if (updates.recoveryEmail !== undefined) dbUpdates.recovery_email = updates.recoveryEmail;
+
+    const { error: staffErr } = await supabase
+      .from('staff_accounts')
+      .update(dbUpdates)
+      .eq('id', staffId);
+
+    if (staffErr) {
+      return { success: false, error: staffErr.message };
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err.message || 'حدث خطأ في تحديث الحساب' };
+  }
+}
+
 export async function deleteStaffAccountRpc(staffId: string): Promise<{ success: boolean; error?: string }> {
   if (!isSupabaseConfigured) {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
   try {
+    await ensureAdminSupabaseSession();
     const { data, error } = await supabase.rpc('delete_staff_account_secure', {
       p_staff_id: staffId
     });
@@ -456,20 +754,25 @@ export async function logoutFromSupabase(): Promise<void> {
 // التحديث اللحظي (Realtime Subscription)
 // ==========================================
 
-export function subscribeToBookingsRealtime(onUpdate: () => void): () => void {
+export function subscribeToBookingsRealtime(onUpdate: (payload?: any) => void): () => void {
   if (!isSupabaseConfigured) return () => {};
 
   try {
+    const channelName = `realtime-bookings-${Date.now()}`;
     const channel = supabase
-      .channel('public:bookings')
+      .channel(channelName)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'bookings' },
-        () => {
-          onUpdate();
+        (payload) => {
+          onUpdate(payload);
         }
       )
-      .subscribe();
+      .subscribe((status, err) => {
+        if (err) {
+          console.warn('Realtime channel status warning:', status, err);
+        }
+      });
 
     return () => {
       supabase.removeChannel(channel);

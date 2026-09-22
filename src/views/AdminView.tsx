@@ -51,7 +51,9 @@ export const AdminView: React.FC = () => {
     resetPasswordByAdmin,
     staffAccounts,
     deleteStaffAccount,
-    updateStaffRecoveryEmail
+    updateStaffRecoveryEmail,
+    deleteClinic,
+    updateStaffAccount
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports'>('overview');
@@ -62,6 +64,18 @@ export const AdminView: React.FC = () => {
   const [newClinicFee, setNewClinicFee] = useState(30);
   const [newClinicRoom, setNewClinicRoom] = useState('');
   const [newClinicFloor, setNewClinicFloor] = useState('الطابق الأول');
+
+  // حذف العيادة مع التحقق الأمني
+  const [clinicToDelete, setClinicToDelete] = useState<typeof clinics[0] | null>(null);
+  const [isDeletingClinic, setIsDeletingClinic] = useState(false);
+
+  // تعديل وتحديث بيانات الموظفين
+  const [editingStaffForFullUpdate, setEditingStaffForFullUpdate] = useState<StaffAccount | null>(null);
+  const [staffEditUsername, setStaffEditUsername] = useState('');
+  const [staffEditDisplayName, setStaffEditDisplayName] = useState('');
+  const [staffEditEmail, setStaffEditEmail] = useState('');
+  const [staffEditPassword, setStaffEditPassword] = useState('');
+  const [isSavingStaff, setIsSavingStaff] = useState(false);
 
   // تعديل سعر الكشف للعيادة
   const [editingClinicFeeId, setEditingClinicFeeId] = useState<string | null>(null);
@@ -731,6 +745,13 @@ export const AdminView: React.FC = () => {
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
+                        <button
+                          onClick={() => setClinicToDelete(c)}
+                          className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer"
+                          title="حذف العيادة"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1120,6 +1141,21 @@ export const AdminView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => {
+                            setEditingStaffForFullUpdate(acc);
+                            setStaffEditUsername(acc.username);
+                            setStaffEditDisplayName(acc.displayName);
+                            setStaffEditEmail(acc.recoveryEmail || '');
+                            setStaffEditPassword('');
+                          }}
+                          className="px-2 py-1 text-[10px] font-semibold text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          title="تعديل بيانات الحساب واسم المستخدم"
+                        >
+                          <Edit2 className="w-3 h-3" />
+                          <span>تعديل</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
                             setEditingStaffAccount(acc);
                             setNewRecoveryEmail(acc.recoveryEmail || '');
                             setShowEmailModal(true);
@@ -1428,7 +1464,177 @@ export const AdminView: React.FC = () => {
         </div>
       )}
 
-      {/* نافذة تعديل البريد الإلكتروني لاستعادة الحساب */}
+      {/* نافذة تأكيد حذف العيادة مع التحقق الذكي */}
+      {clinicToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
+              <div className="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">تأكيد حذف العيادة</h3>
+                <p className="text-[11px] text-slate-500">عيادة: {clinicToDelete.name}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              <p>
+                هل أنت متأكد من رغبتك في إزالة عيادة <strong className="text-slate-900 dark:text-white">({clinicToDelete.name})</strong>؟
+              </p>
+              <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] space-y-1.5">
+                <div className="flex items-center gap-1.5 font-bold text-slate-700 dark:text-slate-200">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>آلية الأمان وضمان الحجوزات:</span>
+                </div>
+                <p className="text-slate-500 dark:text-slate-400 leading-normal">
+                  يقوم النظام بالتحقق التلقائي؛ إذا لم تكن هناك أي حجوزات سيتم حذفها نهائياً. أما في حال وجود حجوزات تاريخية أو سابقة، سيتم إغلاقها وأرشفتها للحفاظ على سلامة القيود المالية وسجلات المرضى.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingClinic}
+                onClick={async () => {
+                  if (!clinicToDelete) return;
+                  setIsDeletingClinic(true);
+                  await deleteClinic(clinicToDelete.id);
+                  setIsDeletingClinic(false);
+                  setClinicToDelete(null);
+                }}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                {isDeletingClinic ? (
+                  <span>جاري المعالجة...</span>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>تأكيد الحذف</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingClinic}
+                onClick={() => setClinicToDelete(null)}
+                className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تعديل بيانات حساب الموظف بالكامل (الاسم، المستخدم، البريد، الرمز) */}
+      {editingStaffForFullUpdate && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
+              <div className="w-10 h-10 rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 flex items-center justify-center">
+                <Edit2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">تعديل حساب الموظف</h3>
+                <p className="text-[11px] text-slate-500">تحديث بيانات الدخول والبريد الرسمي والمصادقة</p>
+              </div>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                if (!editingStaffForFullUpdate) return;
+                setIsSavingStaff(true);
+                const ok = await updateStaffAccount(editingStaffForFullUpdate.id, {
+                  username: staffEditUsername,
+                  displayName: staffEditDisplayName,
+                  recoveryEmail: staffEditEmail,
+                  password: staffEditPassword || undefined
+                });
+                setIsSavingStaff(false);
+                if (ok) {
+                  setEditingStaffForFullUpdate(null);
+                }
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  اسم الموظف الظاهر:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={staffEditDisplayName}
+                  onChange={(e) => setStaffEditDisplayName(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  اسم المستخدم (تسجيل الدخول):
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={staffEditUsername}
+                  onChange={(e) => setStaffEditUsername(e.target.value)}
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  بريد استعادة الحساب:
+                </label>
+                <input
+                  type="email"
+                  value={staffEditEmail}
+                  onChange={(e) => setStaffEditEmail(e.target.value)}
+                  placeholder="employee@sharia-clinics.eg"
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  كلمة المرور الجديدة (اتركها فارغة إذا لم ترد التغيير):
+                </label>
+                <input
+                  type="password"
+                  value={staffEditPassword}
+                  onChange={(e) => setStaffEditPassword(e.target.value)}
+                  placeholder="اتركها فارغة للاحتفاظ بكلمة المرور الحالية"
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingStaff}
+                  className="flex-1 py-2.5 bg-purple-700 hover:bg-purple-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer"
+                >
+                  {isSavingStaff ? 'جاري حفظ التعديلات...' : 'حفظ التعديلات'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingStaffForFullUpdate(null)}
+                  className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
       {showEmailModal && editingStaffAccount && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">

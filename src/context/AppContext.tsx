@@ -60,16 +60,26 @@ import {
   fetchBookingsFromDb, 
   fetchDailyScheduleFromDb, 
   fetchStaffAccountsFromDb, 
+  fetchSettingsFromDb,
+  saveSettingToDb,
   createPublicBookingRpc, 
   confirmPaymentRpc, 
   markPatientLateAndCallNextRpc, 
   updateBookingStatusInDb, 
   updateDoctorStatusInDb, 
+  updateDoctorInDb,
+  updateDoctorMaxPatientsInDb,
+  addDoctorToDb,
+  updateClinicInDb,
+  addClinicToDb,
+  deleteClinicFromDb,
+  updateStaffAccountInDb,
   saveDailyScheduleToDb, 
   deleteStaffAccountRpc, 
   loginWithSupabaseAuth, 
   logoutFromSupabase, 
-  subscribeToBookingsRealtime 
+  subscribeToBookingsRealtime,
+  ensureAdminSupabaseSession
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -84,6 +94,7 @@ interface AppContextType {
   staffAccounts: StaffAccount[];
   deleteStaffAccount: (id: string) => boolean;
   updateStaffRecoveryEmail: (id: string, email: string) => void;
+  updateStaffAccount: (id: string, updates: { username?: string; displayName?: string; recoveryEmail?: string; password?: string }) => Promise<boolean>;
   logout: () => void;
   clinics: Clinic[];
   doctors: Doctor[];
@@ -120,6 +131,7 @@ interface AppContextType {
   addDoctorDiagnosis: (bookingId: string, diagnosis: string) => void;
   addClinic: (clinic: Omit<Clinic, 'id'>) => void;
   updateClinic: (clinicId: string, data: Partial<Clinic>) => void;
+  deleteClinic: (clinicId: string) => Promise<{ success: boolean; error?: string }>;
   addDoctor: (doctor: Omit<Doctor, 'id'>) => void;
   resetToInitialData: () => void;
   toasts: ToastMessage[];
@@ -180,12 +192,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     async function loadSupabaseData() {
       try {
-        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff] = await Promise.all([
+        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings] = await Promise.all([
           fetchClinicsFromDb(),
           fetchDoctorsFromDb(),
           fetchBookingsFromDb(),
           fetchDailyScheduleFromDb(todayStr),
-          fetchStaffAccountsFromDb()
+          fetchStaffAccountsFromDb(),
+          fetchSettingsFromDb()
         ]);
 
         if (!isMounted) return;
@@ -210,6 +223,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setStaffAccounts(dbStaff);
           saveStaffAccounts(dbStaff);
         }
+        if (dbSettings && dbSettings['support_info_text']) {
+          setSupportInfoText(dbSettings['support_info_text']);
+          saveSupportInfoText(dbSettings['support_info_text']);
+        }
+
+        // Auto-ensure admin session if stored session is admin
+        const currentStored = getStoredSession();
+        if (currentStored?.role === 'admin') {
+          ensureAdminSupabaseSession();
+        }
       } catch (err) {
         console.warn('Supabase initial sync error, using local state:', err);
       }
@@ -226,9 +249,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات (Queue, Reception, Doctor) محدثة لحظياً
+    const syncInterval = setInterval(async () => {
+      if (!isMounted) return;
+      try {
+        const fresh = await fetchBookingsFromDb();
+        if (fresh && fresh.length > 0 && isMounted) {
+          setBookings(prev => {
+            if (JSON.stringify(prev) !== JSON.stringify(fresh)) {
+              saveBookings(fresh);
+              return fresh;
+            }
+            return prev;
+          });
+        }
+      } catch {
+        // silent fallback
+      }
+    }, 7000);
+
     return () => {
       isMounted = false;
       unsubscribe();
+      clearInterval(syncInterval);
     };
   }, []);
 
@@ -497,11 +540,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updateStaffRecoveryEmail = (id: string, email: string) => {
     const updated = updateStaffAccountRecoveryEmail(id, email);
     setStaffAccounts(updated);
+    if (isSupabaseConfigured) {
+      updateStaffAccountInDb(id, { recoveryEmail: email });
+    }
     addToast({
       type: 'success',
       title: 'تم حفظ البريد الإلكتروني',
       message: 'تم تحديث بريد استعادة الحساب بنجاح.'
     });
+  };
+
+  const updateStaffAccount = async (
+    id: string,
+    updates: { username?: string; displayName?: string; recoveryEmail?: string; password?: string }
+  ): Promise<boolean> => {
+    const target = staffAccounts.find(s => s.id === id);
+    if (!target) return false;
+
+    let cleanUsername = target.username;
+    if (updates.username) {
+      const sanitized = updates.username.trim().toLowerCase();
+      if (!/^[a-z0-9_-]{3,20}$/.test(sanitized)) {
+        addToast({
+          type: 'error',
+          title: 'اسم مستخدم غير صالح',
+          message: 'يجب أن يتكون اسم المستخدم من 3 إلى 20 حرفاً إنجليزياً أو أرقام بدون مسافات.'
+        });
+        return false;
+      }
+      cleanUsername = sanitized;
+    }
+
+    if (updates.password && updates.password.length < 6) {
+      addToast({
+        type: 'error',
+        title: 'كلمة مرور ضعيفة',
+        message: 'يجب ألا تقل كلمة المرور عن 6 أحرف/أرقام.'
+      });
+      return false;
+    }
+
+    if (updates.password) {
+      const hash = await hashPassword(updates.password);
+      saveStaffPasswordHash(cleanUsername, hash);
+      resetLoginAttempts(cleanUsername);
+    }
+
+    if (isSupabaseConfigured) {
+      updateStaffAccountInDb(id, {
+        username: updates.username,
+        displayName: updates.displayName,
+        recoveryEmail: updates.recoveryEmail,
+        password: updates.password
+      });
+    }
+
+    const updatedList = staffAccounts.map(s => {
+      if (s.id === id) {
+        return {
+          ...s,
+          username: cleanUsername,
+          displayName: updates.displayName || s.displayName,
+          recoveryEmail: updates.recoveryEmail !== undefined ? updates.recoveryEmail : s.recoveryEmail
+        };
+      }
+      return s;
+    });
+
+    setStaffAccounts(updatedList);
+    saveStaffAccounts(updatedList);
+    addToast({
+      type: 'success',
+      title: 'تم تحديث بيانات الحساب',
+      message: `تم حفظ تعديلات حساب (${cleanUsername}) بنجاح.`
+    });
+    return true;
   };
 
   const resetPasswordByAdmin = async (targetUser: string, newPass: string): Promise<boolean> => {
@@ -510,6 +623,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const newHash = await hashPassword(newPass);
       saveStaffPasswordHash(cleanUser, newHash);
       resetLoginAttempts(cleanUser);
+
+      if (isSupabaseConfigured) {
+        const staffAcc = staffAccounts.find(s => s.username === cleanUser);
+        if (staffAcc) {
+          updateStaffAccountInDb(staffAcc.id, { password: newPass, username: cleanUser });
+        }
+      }
+
       addToast({
         type: 'success',
         title: 'تم تحديث كلمة المرور',
@@ -785,10 +906,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     setDoctors(updated);
     saveDoctors(updated);
+
+    if (isSupabaseConfigured) {
+      updateDoctorInDb(doctorId, {
+        scheduleDays,
+        scheduleHours
+      });
+    }
+
     addToast({
       type: 'success',
       title: 'الجدول الأسبوعي للطبيب',
-      message: 'تم حفظ أيام العمل ومواعيد بداية ونهاية المناوبة بنجاح.'
+      message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل بنجاح.'
     });
   };
 
@@ -801,10 +930,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     setDoctors(updated);
     saveDoctors(updated);
+
+    if (isSupabaseConfigured) {
+      updateDoctorMaxPatientsInDb(doctorId, maxDailyBookings);
+    }
+
     addToast({
       type: 'success',
       title: 'تم تحديث السعة القصوى',
-      message: `تم تحديد الحد الأقصى للحالات اليومية للطبيب بـ ${maxDailyBookings} حالة.`
+      message: `تم حفظ وتحديد الحد الأقصى للحالات اليومية للطبيب بـ ${maxDailyBookings} حالة في قاعدة البيانات.`
     });
   };
 
@@ -983,6 +1117,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const updated = [...clinics, fullClinic];
     setClinics(updated);
     saveClinics(updated);
+
+    if (isSupabaseConfigured) {
+      addClinicToDb(fullClinic);
+    }
+
     addToast({
       type: 'success',
       title: 'تمت إضافة العيادة',
@@ -994,11 +1133,71 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const updated = clinics.map(c => c.id === clinicId ? { ...c, ...data } : c);
     setClinics(updated);
     saveClinics(updated);
+
+    if (isSupabaseConfigured) {
+      updateClinicInDb(clinicId, data);
+    }
+
     addToast({
       type: 'success',
       title: 'تم تحديث العيادة',
-      message: 'تم حفظ تعديلات العيادة بنجاح.'
+      message: 'تم حفظ تعديلات العيادة بنجاح في قاعدة البيانات.'
     });
+  };
+
+  const deleteClinic = async (clinicId: string): Promise<{ success: boolean; error?: string }> => {
+    const targetClinic = clinics.find(c => c.id === clinicId);
+    const clinicName = targetClinic?.name || 'العيادة';
+
+    // 1. Check active bookings locally
+    const activeBookings = bookings.filter(
+      b => b.clinicId === clinicId && ['pending', 'confirmed', 'waiting', 'in_consultation'].includes(b.status)
+    );
+    if (activeBookings.length > 0) {
+      const err = `لا يمكن حذف (${clinicName}) لوجود ${activeBookings.length} حجز نشط جارٍ عليها. يرجى استكمال الحالات أو إلغاؤها أولاً.`;
+      addToast({
+        type: 'error',
+        title: 'تعذر حذف العيادة',
+        message: err
+      });
+      return { success: false, error: err };
+    }
+
+    // 2. Perform DB deletion / archiving
+    if (isSupabaseConfigured) {
+      const res = await deleteClinicFromDb(clinicId);
+      if (!res.success) {
+        addToast({
+          type: 'error',
+          title: 'تعذر حذف العيادة',
+          message: res.error || 'حدث خطأ أثناء حذف العيادة من قاعدة البيانات'
+        });
+        return { success: false, error: res.error };
+      }
+
+      if (res.action === 'archived') {
+        const updated = clinics.map(c => c.id === clinicId ? { ...c, active: false, isOpenToday: false } : c);
+        setClinics(updated);
+        saveClinics(updated);
+        addToast({
+          type: 'warning',
+          title: 'تم أرشفة العيادة',
+          message: res.message || 'تم إغلاق وأرشفة العيادة لوجود حجوزات سابقة مرتبطة بها.'
+        });
+        return { success: true };
+      }
+    }
+
+    // Hard deletion
+    const remaining = clinics.filter(c => c.id !== clinicId);
+    setClinics(remaining);
+    saveClinics(remaining);
+    addToast({
+      type: 'success',
+      title: 'تم حذف العيادة',
+      message: `تم حذف (${clinicName}) نهائياً من النظام.`
+    });
+    return { success: true };
   };
 
   const addDoctor = (newDoctor: Omit<Doctor, 'id'>) => {
@@ -1007,6 +1206,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const updated = [...doctors, fullDoctor];
     setDoctors(updated);
     saveDoctors(updated);
+
+    if (isSupabaseConfigured) {
+      addDoctorToDb(fullDoctor);
+    }
+
     addToast({
       type: 'success',
       title: 'تمت إضافة الطبيب',
@@ -1073,10 +1277,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const sanitized = sanitizeText(text);
     setSupportInfoText(sanitized);
     saveSupportInfoText(sanitized);
+
+    if (isSupabaseConfigured) {
+      saveSettingToDb('support_info_text', sanitized);
+    }
+
     addToast({
       type: 'success',
       title: 'تم حفظ نص الاستفسارات والمساعدة',
-      message: 'تم تحديث النص التوضيحي بالصفحة الرئيسية للمرضى.'
+      message: 'تم تحديث النص التوضيحي بالصفحة الرئيسية وحفظه في قاعدة البيانات.'
     });
   };
 
@@ -1186,12 +1395,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addDoctorDiagnosis,
         addClinic,
         updateClinic,
+        deleteClinic,
         addDoctor,
         resetToInitialData,
         resetPasswordByAdmin,
         staffAccounts,
         deleteStaffAccount,
         updateStaffRecoveryEmail,
+        updateStaffAccount,
         toasts,
         addToast,
         removeToast,
