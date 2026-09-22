@@ -19,6 +19,7 @@ import { DoctorView } from './views/DoctorView';
 import { CashierView } from './views/CashierView';
 import { AdminView } from './views/AdminView';
 import { OfflineBanner } from './components/OfflineBanner';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { Hospital, Moon, Sun } from 'lucide-react';
 
 const AppContent: React.FC = () => {
@@ -122,8 +123,10 @@ const AppContent: React.FC = () => {
 
 export default function App() {
   return (
-    <AppProvider>
-      <AppContent />
-    </AppProvider>
+    <ErrorBoundary>
+      <AppProvider>
+        <AppContent />
+      </AppProvider>
+    </ErrorBoundary>
   );
 }

@@ -63,10 +63,10 @@ export const ReceptionView: React.FC = () => {
 
   const todayStr = new Date().toISOString().split('T')[0];
 
-  // قاعدة صارمة: يظهر في طابور الاستقبال فقط المرضى الذين تم تأكيد سدادهم (دفع نقدي / تأمين) أو إعفاؤهم خيرياً
+  // قاعدة صارمة: يظهر في طابور الاستقبال فقط المرضى الذين تم تأكيد سدادهم (دفع نقدي / تأمين) أو إعفاؤهم خيرياً في تاريخ اليوم
   // وترتيب الطابور يكون حسب وقت تسجيل السداد / الإعفاء (أول من سدد يدخل أولاً)
   const confirmedBookings = bookings.filter(b => {
-    return (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt');
+    return (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt') && b.date === todayStr;
   });
 
   const filteredBookings = confirmedBookings
@@ -628,7 +628,7 @@ export const ReceptionView: React.FC = () => {
             {/* أزرار سريعة لتجربة فحص التذاكر */}
             <div className="flex items-center gap-2 text-[11px] text-slate-500 overflow-x-auto py-1">
               <span>تذاكر للاختبار:</span>
-              {bookings.slice(0, 4).map(b => (
+              {bookings.filter(b => b.date === todayStr).slice(0, 4).map(b => (
                 <button
                   key={b.id}
                   onClick={() => {

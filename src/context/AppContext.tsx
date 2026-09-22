@@ -80,7 +80,8 @@ import {
   logoutFromSupabase, 
   subscribeToBookingsRealtime,
   ensureAdminSupabaseSession,
-  adminChangeStaffPassword
+  adminChangeStaffPassword,
+  deleteBookingsBeforeDateFromDb
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -143,6 +144,7 @@ interface AppContextType {
   patientHistoryPhone: string;
   setPatientHistoryPhone: (phone: string) => void;
   toggleClinicStatus: (clinicId: string) => void;
+  clearPastBookings: (beforeDate?: string) => Promise<{ success: boolean; count: number }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -1381,6 +1383,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.location.reload();
   };
 
+  const clearPastBookings = async (beforeDate?: string): Promise<{ success: boolean; count: number }> => {
+    const cutoffDate = beforeDate || new Date().toISOString().split('T')[0];
+    const toRemove = bookings.filter(b => b.date < cutoffDate);
+    const remaining = bookings.filter(b => b.date >= cutoffDate);
+
+    setBookings(remaining);
+    saveBookings(remaining);
+
+    if (isSupabaseConfigured) {
+      await deleteBookingsBeforeDateFromDb(cutoffDate);
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم تنظيف الحجوزات السابقة',
+      message: `تم مسح ${toRemove.length} حجز من الأيام السابقة بنجاح.`
+    });
+
+    return { success: true, count: toRemove.length };
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1433,7 +1456,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setPatientHistoryModalOpen,
         patientHistoryPhone,
         setPatientHistoryPhone,
-        toggleClinicStatus
+        toggleClinicStatus,
+        clearPastBookings
       }}
     >
       {children}

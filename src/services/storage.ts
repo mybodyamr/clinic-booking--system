@@ -140,7 +140,12 @@ export function getStoredClinics(): Clinic[] {
       localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
       return INITIAL_CLINICS;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
+      return INITIAL_CLINICS;
+    }
+    return parsed;
   } catch (e) {
     console.error('فشل قراءة بيانات العيادات:', e);
     return INITIAL_CLINICS;
@@ -162,7 +167,12 @@ export function getStoredDoctors(): Doctor[] {
       localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
       return INITIAL_DOCTORS;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
+      return INITIAL_DOCTORS;
+    }
+    return parsed;
   } catch (e) {
     console.error('فشل قراءة بيانات الأطباء:', e);
     return INITIAL_DOCTORS;
@@ -184,7 +194,12 @@ export function getStoredBookings(): Booking[] {
       localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
       return INITIAL_BOOKINGS;
     }
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
+      return INITIAL_BOOKINGS;
+    }
+    return parsed;
   } catch (e) {
     console.error('فشل قراءة بيانات الحجوزات:', e);
     return INITIAL_BOOKINGS;
@@ -196,6 +211,17 @@ export function saveBookings(bookings: Booking[]): void {
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
   } catch (e) {
     console.error('فشل حفظ بيانات الحجوزات:', e);
+  }
+}
+
+export function removeBookingsBeforeDate(dateStr: string): Booking[] {
+  try {
+    const current = getStoredBookings();
+    const remaining = current.filter(b => b.date >= dateStr);
+    saveBookings(remaining);
+    return remaining;
+  } catch (e) {
+    return getStoredBookings();
   }
 }
 
@@ -627,3 +653,39 @@ export function saveSupportInfoText(text: string): void {
     console.error('فشل حفظ نص المساعدة:', e);
   }
 }
+
+/**
+ * تفريغ الذاكرة المؤقتة التالفة للتطبيق والـ Service Worker وإعادة التحميل التلقائي
+ */
+export function clearAppCacheAndReload(): void {
+  try {
+    // إزالة مفاتيح التخزين المؤقت للتطبيق فقط
+    Object.values(STORAGE_KEYS).forEach((key) => {
+      try {
+        localStorage.removeItem(key);
+      } catch (e) {}
+    });
+
+    // مسح كاش الـ Service Worker
+    if (typeof caches !== 'undefined') {
+      caches.keys().then((names) => {
+        names.forEach((name) => caches.delete(name));
+      });
+    }
+
+    // إلغاء تسجيل Service Worker القديم لإجبار المتصفح على سحب النسخة الأحدث
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        registrations.forEach((reg) => reg.unregister());
+      });
+    }
+  } catch (e) {
+    console.error('فشل تفريغ الذاكرة المؤقتة:', e);
+  }
+
+  // إعادة التحميل مع تجاوز الكاش
+  setTimeout(() => {
+    window.location.reload();
+  }, 100);
+}
+

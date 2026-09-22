@@ -53,10 +53,21 @@ export const AdminView: React.FC = () => {
     deleteStaffAccount,
     updateStaffRecoveryEmail,
     deleteClinic,
-    updateStaffAccount
+    updateStaffAccount,
+    clearPastBookings
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports'>('overview');
+
+  // نطاق عرض التقارير والسجلات (اليوم كافتراضي أو الأرشيف)
+  const [reportScope, setReportScope] = useState<'today' | 'archive'>('today');
+  const [showClearPastModal, setShowClearPastModal] = useState(false);
+  const [isClearingPast, setIsClearingPast] = useState(false);
+
+  const todayStr = new Date().toISOString().split('T')[0];
+  const todayBookings = bookings.filter(b => b.date === todayStr);
+  const pastBookings = bookings.filter(b => b.date < todayStr);
+  const displayedReportBookings = reportScope === 'today' ? todayBookings : bookings;
 
   // نماذج الإضافة السريعة
   const [showAddClinicModal, setShowAddClinicModal] = useState(false);
@@ -187,7 +198,7 @@ export const AdminView: React.FC = () => {
   // تصدير التقارير إلى Excel حقيقي باستخدام xlsx
   const handleExportToExcel = () => {
     try {
-      const dataToExport = bookings.map(b => ({
+      const dataToExport = displayedReportBookings.map(b => ({
         'رقم التذكرة': b.ticketNumber,
         'اسم المريض': b.patientName,
         'رقم الهاتف': b.patientPhone,
@@ -441,7 +452,7 @@ export const AdminView: React.FC = () => {
               : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
           }`}
         >
-          سجلات الحجوزات ({bookings.length})
+          سجلات حجوزات اليوم ({todayBookings.length})
         </button>
       </div>
 
@@ -1202,54 +1213,130 @@ export const AdminView: React.FC = () => {
 
       {/* التبويب 4: جدول السجلات الكامل */}
       {activeTab === 'reports' && (
-        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-          <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
-            <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
-              جميع حجوزات العيادات المسجلة بالكامل ({bookings.length})
-            </span>
-            <button
-              onClick={handleExportToExcel}
-              className="text-xs text-emerald-700 dark:text-emerald-400 font-bold hover:underline flex items-center gap-1"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>تنزيل التقرير كاملاً بصيغة Excel</span>
-            </button>
+        <div className="space-y-4">
+          {/* شريط فلترة السجلات وتحديد النطاق الزمني */}
+          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setReportScope('today')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  reportScope === 'today'
+                    ? 'bg-emerald-700 text-white shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                }`}
+              >
+                حجوزات اليوم فقط ({todayBookings.length})
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setReportScope('archive')}
+                className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  reportScope === 'archive'
+                    ? 'bg-emerald-700 text-white shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600'
+                }`}
+              >
+                الأرشيف والسجلات السابقة ({bookings.length})
+              </button>
+            </div>
+
+            <div className="flex items-center flex-wrap gap-2.5">
+              {pastBookings.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowClearPastModal(true)}
+                  className="text-xs text-rose-600 hover:text-rose-700 dark:text-rose-400 font-bold flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-rose-200 dark:border-rose-900/50 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition-all cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>مسح حجوزات الأيام السابقة ({pastBookings.length})</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={handleExportToExcel}
+                className="text-xs text-emerald-700 dark:text-emerald-400 font-bold hover:underline flex items-center gap-1 cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>تنزيل Excel ({displayedReportBookings.length})</span>
+              </button>
+            </div>
           </div>
 
-          <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
-            {bookings.map(b => (
-              <div key={b.id} className="p-4 hover:bg-slate-50/70 dark:hover:bg-slate-750 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded text-[11px]">
-                      {b.ticketNumber}
-                    </span>
-                    <strong className="text-slate-900 dark:text-white text-sm">{b.patientName}</strong>
-                    <span className="text-slate-400 font-mono">({b.patientPhone})</span>
-                  </div>
-                  <div className="text-slate-500 flex gap-4">
-                    <span>{b.clinicName}</span>
-                    <span>{b.doctorName}</span>
-                    <span>{b.date} ({b.timeSlot})</span>
-                    <span>رسوم: {b.fee} ج.م ({b.paymentStatus === 'paid' ? 'مسدد' : 'غير مسدد'})</span>
-                  </div>
-                </div>
+          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                {reportScope === 'today'
+                  ? `حجوزات عيادات اليوم (${todayStr}) - إجمالي ${todayBookings.length} حجز`
+                  : `جميع السجلات والأرشيف التاريخي - إجمالي ${bookings.length} حجز`}
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {reportScope === 'today' ? 'يتم عرض حجوزات اليوم الحالي فقط' : 'عرض السجلات التاريخية المسجلة'}
+              </span>
+            </div>
 
-                <div>
-                  <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
-                    b.status === 'completed'
-                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                      : b.status === 'in-progress'
-                      ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                      : b.status === 'waiting'
-                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                      : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-                  }`}>
-                    {b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي'}
-                  </span>
+            {displayedReportBookings.length === 0 ? (
+              <div className="p-12 text-center space-y-3">
+                <Calendar className="w-10 h-10 mx-auto text-slate-300 dark:text-slate-600" />
+                <div className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                  {reportScope === 'today'
+                    ? `لا توجد حجوزات مسجلة لتاريخ اليوم (${todayStr})`
+                    : 'لا توجد أي حجوزات مسجلة في النظام'}
                 </div>
+                <p className="text-xs text-slate-400 max-w-md mx-auto">
+                  {reportScope === 'today'
+                    ? 'الحجوزات السابقة تم استثناؤها تلقائياً. ستظهر هنا الحجوزات فور تسجيل المرضى كشوفات جديدة لهذا اليوم.'
+                    : 'تم تفريغ كافة سجلات الحجز.'}
+                </p>
               </div>
-            ))}
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
+                {displayedReportBookings.map(b => (
+                  <div key={b.id} className="p-4 hover:bg-slate-50/70 dark:hover:bg-slate-750 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded text-[11px]">
+                          {b.ticketNumber}
+                        </span>
+                        <strong className="text-slate-900 dark:text-white text-sm">{b.patientName}</strong>
+                        <span className="text-slate-400 font-mono">({b.patientPhone})</span>
+                        {b.date === todayStr ? (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                            اليوم
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+                            {b.date}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
+                        <span>{b.clinicName}</span>
+                        <span>{b.doctorName}</span>
+                        <span>{b.date} ({b.timeSlot})</span>
+                        <span>رسوم: {b.fee} ج.م ({b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد'})</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold ${
+                        b.status === 'completed'
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                          : b.status === 'in-progress'
+                          ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
+                          : b.status === 'waiting'
+                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                          : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                      }`}>
+                        {b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي'}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1696,6 +1783,45 @@ export const AdminView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تأكيد مسح حجوزات الأيام السابقة */}
+      {showClearPastModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-rose-600">
+              <AlertCircle className="w-6 h-6 shrink-0" />
+              <h3 className="font-bold text-base text-slate-900 dark:text-white">مسح حجوزات الأيام السابقة</h3>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              هل أنت متأكد من رغبتك في حذف جميع الحجوزات المسجلة قبل تاريخ اليوم ({todayStr})؟
+              يبلغ عددها <strong className="text-rose-600 font-mono font-bold">{pastBookings.length} حجز</strong>.
+              سيتم حذفها نهائياً ولن تظهر مرة أخرى في النظام.
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowClearPastModal(false)}
+                className="px-4 py-2 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-50 dark:hover:bg-slate-750 transition-all cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={isClearingPast}
+                onClick={async () => {
+                  setIsClearingPast(true);
+                  await clearPastBookings(todayStr);
+                  setIsClearingPast(false);
+                  setShowClearPastModal(false);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl transition-all disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+              >
+                {isClearingPast ? 'جاري الحذف...' : 'تأكيد الحذف نهائياً'}
+              </button>
+            </div>
           </div>
         </div>
       )}

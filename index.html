@@ -28,6 +28,11 @@
             document.documentElement.style.colorScheme = 'light';
           }
         } catch (e) {}
+
+        // معالجة فورية لأي ملفات جافاسكريبت قديمة بعد رفع التحديثات لتجنب الشاشة البيضاء
+        window.addEventListener('vite:preloadError', function() {
+          window.location.reload();
+        });
       })();
     </script>
   </head>

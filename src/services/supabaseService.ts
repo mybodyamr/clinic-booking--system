@@ -310,6 +310,22 @@ export async function updateBookingStatusInDb(
   }
 }
 
+export async function deleteBookingsBeforeDateFromDb(dateStr: string): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    await ensureAdminSupabaseSession();
+    const { error } = await supabase
+      .from('bookings')
+      .delete()
+      .lt('date', dateStr);
+
+    return !error;
+  } catch (err) {
+    console.warn('Error deleting old bookings in Supabase:', err);
+    return false;
+  }
+}
+
 export async function updateDoctorStatusInDb(
   doctorId: string,
   status: DoctorStatus,
