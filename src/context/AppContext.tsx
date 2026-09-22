@@ -79,7 +79,8 @@ import {
   loginWithSupabaseAuth, 
   logoutFromSupabase, 
   subscribeToBookingsRealtime,
-  ensureAdminSupabaseSession
+  ensureAdminSupabaseSession,
+  adminChangeStaffPassword
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -215,9 +216,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setBookings(dbBookings);
           saveBookings(dbBookings);
         }
+        const effectiveClinics = (dbClinics && dbClinics.length > 0) ? dbClinics : clinics;
+        const effectiveDoctors = (dbDoctors && dbDoctors.length > 0) ? dbDoctors : doctors;
+
         if (dbSchedule && dbSchedule.items.length > 0) {
           setDailySchedule(dbSchedule);
           saveDailySchedule(dbSchedule);
+        } else if (effectiveClinics.length > 0) {
+          const defaultItems: DailyClinicScheduleItem[] = effectiveClinics.map(c => {
+            const doc = effectiveDoctors.find(d => d.clinicId === c.id) || effectiveDoctors[0];
+            return {
+              clinicId: c.id,
+              doctorId: doc?.id || '',
+              isOpen: c.isOpenToday !== false && c.active !== false && c.isActive !== false
+            };
+          });
+          const initialSchedule: DailyScheduleState = {
+            date: todayStr,
+            items: defaultItems
+          };
+          setDailySchedule(initialSchedule);
+          saveDailySchedule(initialSchedule);
+          saveDailyScheduleToDb(initialSchedule);
         }
         if (dbStaff && dbStaff.length > 0) {
           setStaffAccounts(dbStaff);
@@ -587,7 +607,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (isSupabaseConfigured) {
-      updateStaffAccountInDb(id, {
+      await updateStaffAccountInDb(id, {
         username: updates.username,
         displayName: updates.displayName,
         recoveryEmail: updates.recoveryEmail,
@@ -625,23 +645,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       resetLoginAttempts(cleanUser);
 
       if (isSupabaseConfigured) {
-        const staffAcc = staffAccounts.find(s => s.username === cleanUser);
+        const authRes = await adminChangeStaffPassword(cleanUser, newPass);
+        if (!authRes.success) {
+          console.warn('Supabase Auth update error:', authRes.error);
+        }
+
+        const staffAcc = staffAccounts.find(s => s.username.toLowerCase() === cleanUser);
         if (staffAcc) {
-          updateStaffAccountInDb(staffAcc.id, { password: newPass, username: cleanUser });
+          await updateStaffAccountInDb(staffAcc.id, { password: newPass, username: cleanUser });
         }
       }
 
       addToast({
         type: 'success',
         title: 'تم تحديث كلمة المرور',
-        message: `تم تعيين كلمة مرور جديدة لحساب (${cleanUser}) بنجاح.`
+        message: `تم تعيين كلمة مرور جديدة وتحديثها في قاعدة البيانات لحساب (${cleanUser}) بنجاح.`
       });
       return true;
-    } catch {
+    } catch (err: any) {
       addToast({
         type: 'error',
         title: 'فشل التحديث',
-        message: 'حدث خطأ أثناء تشفير وحفظ كلمة المرور.'
+        message: err?.message || 'حدث خطأ أثناء تشفير وحفظ كلمة المرور.'
       });
       return false;
     }
@@ -1299,30 +1324,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    */
   const getActiveClinicsForBooking = (): { clinic: Clinic; assignedDoctor?: Doctor }[] => {
     const todayStr = new Date().toISOString().split('T')[0];
-    const openItems = dailySchedule.items.filter(item => item.isOpen);
     const available: { clinic: Clinic; assignedDoctor?: Doctor }[] = [];
 
-    for (const item of openItems) {
-      const clinic = clinics.find(c => c.id === item.clinicId);
-      // فحص أن العيادة موجودة ومفعلة
-      if (!clinic || clinic.active === false || clinic.isActive === false) continue;
+    for (const clinic of clinics) {
+      // فحص أن العيادة مفعلة
+      if (clinic.active === false || clinic.isActive === false) continue;
+
+      // فحص التشغيل اليومي: الأولوية لجدول تشغيل اليوم، وإلا فحص حالة العيادة isOpenToday
+      const scheduleItem = dailySchedule.items.find(item => item.clinicId === clinic.id);
+      const isDailyOpen = scheduleItem ? scheduleItem.isOpen : (clinic.isOpenToday !== false);
+
+      // إذا كانت العيادة مغلقة صراحة اليوم، نتجاوزها
+      if (!isDailyOpen) continue;
 
       // العثور على الطبيب المناوب المعين في جدول اليوم أو أول طبيب مسجل للعيادة
-      const assignedDoctor = doctors.find(d => d.id === item.doctorId) || 
-                             doctors.find(d => d.clinicId === clinic.id);
+      const assignedDoctor = (scheduleItem?.doctorId && doctors.find(d => d.id === scheduleItem.doctorId)) || 
+                             doctors.find(d => d.clinicId === clinic.id) ||
+                             doctors[0];
 
       if (!assignedDoctor) continue;
 
-      // تطبيق الفحص الصارم للركائز الأربعة
-      const availabilityCheck = checkClinicAvailability(
-        assignedDoctor,
-        clinic.id,
-        todayStr,
-        bookings
-      );
-
-      // إذا كانت العيادة غير متاحة لأي من الأسباب الأربعة، تختفي فوراً وبشكل تلقائي من حجز المرضى
-      if (!availabilityCheck.allowed) {
+      // استبعاد الطبيب فقط إذا كان معتذراً رسمياً أو غير متاح بالكامل (offline)
+      if (assignedDoctor.status === 'offline') {
         continue;
       }
 

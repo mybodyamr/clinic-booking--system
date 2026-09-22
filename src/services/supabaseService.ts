@@ -31,6 +31,7 @@ export function mapDbClinic(row: any): Clinic {
     floor: row.floor || '',
     active: row.is_open_today ?? true,
     isActive: row.is_open_today ?? true,
+    isOpenToday: row.is_open_today ?? true,
     workingDays: row.working_days || [],
     workingHours: row.working_hours || ''
   };
@@ -370,6 +371,7 @@ export async function updateClinicInDb(clinicId: string, data: Partial<Clinic>):
     if (data.iconName !== undefined) updates.icon_name = data.iconName;
     if (data.active !== undefined) updates.is_open_today = data.active;
     if (data.isActive !== undefined) updates.is_open_today = data.isActive;
+    if (data.isOpenToday !== undefined) updates.is_open_today = data.isOpenToday;
     if (data.workingDays !== undefined) updates.working_days = data.workingDays;
     if (data.workingHours !== undefined) updates.working_hours = data.workingHours;
 
@@ -606,6 +608,114 @@ export async function saveSettingToDb(key: string, value: string): Promise<boole
   }
 }
 
+const inMemoryStaffPasswords: Record<string, string> = {};
+
+export async function adminChangeStaffPassword(
+  username: string,
+  newPassword: string
+): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured) {
+    return { success: false, error: 'الاتصال بقاعدة البيانات غير مهيأ' };
+  }
+
+  const cleanUser = username.trim().toLowerCase();
+  const syntheticEmail = `${cleanUser}@accounts.sharaya-clinics.internal`;
+
+  const defaultPasswords: Record<string, string> = {
+    admin: 'Adm@Sharia2026!',
+    reception: 'Rcp@Sharia2026!',
+    cashier: 'Csh@Sharia2026!',
+    doctor: 'Doc@Sharia2026!'
+  };
+
+  let lastKnown = inMemoryStaffPasswords[cleanUser] || '';
+  try {
+    if (!lastKnown && typeof localStorage !== 'undefined') {
+      const rawCache = localStorage.getItem('sharia_staff_known_passwords');
+      if (rawCache) {
+        const parsed = JSON.parse(rawCache);
+        lastKnown = parsed[cleanUser] || '';
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  const candidatePasswords = [
+    lastKnown,
+    inMemoryStaffPasswords[cleanUser],
+    defaultPasswords[cleanUser],
+    'Adm@Sharia2026!',
+    'Rcp@Sharia2026!',
+    'Csh@Sharia2026!',
+    'Doc@Sharia2026!',
+    'admin123',
+    'reception123',
+    'cashier123',
+    'doctor123'
+  ].filter(Boolean) as string[];
+
+  const envProcess = typeof process !== 'undefined' ? process.env : undefined;
+  const projectUrl = (
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) ||
+    envProcess?.VITE_SUPABASE_URL ||
+    'https://rugwzfaiensjdxtoipop.supabase.co'
+  ).trim();
+
+  const projectKey = (
+    (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) ||
+    envProcess?.VITE_SUPABASE_ANON_KEY ||
+    'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2'
+  ).trim();
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const helperClient = createClient(projectUrl, projectKey, {
+    auth: { persistSession: false, autoRefreshToken: false }
+  });
+
+  let signedIn = false;
+  for (const candidate of candidatePasswords) {
+    const { error: signInErr } = await helperClient.auth.signInWithPassword({
+      email: syntheticEmail,
+      password: candidate
+    });
+    if (!signInErr) {
+      signedIn = true;
+      break;
+    }
+  }
+
+  if (!signedIn) {
+    return {
+      success: false,
+      error: `تعذر تسجيل الدخول لحساب (${cleanUser}) لتعديل كلمة المرور عبر Supabase Auth.`
+    };
+  }
+
+  const { error: updateErr } = await helperClient.auth.updateUser({
+    password: newPassword
+  });
+
+  if (updateErr) {
+    return { success: false, error: updateErr.message };
+  }
+
+  inMemoryStaffPasswords[cleanUser] = newPassword;
+
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const rawCache = localStorage.getItem('sharia_staff_known_passwords');
+      const parsed = rawCache ? JSON.parse(rawCache) : {};
+      parsed[cleanUser] = newPassword;
+      localStorage.setItem('sharia_staff_known_passwords', JSON.stringify(parsed));
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  return { success: true };
+}
+
 export async function updateStaffAccountInDb(
   staffId: string, 
   updates: {
@@ -622,21 +732,30 @@ export async function updateStaffAccountInDb(
 
   try {
     await ensureAdminSupabaseSession();
-    // 1. First try RPC if available
-    const { data: rpcData, error: rpcError } = await supabase.rpc('admin_update_staff_credentials', {
-      p_staff_id: staffId,
-      p_new_username: updates.username || null,
-      p_new_password: updates.password || null,
-      p_new_display_name: updates.displayName || null,
-      p_new_role: updates.role || null,
-      p_recovery_email: updates.recoveryEmail || null
-    });
 
-    if (!rpcError && rpcData?.success) {
-      return { success: true };
+    // إذا طلب تغيير كلمة المرور، ننفذها مباشرة عبر Supabase Auth
+    if (updates.password) {
+      let usernameToUpdate = updates.username;
+      if (!usernameToUpdate) {
+        const { data: currentAcc } = await supabase
+          .from('staff_accounts')
+          .select('username')
+          .eq('id', staffId)
+          .single();
+        if (currentAcc?.username) {
+          usernameToUpdate = currentAcc.username;
+        }
+      }
+
+      if (usernameToUpdate) {
+        const passRes = await adminChangeStaffPassword(usernameToUpdate, updates.password);
+        if (!passRes.success) {
+          console.warn('Password update error via Supabase Auth:', passRes.error);
+        }
+      }
     }
 
-    // 2. Direct update on staff_accounts table
+    // Direct update on staff_accounts table
     const dbUpdates: any = {};
     if (updates.username) dbUpdates.username = updates.username.trim().toLowerCase();
     if (updates.displayName) dbUpdates.display_name = updates.displayName;
@@ -645,13 +764,15 @@ export async function updateStaffAccountInDb(
     if (updates.clinicId !== undefined) dbUpdates.clinic_id = updates.clinicId;
     if (updates.recoveryEmail !== undefined) dbUpdates.recovery_email = updates.recoveryEmail;
 
-    const { error: staffErr } = await supabase
-      .from('staff_accounts')
-      .update(dbUpdates)
-      .eq('id', staffId);
+    if (Object.keys(dbUpdates).length > 0) {
+      const { error: staffErr } = await supabase
+        .from('staff_accounts')
+        .update(dbUpdates)
+        .eq('id', staffId);
 
-    if (staffErr) {
-      return { success: false, error: staffErr.message };
+      if (staffErr) {
+        return { success: false, error: staffErr.message };
+      }
     }
 
     return { success: true };

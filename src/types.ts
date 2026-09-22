@@ -20,6 +20,7 @@ export interface Clinic {
   floor: string;
   active?: boolean;
   isActive?: boolean;
+  isOpenToday?: boolean;
   code?: string;
   workingDays?: string[];
   workingHours?: string;

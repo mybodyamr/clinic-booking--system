@@ -272,16 +272,23 @@ export const AdminView: React.FC = () => {
   };
 
   const handleToggleDailyClinic = (clinicId: string) => {
-    setScheduleItems(prev => prev.map(item => {
+    const updated = scheduleItems.map(item => {
       if (item.clinicId === clinicId) {
         return { ...item, isOpen: !item.isOpen };
       }
       return item;
-    }));
+    });
+    setScheduleItems(updated);
+    updateDailySchedule(updated);
+
+    const targetItem = updated.find(i => i.clinicId === clinicId);
+    if (targetItem) {
+      updateClinic(clinicId, { isOpenToday: targetItem.isOpen, active: targetItem.isOpen });
+    }
   };
 
   const handleUpdateDailyDoctor = (clinicId: string, doctorId: string) => {
-    setScheduleItems(prev => prev.map(item => {
+    const updated = scheduleItems.map(item => {
       if (item.clinicId === clinicId) {
         return { 
           ...item, 
@@ -289,7 +296,9 @@ export const AdminView: React.FC = () => {
         };
       }
       return item;
-    }));
+    });
+    setScheduleItems(updated);
+    updateDailySchedule(updated);
   };
 
   const handleSaveRolePermissions = () => {
