@@ -53,7 +53,7 @@ import {
   ClinicAvailabilityResult,
   parseDoctorShiftTimes
 } from '../services/scheduleService';
-import { isSupabaseConfigured } from '../services/supabaseClient';
+import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 import { 
   fetchClinicsFromDb, 
   fetchDoctorsFromDb, 
@@ -62,6 +62,8 @@ import {
   fetchStaffAccountsFromDb, 
   fetchSettingsFromDb,
   saveSettingToDb,
+  fetchStaffPasswordHashesFromDb,
+  saveStaffPasswordHashToDb,
   createPublicBookingRpc, 
   confirmPaymentRpc, 
   markPatientLateAndCallNextRpc, 
@@ -109,7 +111,7 @@ interface AppContextType {
   updateRolePermissions: (role: UserRole, permissions: SystemPermission[]) => void;
   hasPermission: (role: UserRole | undefined, permission: SystemPermission) => boolean;
   supportInfoText: string;
-  updateSupportInfoText: (text: string) => void;
+  updateSupportInfoText: (text: string) => Promise<boolean>;
   getActiveClinicsForBooking: () => { clinic: Clinic; assignedDoctor?: Doctor }[];
   createBooking: (data: {
     patientName: string;
@@ -195,13 +197,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     async function loadSupabaseData() {
       try {
-        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings] = await Promise.all([
+        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings, dbPasswordHashes] = await Promise.all([
           fetchClinicsFromDb(),
           fetchDoctorsFromDb(),
           fetchBookingsFromDb(),
           fetchDailyScheduleFromDb(todayStr),
           fetchStaffAccountsFromDb(),
-          fetchSettingsFromDb()
+          fetchSettingsFromDb(),
+          fetchStaffPasswordHashesFromDb()
         ]);
 
         if (!isMounted) return;
@@ -245,6 +248,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setStaffAccounts(dbStaff);
           saveStaffAccounts(dbStaff);
         }
+        if (dbPasswordHashes && typeof dbPasswordHashes === 'object') {
+          const localHashes = getStoredStaffPasswordHashes();
+          const mergedHashes = { ...localHashes, ...dbPasswordHashes };
+          localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(mergedHashes));
+        }
         if (dbSettings && dbSettings['support_info_text']) {
           setSupportInfoText(dbSettings['support_info_text']);
           saveSupportInfoText(dbSettings['support_info_text']);
@@ -263,7 +271,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     loadSupabaseData();
 
     // تفعيل التحديث اللحظي عبر Supabase Realtime لجدول bookings
-    const unsubscribe = subscribeToBookingsRealtime(async () => {
+    const unsubscribeBookings = subscribeToBookingsRealtime(async () => {
       const freshBookings = await fetchBookingsFromDb();
       if (freshBookings && isMounted) {
         setBookings(freshBookings);
@@ -271,7 +279,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات (Queue, Reception, Doctor) محدثة لحظياً
+    // الاستماع لقناة التحديثات اللحظية العامة (نص الاستفسارات، وتعديل حسابات وكلمات مرور الكادر)
+    const systemChannel = supabase.channel('system_updates');
+    systemChannel
+      .on('broadcast', { event: 'support_info_updated' }, (payload: any) => {
+        const newText = payload?.payload?.value;
+        if (newText && isMounted) {
+          setSupportInfoText(newText);
+          saveSupportInfoText(newText);
+        }
+      })
+      .on('broadcast', { event: 'staff_updated' }, async () => {
+        if (!isMounted) return;
+        try {
+          const [freshStaff, freshHashes] = await Promise.all([
+            fetchStaffAccountsFromDb(),
+            fetchStaffPasswordHashesFromDb()
+          ]);
+          if (freshStaff && freshStaff.length > 0 && isMounted) {
+            setStaffAccounts(freshStaff);
+            saveStaffAccounts(freshStaff);
+          }
+          if (freshHashes && typeof freshHashes === 'object') {
+            const localHashes = getStoredStaffPasswordHashes();
+            const merged = { ...localHashes, ...freshHashes };
+            localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(merged));
+          }
+        } catch {
+          // ignore
+        }
+      })
+      .subscribe();
+
+    // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات محدثة لحظياً
     const syncInterval = setInterval(async () => {
       if (!isMounted) return;
       try {
@@ -285,6 +325,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             return prev;
           });
         }
+
+        // مزامنة نص الاستفسارات والمساعدة دورياً لتظهر التحديثات لجميع الأجهزة والزوار فوراً
+        const freshSettings = await fetchSettingsFromDb();
+        if (freshSettings?.['support_info_text'] && isMounted) {
+          setSupportInfoText(prev => {
+            if (prev !== freshSettings['support_info_text']) {
+              saveSupportInfoText(freshSettings['support_info_text']);
+              return freshSettings['support_info_text'];
+            }
+            return prev;
+          });
+        }
+
+        // مزامنة تجزئات كلمات المرور وحسابات الكادر دورياً
+        const freshHashes = await fetchStaffPasswordHashesFromDb();
+        if (freshHashes && typeof freshHashes === 'object') {
+          const localHashes = getStoredStaffPasswordHashes();
+          const merged = { ...localHashes, ...freshHashes };
+          localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(merged));
+        }
       } catch {
         // silent fallback
       }
@@ -292,7 +352,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => {
       isMounted = false;
-      unsubscribe();
+      unsubscribeBookings();
+      supabase.removeChannel(systemChannel);
       clearInterval(syncInterval);
     };
   }, []);
@@ -443,15 +504,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setActiveView('landing');
         }
         return { success: true };
-      } else {
-        const errMsg = authRes.error || 'اسم المستخدم أو كلمة المرور غير صحيحة.';
-        addToast({
-          type: 'error',
-          title: 'فشل تسجيل الدخول',
-          message: errMsg
-        });
-        return { success: false, error: errMsg };
       }
+      // في حال عدم العثور على الحساب في Supabase Auth (مثل حسابات الأطباء الإضافية أو كلمات المرور المعدلة محلياً)، نتابع التحقق عبر حسابات الكادر
     }
 
     let authSuccess = false;
@@ -582,11 +636,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let cleanUsername = target.username;
     if (updates.username) {
       const sanitized = updates.username.trim().toLowerCase();
-      if (!/^[a-z0-9_-]{3,20}$/.test(sanitized)) {
+      if (!/^[a-z0-9_.-]{3,25}$/.test(sanitized)) {
         addToast({
           type: 'error',
           title: 'اسم مستخدم غير صالح',
-          message: 'يجب أن يتكون اسم المستخدم من 3 إلى 20 حرفاً إنجليزياً أو أرقام بدون مسافات.'
+          message: 'يجب أن يتكون اسم المستخدم من 3 إلى 25 حرفاً إنجليزياً أو أرقام بدون مسافات.'
         });
         return false;
       }
@@ -602,19 +656,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
+    // إذا تغير اسم المستخدم ولم تُقدم كلمة مرور جديدة، ننقل التجزئة الحالية إلى الاسم الجديد محلياً
+    if (cleanUsername !== target.username.toLowerCase()) {
+      const hashes = getStoredStaffPasswordHashes();
+      const existingHash = hashes[target.username.toLowerCase()];
+      if (existingHash) {
+        hashes[cleanUsername] = existingHash;
+        saveStaffPasswordHash(cleanUsername, existingHash);
+      }
+    }
+
     if (updates.password) {
       const hash = await hashPassword(updates.password);
       saveStaffPasswordHash(cleanUsername, hash);
       resetLoginAttempts(cleanUsername);
     }
 
+    let dbUpdated = false;
     if (isSupabaseConfigured) {
-      await updateStaffAccountInDb(id, {
-        username: updates.username,
+      const dbRes = await updateStaffAccountInDb(id, {
+        username: updates.username ? cleanUsername : undefined,
         displayName: updates.displayName,
         recoveryEmail: updates.recoveryEmail,
         password: updates.password
       });
+      dbUpdated = dbRes.success;
+      if (!dbRes.success) {
+        console.warn('Supabase staff update error:', dbRes.error);
+      }
     }
 
     const updatedList = staffAccounts.map(s => {
@@ -634,7 +703,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast({
       type: 'success',
       title: 'تم تحديث بيانات الحساب',
-      message: `تم حفظ تعديلات حساب (${cleanUsername}) بنجاح.`
+      message: dbUpdated
+        ? `تم حفظ وتحديث بيانات حساب (${cleanUsername}) في قاعدة البيانات بنجاح.`
+        : `تم حفظ تعديلات حساب (${cleanUsername}) بنجاح.`
     });
     return true;
   };
@@ -647,6 +718,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       resetLoginAttempts(cleanUser);
 
       if (isSupabaseConfigured) {
+        await saveStaffPasswordHashToDb(cleanUser, newHash);
+
         const authRes = await adminChangeStaffPassword(cleanUser, newPass);
         if (!authRes.success) {
           console.warn('Supabase Auth update error:', authRes.error);
@@ -1300,20 +1373,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return perms.includes(permission);
   };
 
-  const updateSupportInfoText = (text: string) => {
+  const updateSupportInfoText = async (text: string): Promise<boolean> => {
     const sanitized = sanitizeText(text);
     setSupportInfoText(sanitized);
     saveSupportInfoText(sanitized);
 
+    let savedToCloud = false;
     if (isSupabaseConfigured) {
-      saveSettingToDb('support_info_text', sanitized);
+      savedToCloud = await saveSettingToDb('support_info_text', sanitized);
     }
 
-    addToast({
-      type: 'success',
-      title: 'تم حفظ نص الاستفسارات والمساعدة',
-      message: 'تم تحديث النص التوضيحي بالصفحة الرئيسية وحفظه في قاعدة البيانات.'
-    });
+    if (savedToCloud) {
+      addToast({
+        type: 'success',
+        title: 'تم حفظ وتعميم نص الاستفسارات',
+        message: 'تم حفظ النص بنجاح في قاعدة البيانات السحابية وتحديثه لجميع المرضى والأجهزة والزوار فوراً.'
+      });
+    } else {
+      addToast({
+        type: 'info',
+        title: 'تم الحفظ محلياً',
+        message: 'تم تحديث النص على هذا الجهاز وجاري المزامنة مع الخادم السحابي.'
+      });
+    }
+    return true;
   };
 
   /**

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import * as XLSX from 'xlsx';
 import { 
@@ -10,7 +10,6 @@ import {
   Plus, 
   Edit2, 
   Trash2, 
-  RotateCcw, 
   CheckCircle2, 
   AlertCircle,
   FileSpreadsheet,
@@ -23,7 +22,8 @@ import {
   Lock,
   ShieldCheck,
   Receipt,
-  Mail
+  Mail,
+  RefreshCw
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { AVAILABLE_PERMISSIONS } from '../services/storage';
@@ -38,7 +38,6 @@ export const AdminView: React.FC = () => {
     addClinic, 
     updateClinic, 
     addDoctor, 
-    resetToInitialData, 
     addToast,
     dailySchedule,
     updateDailySchedule,
@@ -174,6 +173,12 @@ export const AdminView: React.FC = () => {
 
   // حالة نص الاستفسارات والمساعدة
   const [supportTextDraft, setSupportTextDraft] = useState(supportInfoText);
+  const [isSavingSupportText, setIsSavingSupportText] = useState(false);
+
+  // تحديث مسودة النص عند ورود تحديثات فورية عبر Realtime أو مزامنة الخادم
+  useEffect(() => {
+    setSupportTextDraft(supportInfoText);
+  }, [supportInfoText]);
 
   // حالة تفويض الصلاحيات
   const [selectedRoleForPerms, setSelectedRoleForPerms] = useState<UserRole>('reception');
@@ -324,8 +329,10 @@ export const AdminView: React.FC = () => {
     }
   };
 
-  const handleSaveSupportText = () => {
-    updateSupportInfoText(supportTextDraft);
+  const handleSaveSupportText = async () => {
+    setIsSavingSupportText(true);
+    await updateSupportInfoText(supportTextDraft);
+    setIsSavingSupportText(false);
   };
 
   const handleSaveDoctorMaxCases = (doctorId: string, maxCases: number) => {
@@ -372,15 +379,6 @@ export const AdminView: React.FC = () => {
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-200" />
             <span>تصدير الحجوزات (Excel)</span>
-          </button>
-
-          <button
-            onClick={resetToInitialData}
-            className="px-3 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-700 dark:text-slate-200 rounded-xl text-xs font-semibold transition-all flex items-center gap-1 cursor-pointer"
-            title="إعادة تعيين البيانات النموذجية"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>استعادة النماذج</span>
           </button>
         </div>
       </div>
@@ -1048,10 +1046,15 @@ export const AdminView: React.FC = () => {
               <button
                 type="button"
                 onClick={handleSaveSupportText}
-                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
+                disabled={isSavingSupportText}
+                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
               >
-                <CheckCircle2 className="w-4 h-4 text-emerald-200" />
-                <span>حفظ وتحديث النص للمرضى</span>
+                {isSavingSupportText ? (
+                  <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                )}
+                <span>{isSavingSupportText ? 'جاري الحفظ والتعميم...' : 'حفظ وتحديث النص للمرضى'}</span>
               </button>
             </div>
 

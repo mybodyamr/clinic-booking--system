@@ -145,7 +145,14 @@ export function getStoredClinics(): Clinic[] {
       localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
       return INITIAL_CLINICS;
     }
-    return parsed;
+    // تنقية العيادات للتأكد من مطابقة العيادات الرسمية الأربعة المعتمدة بقاعدة البيانات
+    const validIds = new Set(INITIAL_CLINICS.map(c => c.id));
+    const filtered = parsed.filter(c => validIds.has(c.id));
+    if (filtered.length === INITIAL_CLINICS.length) {
+      return filtered;
+    }
+    localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
+    return INITIAL_CLINICS;
   } catch (e) {
     console.error('فشل قراءة بيانات العيادات:', e);
     return INITIAL_CLINICS;
@@ -172,7 +179,14 @@ export function getStoredDoctors(): Doctor[] {
       localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
       return INITIAL_DOCTORS;
     }
-    return parsed;
+    // تنقية الأطباء للتأكد من مطابقة الأطباء الأربعة المعتمدين بقاعدة البيانات
+    const validIds = new Set(INITIAL_DOCTORS.map(d => d.id));
+    const filtered = parsed.filter(d => validIds.has(d.id));
+    if (filtered.length === INITIAL_DOCTORS.length) {
+      return filtered;
+    }
+    localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
+    return INITIAL_DOCTORS;
   } catch (e) {
     console.error('فشل قراءة بيانات الأطباء:', e);
     return INITIAL_DOCTORS;
@@ -284,6 +298,9 @@ export const DEFAULT_PASSWORD_HASHES: Record<string, string> = {
   reception: '8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804', // Rcp@Sharia2026!
   cashier: '3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6', // Csh@Sharia2026!
   doctor: '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
+  'doctor.pediatrics': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
+  'doctor.ortho': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
+  'doctor.dental': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
 };
 
 // ==================== قائمة حسابات الكادر والمستخدمين الديناميكية ====================
@@ -317,6 +334,33 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     doctorId: 'doc-1',
     clinicId: 'clinic-internal',
     recoveryEmail: 'doctor.internal@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-doctor-pediatrics',
+    username: 'doctor.pediatrics',
+    displayName: 'د. فاطمة الزهراء كمال (عيادة الأطفال)',
+    role: 'doctor',
+    doctorId: 'doc-2',
+    clinicId: 'clinic-pediatrics',
+    recoveryEmail: 'doctor.pediatrics@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-doctor-ortho',
+    username: 'doctor.ortho',
+    displayName: 'د. حسام الدين عبد الله (عيادة العظام)',
+    role: 'doctor',
+    doctorId: 'doc-3',
+    clinicId: 'clinic-orthopedics',
+    recoveryEmail: 'doctor.ortho@sharia-clinics.eg'
+  },
+  {
+    id: 'staff-doctor-dental',
+    username: 'doctor.dental',
+    displayName: 'د. منى الشاذلي (عيادة الأسنان)',
+    role: 'doctor',
+    doctorId: 'doc-4',
+    clinicId: 'clinic-dental',
+    recoveryEmail: 'doctor.dental@sharia-clinics.eg'
   }
 ];
 
@@ -329,7 +373,20 @@ export function getStoredStaffAccounts(): StaffAccount[] {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
+      // التأكد من شمول كافة حسابات الأطباء الافتراضية
+      const existingUsernames = new Set(parsed.map((a: any) => String(a.username || '').toLowerCase()));
+      let hasAdded = false;
+      const merged = [...parsed];
+      for (const def of DEFAULT_STAFF_ACCOUNTS) {
+        if (!existingUsernames.has(def.username.toLowerCase())) {
+          merged.push(def);
+          hasAdded = true;
+        }
+      }
+      if (hasAdded) {
+        localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(merged));
+      }
+      return merged;
     }
     return DEFAULT_STAFF_ACCOUNTS;
   } catch (e) {

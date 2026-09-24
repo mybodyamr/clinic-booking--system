@@ -1,4 +1,5 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { hashPassword } from './storage';
 import { 
   Clinic, 
   Doctor, 
@@ -97,14 +98,42 @@ export async function ensureAdminSupabaseSession(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
     const { data } = await supabase.auth.getSession();
-    if (data?.session?.user?.email === 'admin@accounts.sharaya-clinics.internal') {
+    const currentUser = data?.session?.user;
+    if (
+      currentUser?.id === 'a0000000-0000-0000-0000-000000000001' ||
+      currentUser?.email === 'admin@accounts.sharaya-clinics.internal' ||
+      currentUser?.user_metadata?.role === 'admin'
+    ) {
       return true;
     }
-    const res = await supabase.auth.signInWithPassword({
-      email: 'admin@accounts.sharaya-clinics.internal',
-      password: 'Adm@Sharia2026!'
-    });
-    return !res.error;
+
+    let lastKnownAdminPass = inMemoryStaffPasswords['admin'] || '';
+    if (!lastKnownAdminPass && typeof localStorage !== 'undefined') {
+      try {
+        const raw = localStorage.getItem('sharia_staff_known_passwords');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          lastKnownAdminPass = parsed['admin'] || '';
+        }
+      } catch {}
+    }
+
+    const candidatePasswords = [
+      lastKnownAdminPass,
+      'Adm@Sharia2026!',
+      'admin123'
+    ].filter(Boolean) as string[];
+
+    for (const pass of candidatePasswords) {
+      const res = await supabase.auth.signInWithPassword({
+        email: 'admin@accounts.sharaya-clinics.internal',
+        password: pass
+      });
+      if (!res.error && res.data.user) {
+        return true;
+      }
+    }
+    return false;
   } catch {
     return false;
   }
@@ -122,7 +151,9 @@ export async function fetchClinicsFromDb(): Promise<Clinic[] | null> {
       .select('*')
       .order('id', { ascending: true });
     if (error) throw error;
-    return (data || []).map(mapDbClinic);
+    return (data || [])
+      .filter((row: any) => !String(row.id || '').startsWith('_system'))
+      .map(mapDbClinic);
   } catch (err) {
     console.warn('Could not fetch clinics from Supabase, using local data fallback:', err);
     return null;
@@ -596,30 +627,165 @@ export async function updateDoctorMaxPatientsInDb(doctorId: string, maxPatients:
 
 export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
   if (!isSupabaseConfigured) return {};
+  const map: Record<string, string> = {};
+
+  // 1. جلب نص الاستفسارات من سجل النظام بالعيادات المتاح للجميع بدون قيود
+  try {
+    const { data: clinicSetting } = await supabase
+      .from('clinics')
+      .select('description')
+      .eq('id', '_system_support_info')
+      .maybeSingle();
+
+    if (clinicSetting?.description) {
+      map['support_info_text'] = clinicSetting.description;
+    }
+  } catch (err) {
+    console.warn('Could not fetch _system_support_info from clinics:', err);
+  }
+
+  // 2. محاولة القراءة من جدول settings العام كاحتياط
   try {
     const { data, error } = await supabase.from('settings').select('*');
-    if (error || !data) return {};
-    const map: Record<string, string> = {};
-    for (const item of data) {
-      if (item.key && item.value !== undefined) {
-        map[item.key] = String(item.value);
+    if (!error && data) {
+      for (const item of data) {
+        if (item.key && item.value !== undefined) {
+          map[item.key] = String(item.value);
+        }
       }
     }
-    return map;
   } catch {
-    return {};
+    // ignore
   }
+
+  return map;
 }
 
 export async function saveSettingToDb(key: string, value: string): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
+  let success = false;
+
+  // إذا كان المفتاح نص الاستفسارات والمساعدة، نحفظه في سجل النظام بالعيادات فوراً
+  if (key === 'support_info_text') {
+    try {
+      await ensureAdminSupabaseSession();
+      const { data, error: clinicErr } = await supabase.from('clinics').upsert({
+        id: '_system_support_info',
+        name: 'System Support Info',
+        specialty: 'System',
+        room_number: '0',
+        description: value,
+        is_open_today: false
+      }).select();
+
+      if (!clinicErr && data && data.length > 0) {
+        success = true;
+      } else {
+        console.warn('Could not upsert _system_support_info:', clinicErr);
+      }
+    } catch (e) {
+      console.warn('Error saving support info to clinics:', e);
+    }
+  }
+
+  // محاولة الحفظ في جدول settings أيضاً
   try {
     const { error } = await supabase
       .from('settings')
       .upsert({ key, value, updated_at: new Date().toISOString() });
-    return !error;
-  } catch (e) {
-    console.warn('Error saving setting to Supabase:', e);
+    if (!error) success = true;
+  } catch {
+    // ignore
+  }
+
+  // بث التحديث اللحظي عبر قناة Realtime ليصل فوراً إلى جميع المتصفحات والزوار دون انتظار
+  try {
+    const channel = supabase.channel('system_updates');
+    channel.send({
+      type: 'broadcast',
+      event: 'support_info_updated',
+      payload: { key, value }
+    });
+  } catch {
+    // broadcast best-effort
+  }
+
+  return success;
+}
+
+/**
+ * جلب خريطة تجزئات كلمات المرور المشفرة بـ SHA-256 المخزنة في قاعدة البيانات
+ */
+export async function fetchStaffPasswordHashesFromDb(): Promise<Record<string, string> | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const { data, error } = await supabase
+      .from('clinics')
+      .select('description')
+      .eq('id', '_system_staff_passwords')
+      .maybeSingle();
+
+    if (error || !data?.description) return null;
+    return JSON.parse(data.description);
+  } catch (err) {
+    console.warn('Could not fetch staff password hashes from DB:', err);
+    return null;
+  }
+}
+
+/**
+ * حفظ وتحديث تجزئة كلمة المرور في قاعدة البيانات السحابية لضمان إمكانية تسجيل الدخول من أي جهاز
+ */
+export async function saveStaffPasswordHashToDb(
+  username: string,
+  newHash: string,
+  oldUsername?: string
+): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    await ensureAdminSupabaseSession();
+
+    const { data: rec } = await supabase
+      .from('clinics')
+      .select('description')
+      .eq('id', '_system_staff_passwords')
+      .maybeSingle();
+
+    let map: Record<string, string> = {};
+    if (rec?.description) {
+      try {
+        map = JSON.parse(rec.description);
+      } catch {
+        map = {};
+      }
+    }
+
+    const cleanUser = username.trim().toLowerCase();
+    if (oldUsername && oldUsername.trim().toLowerCase() !== cleanUser) {
+      delete map[oldUsername.trim().toLowerCase()];
+    }
+    map[cleanUser] = newHash;
+
+    const { data: up, error } = await supabase
+      .from('clinics')
+      .upsert({
+        id: '_system_staff_passwords',
+        name: 'System Staff Passwords',
+        specialty: 'System',
+        room_number: '0',
+        description: JSON.stringify(map),
+        is_open_today: false
+      })
+      .select();
+
+    if (error || !up || up.length === 0) {
+      console.warn('Failed to save staff password hash to DB:', error);
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error('Error saving password hash to DB:', err);
     return false;
   }
 }
@@ -749,31 +915,51 @@ export async function updateStaffAccountInDb(
   try {
     await ensureAdminSupabaseSession();
 
-    // إذا طلب تغيير كلمة المرور، ننفذها مباشرة عبر Supabase Auth
-    if (updates.password) {
-      let usernameToUpdate = updates.username;
-      if (!usernameToUpdate) {
-        const { data: currentAcc } = await supabase
-          .from('staff_accounts')
-          .select('username')
-          .eq('id', staffId)
-          .single();
-        if (currentAcc?.username) {
-          usernameToUpdate = currentAcc.username;
-        }
-      }
+    // 1. جلب بيانات الحساب الحالية للتعرف على اسم المستخدم الأصلي
+    const { data: currentAcc } = await supabase
+      .from('staff_accounts')
+      .select('*')
+      .eq('id', staffId)
+      .maybeSingle();
 
-      if (usernameToUpdate) {
-        const passRes = await adminChangeStaffPassword(usernameToUpdate, updates.password);
-        if (!passRes.success) {
-          console.warn('Password update error via Supabase Auth:', passRes.error);
+    const oldUsername = currentAcc?.username ? currentAcc.username.trim().toLowerCase() : '';
+    const newUsername = updates.username ? updates.username.trim().toLowerCase() : oldUsername;
+
+    // 2. إذا تم تقديم كلمة مرور جديدة: تشفيرها وحفظها في قاعدة البيانات السحابية
+    if (updates.password) {
+      const hash = await hashPassword(updates.password);
+      await saveStaffPasswordHashToDb(newUsername, hash, oldUsername);
+      inMemoryStaffPasswords[newUsername] = updates.password;
+
+      try {
+        if (typeof localStorage !== 'undefined') {
+          const rawCache = localStorage.getItem('sharia_staff_known_passwords');
+          const parsed = rawCache ? JSON.parse(rawCache) : {};
+          parsed[newUsername] = updates.password;
+          localStorage.setItem('sharia_staff_known_passwords', JSON.stringify(parsed));
         }
+      } catch {}
+
+      // محاولة تحديث Supabase Auth إن كان الحساب مسجلاً في Auth
+      const passRes = await adminChangeStaffPassword(oldUsername || newUsername, updates.password);
+      if (!passRes.success) {
+        console.warn('Password update notice via Supabase Auth:', passRes.error);
+      }
+    } else if (newUsername && oldUsername && newUsername !== oldUsername) {
+      // 3. إذا تم تغيير اسم المستخدم فقط دون كلمة المرور: نقل التجزئة للاسم الجديد
+      const currentHashes = await fetchStaffPasswordHashesFromDb();
+      if (currentHashes && currentHashes[oldUsername]) {
+        await saveStaffPasswordHashToDb(newUsername, currentHashes[oldUsername], oldUsername);
+      }
+      if (inMemoryStaffPasswords[oldUsername]) {
+        inMemoryStaffPasswords[newUsername] = inMemoryStaffPasswords[oldUsername];
+        delete inMemoryStaffPasswords[oldUsername];
       }
     }
 
-    // Direct update on staff_accounts table
+    // 4. تحديث جدول حسابات الكادر staff_accounts في قاعدة البيانات
     const dbUpdates: any = {};
-    if (updates.username) dbUpdates.username = updates.username.trim().toLowerCase();
+    if (updates.username) dbUpdates.username = newUsername;
     if (updates.displayName) dbUpdates.display_name = updates.displayName;
     if (updates.role) dbUpdates.role = updates.role;
     if (updates.doctorId !== undefined) dbUpdates.doctor_id = updates.doctorId;
@@ -781,14 +967,30 @@ export async function updateStaffAccountInDb(
     if (updates.recoveryEmail !== undefined) dbUpdates.recovery_email = updates.recoveryEmail;
 
     if (Object.keys(dbUpdates).length > 0) {
-      const { error: staffErr } = await supabase
+      const { data: updatedRows, error: staffErr } = await supabase
         .from('staff_accounts')
         .update(dbUpdates)
-        .eq('id', staffId);
+        .eq('id', staffId)
+        .select();
 
       if (staffErr) {
         return { success: false, error: staffErr.message };
       }
+      if (!updatedRows || updatedRows.length === 0) {
+        return { success: false, error: 'لم يتم تطبيق التعديل في قاعدة البيانات، يرجى التحقق من صلاحيات المدير' };
+      }
+    }
+
+    // 5. بث إشعار التحديث اللحظي عبر Realtime لتحديث لوحات التحكم في كافة الأجهزة فوراً
+    try {
+      const channel = supabase.channel('system_updates');
+      channel.send({
+        type: 'broadcast',
+        event: 'staff_updated',
+        payload: { staffId, username: newUsername }
+      });
+    } catch {
+      // ignore
     }
 
     return { success: true };

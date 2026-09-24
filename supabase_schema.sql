@@ -458,18 +458,28 @@ ON CONFLICT (date, clinic_id) DO UPDATE SET
   is_open = EXCLUDED.is_open,
   doctor_id = EXCLUDED.doctor_id;
 
--- إدراج حسابات الكادر الأربعة
+-- إدراج حسابات الكادر السبعة (مدير، استقبال، خزينة، و4 أطباء للعيادات التخصصية)
 INSERT INTO public.staff_accounts (id, username, display_name, role, doctor_id, clinic_id, recovery_email)
 VALUES
   ('staff-admin', 'admin', 'د. أحمد الشناوي (مدير المنظومة)', 'admin', NULL, NULL, 'admin@sharia-clinics.eg'),
   ('staff-reception', 'reception', 'أ. سارة مصطفى (مسؤولة الاستقبال)', 'reception', NULL, NULL, 'reception@sharia-clinics.eg'),
   ('staff-cashier', 'cashier', 'أ. محمود إبراهيم (أمين الصندوق والخزينة)', 'cashier', NULL, NULL, 'cashier@sharia-clinics.eg'),
-  ('staff-doctor', 'doctor', 'د. علي عبد الرحمن السقا (طبيب باطنة)', 'doctor', 'doc-1', 'clinic-internal', 'doctor.internal@sharia-clinics.eg')
+  ('staff-doctor', 'doctor', 'د. علي عبد الرحمن السقا (طبيب باطنة)', 'doctor', 'doc-1', 'clinic-internal', 'doctor.internal@sharia-clinics.eg'),
+  ('staff-doctor-pediatrics', 'doctor.pediatrics', 'د. فاطمة الزهراء كمال (طبيبة أطفال)', 'doctor', 'doc-2', 'clinic-pediatrics', 'doctor.pediatrics@sharia-clinics.eg'),
+  ('staff-doctor-ortho', 'doctor.ortho', 'د. حسام الدين عبد الله (طبيب عظام)', 'doctor', 'doc-3', 'clinic-orthopedics', 'doctor.ortho@sharia-clinics.eg'),
+  ('staff-doctor-dental', 'doctor.dental', 'د. منى الشاذلي (طبيبة أسنان)', 'doctor', 'doc-4', 'clinic-dental', 'doctor.dental@sharia-clinics.eg')
 ON CONFLICT (id) DO UPDATE SET
   username = EXCLUDED.username,
   display_name = EXCLUDED.display_name,
   role = EXCLUDED.role,
   recovery_email = EXCLUDED.recovery_email;
+
+-- إدراج سجلات النظام المخصصة للإعدادات وكلمات المرور المشفرة
+INSERT INTO public.clinics (id, name, specialty, room_number, floor, price, is_open_today, description)
+VALUES 
+  ('_system_support_info', 'System Support Info', 'System', '0', 'الأول', 0, false, 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.\nللتواصل: 01014615606'),
+  ('_system_staff_passwords', 'System Staff Passwords', 'System', '0', 'الأول', 0, false, '{"admin":"2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558","reception":"8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804","cashier":"3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6","doctor":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.pediatrics":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.ortho":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.dental":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6"}')
+ON CONFLICT (id) DO NOTHING;
 
 -- ==============================================================================
 -- إنشاء مستخدمي Supabase Auth الأربعة بكلمات المرور الرسمية
