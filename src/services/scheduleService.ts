@@ -35,13 +35,34 @@ export function normalizeArabicDay(day: string): string {
 }
 
 /**
+ * تحويل تاريخ إلى كائن Date بأمان في التوقيت المحلي عند منتصف النهار لتجنب أي إزاحة زمنية
+ */
+export function parseDateSafe(dateInput: Date | string): Date {
+  if (dateInput instanceof Date) return dateInput;
+  if (!dateInput) return new Date();
+  if (dateInput.includes('T')) return new Date(dateInput);
+  const parts = dateInput.split('-').map(Number);
+  if (parts.length === 3 && !isNaN(parts[0]) && !isNaN(parts[1]) && !isNaN(parts[2])) {
+    return new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
+  }
+  return new Date(dateInput);
+}
+
+/**
+ * الحصول على سلسلة التاريخ المحلي بصيغة YYYY-MM-DD
+ */
+export function getLocalDateStr(date: Date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+/**
  * استخراج اسم اليوم بالعربية لتاريخ محدد
  */
 export function getArabicDayName(dateInput: Date | string): string {
-  const d = typeof dateInput === 'string' 
-    ? new Date(dateInput.includes('T') ? dateInput : `${dateInput}T00:00:00`)
-    : dateInput;
-  
+  const d = parseDateSafe(dateInput);
   const dayIndex = d.getDay(); // 0 = Sunday, 1 = Monday, ..., 6 = Saturday
   const mapping: { [key: number]: string } = {
     0: 'الأحد',
@@ -229,6 +250,7 @@ export interface ClinicAvailabilityResult {
   reason?: string;
   isOffline: boolean;
   isNotScheduledToday: boolean;
+  isFutureDate: boolean;
   isShiftEnded: boolean;
   isFullyBooked: boolean;
   shift: ParsedShiftTimes;
@@ -236,12 +258,138 @@ export interface ClinicAvailabilityResult {
   maxAllowed: number;
 }
 
+const ARABIC_MONTHS = [
+  'يناير', 'فبراير', 'مارس', 'إبريل', 'مايو', 'يونيو',
+  'يوليو', 'أغسطس', 'سبتمبر', 'أكتوبر', 'نوفمبر', 'ديسمبر'
+];
+
+export function formatArabicDateDisplay(dateInput: Date | string): string {
+  const d = parseDateSafe(dateInput);
+  const day = d.getDate();
+  const month = ARABIC_MONTHS[d.getMonth()] || '';
+  return `${day} ${month}`;
+}
+
 /**
- * الفحص الشامل لتوافر العيادة للحجز بناءً على الركائز الأربعة المطلوبة:
- * 1. حالة التواجد اليومية للطبيب (متاح / غير متاح)
- * 2. الجدول الأسبوعي (أيام العمل)
- * 3. انتهاء وقت العيادة الحقيقي
- * 4. اكتمال العدد الأقصى للحجوزات
+ * تنسيق التاريخ كاملاً باليوم والشهر والسنة بالعربية (مثال: "الخميس، 24 سبتمبر 2026")
+ */
+export function formatArabicFullDate(dateInput: Date | string): string {
+  const d = parseDateSafe(dateInput);
+  const dayName = getArabicDayName(d);
+  const day = d.getDate();
+  const month = ARABIC_MONTHS[d.getMonth()] || '';
+  const year = d.getFullYear();
+  return `${dayName}، ${day} ${month} ${year}`;
+}
+
+export type ScheduleBadgeType = 
+  | 'available' 
+  | 'locked_future' 
+  | 'not_scheduled' 
+  | 'fully_booked' 
+  | 'shift_ended' 
+  | 'offline';
+
+export interface DoctorDayScheduleItem {
+  dateStr: string;        // '2026-09-24'
+  dayName: string;        // 'الخميس'
+  dayMonthStr: string;    // '24 سبتمبر'
+  isToday: boolean;       // true if today
+  isScheduled: boolean;   // true if doctor is present on this day of the week
+  isBookingOpen: boolean; // true ONLY if isToday && isScheduled && doctor is available
+  statusText: string;     // 'متاح للحجز اليوم ✅' or '🔒 متواجد (يُفتح الحجز في موعده)' or 'غير متواجد'
+  badgeType: ScheduleBadgeType;
+  helperText?: string;
+}
+
+/**
+ * توليد جدول حضور الطبيب للأيام القادمة (اليوم + الأيام القادمة)
+ * يعرض أيام حضور الطبيب القادمة بوضوح للمريض، مع قفل الحجز للأيام المستقبلية وفتحه تلقائياً في يوم الحضور فقط
+ */
+export function getUpcomingDoctorSchedule(
+  doctor: Doctor, 
+  daysAhead = 7, 
+  fromDate?: Date,
+  bookings: Booking[] = []
+): DoctorDayScheduleItem[] {
+  const baseDate = fromDate || new Date();
+  const todayStr = getLocalDateStr(baseDate);
+  const items: DoctorDayScheduleItem[] = [];
+
+  for (let i = 0; i < daysAhead; i++) {
+    const cur = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate() + i, 12, 0, 0);
+    const dateStr = getLocalDateStr(cur);
+    const dayName = getArabicDayName(cur);
+    const dayMonthStr = formatArabicDateDisplay(cur);
+    const isToday = (i === 0) || (dateStr === todayStr);
+    const isScheduled = isDoctorScheduledOnDate(doctor, dateStr);
+
+    let isBookingOpen = false;
+    let statusText = '✕ غير متواجد';
+    let badgeType: ScheduleBadgeType = 'not_scheduled';
+    let helperText: string | undefined = 'خارج جدول الحضور المعتمد';
+
+    if (isScheduled) {
+      if (isToday) {
+        const check = checkClinicAvailability(doctor, doctor.clinicId, dateStr, bookings, baseDate);
+        if (check.allowed) {
+          isBookingOpen = true;
+          statusText = '✅ متاح للحجز اليوم';
+          badgeType = 'available';
+          helperText = 'اليوم الفعلي - باب الحجز مفتوح ومتاح للكشف الآن';
+        } else if (check.isOffline) {
+          statusText = '⚠️ معتذر اليوم';
+          badgeType = 'offline';
+          helperText = doctor.unavailableReason ? `اعتذار رسمي (${doctor.unavailableReason})` : 'الطبيب غير متواجد بالعيادة اليوم';
+        } else if (check.isShiftEnded) {
+          statusText = '⏱️ انتهت مناوبة اليوم';
+          badgeType = 'shift_ended';
+          helperText = `انتهى وقت استقبال الحالات اليوم (${format24To12Arabic(check.shift.endTime)})`;
+        } else if (check.isFullyBooked) {
+          statusText = '🔒 اكتمل العدد اليوم';
+          badgeType = 'fully_booked';
+          helperText = `اكتمل الحد الأقصى للحالات (${check.maxAllowed} حالة)`;
+        } else {
+          statusText = check.reason || 'غير متاح اليوم';
+          badgeType = 'not_scheduled';
+          helperText = check.reason;
+        }
+      } else {
+        // الأيام المستقبلية: الطبيب متواجد في هذا اليوم ولكن الحجز مقفل ويفتح تلقائياً في صباح نفس اليوم
+        isBookingOpen = false;
+        statusText = '🔒 متواجد بالعيادة';
+        badgeType = 'locked_future';
+        helperText = `غير متاح للحجز حالياً — يُفتح الحجز تلقائياً صباح يوم ${dayName} (${dayMonthStr})`;
+      }
+    } else {
+      statusText = '✕ غير متواجد';
+      badgeType = 'not_scheduled';
+      helperText = 'إجازة الطبيب وفقاً للجدول الأسبوعي';
+    }
+
+    items.push({
+      dateStr,
+      dayName,
+      dayMonthStr,
+      isToday,
+      isScheduled,
+      isBookingOpen,
+      statusText,
+      badgeType,
+      helperText
+    });
+  }
+
+  return items;
+}
+
+/**
+ * الفحص الشامل لتوافر العيادة للحجز بناءً على الركائز الأساسية:
+ * 1. التاريخ الحالي (الحجز متاح فقط لليوم الفعلي الحالي، ومواعيد الأيام القادمة تُفتح تلقائياً في صباح يوم الكشف)
+ * 2. حالة التواجد اليومية للطبيب (متاح / غير متاح)
+ * 3. الجدول الأسبوعي (أيام العمل المحددة من الإدارة)
+ * 4. انتهاء وقت العيادة الحقيقي
+ * 5. اكتمال العدد الأقصى للحجوزات
  */
 export function checkClinicAvailability(
   doctor: Doctor,
@@ -251,36 +399,24 @@ export function checkClinicAvailability(
   currentTime?: Date
 ): ClinicAvailabilityResult {
   const now = currentTime || new Date();
+  const todayStr = getLocalDateStr(now);
   const shift = parseDoctorShiftTimes(doctor);
   const currentCount = getDoctorBookingsCount(doctor.id, clinicId, dateStr, bookings);
   const maxAllowed = doctor.maxDailyBookings || 20;
 
-  // 1. حالة التواجد اليومية
-  const isOffline = doctor.status !== 'available';
-  if (isOffline) {
-    const absenceReason = doctor.unavailableReason ? ` (${doctor.unavailableReason})` : '';
-    return {
-      allowed: false,
-      reason: `الطبيب غير متاح للعمل اليوم${absenceReason}.`,
-      isOffline: true,
-      isNotScheduledToday: false,
-      isShiftEnded: false,
-      isFullyBooked: false,
-      shift,
-      currentCount,
-      maxAllowed
-    };
-  }
-
-  // 2. الجدول الأسبوعي
-  const isNotScheduledToday = !isDoctorScheduledOnDate(doctor, dateStr);
-  if (isNotScheduledToday) {
+  // 1. فحص التاريخ: منع الحجز المسبق في الأيام المستقبلية مع عرضها كأيام حضور
+  if (dateStr > todayStr) {
     const dayName = getArabicDayName(dateStr);
+    const isDocWorking = isDoctorScheduledOnDate(doctor, dateStr);
+    const dateDisplay = formatArabicDateDisplay(dateStr);
     return {
       allowed: false,
-      reason: `العيادة غير مجدولة للعمل في هذا اليوم (${dayName}) وفقاً للجدول الأسبوعي للطبيب.`,
+      reason: isDocWorking
+        ? `🔒 الحجز غير متاح حالياً لهذا اليوم (${dayName} ${dateDisplay}). الطبيب متواجد ومسجل في هذا الموعد، وسيُفتح باب الحجز تلقائياً في صباح نفس اليوم.`
+        : `العيادة غير مجدولة للعمل في هذا اليوم (${dayName} ${dateDisplay}) وفقاً للجدول الأسبوعي للطبيب.`,
       isOffline: false,
-      isNotScheduledToday: true,
+      isNotScheduledToday: !isDocWorking,
+      isFutureDate: true,
       isShiftEnded: false,
       isFullyBooked: false,
       shift,
@@ -289,14 +425,13 @@ export function checkClinicAvailability(
     };
   }
 
-  // 3. انتهاء وقت العيادة
-  const shiftEnded = isClinicShiftEnded(doctor, dateStr, now);
-  if (shiftEnded) {
+  if (dateStr < todayStr) {
     return {
       allowed: false,
-      reason: `انتهت مناوبة العيادة اليوم في تمام الساعة (${format24To12Arabic(shift.endTime)}). توقف استقبال الحجوزات.`,
+      reason: 'لا يمكن حجز موعد في تاريخ مضى.',
       isOffline: false,
       isNotScheduledToday: false,
+      isFutureDate: false,
       isShiftEnded: true,
       isFullyBooked: false,
       shift,
@@ -305,7 +440,60 @@ export function checkClinicAvailability(
     };
   }
 
-  // 4. اكتمال العدد الأقصى للحجوزات
+  // 2. حالة التواجد اليومية
+  const isOffline = doctor.status !== 'available';
+  if (isOffline) {
+    const absenceReason = doctor.unavailableReason ? ` (${doctor.unavailableReason})` : '';
+    return {
+      allowed: false,
+      reason: `الطبيب غير متاح للعمل اليوم${absenceReason}.`,
+      isOffline: true,
+      isNotScheduledToday: false,
+      isFutureDate: false,
+      isShiftEnded: false,
+      isFullyBooked: false,
+      shift,
+      currentCount,
+      maxAllowed
+    };
+  }
+
+  // 3. الجدول الأسبوعي لليوم الحالي
+  const isNotScheduledToday = !isDoctorScheduledOnDate(doctor, dateStr);
+  if (isNotScheduledToday) {
+    const dayName = getArabicDayName(dateStr);
+    return {
+      allowed: false,
+      reason: `العيادة غير مجدولة للعمل اليوم (${dayName}) وفقاً لجدول الطبيب المعتمد.`,
+      isOffline: false,
+      isNotScheduledToday: true,
+      isFutureDate: false,
+      isShiftEnded: false,
+      isFullyBooked: false,
+      shift,
+      currentCount,
+      maxAllowed
+    };
+  }
+
+  // 4. انتهاء وقت العيادة لليوم الحالي
+  const shiftEnded = isClinicShiftEnded(doctor, dateStr, now);
+  if (shiftEnded) {
+    return {
+      allowed: false,
+      reason: `انتهت مناوبة العيادة اليوم في تمام الساعة (${format24To12Arabic(shift.endTime)}). توقف استقبال الحجوزات.`,
+      isOffline: false,
+      isNotScheduledToday: false,
+      isFutureDate: false,
+      isShiftEnded: true,
+      isFullyBooked: false,
+      shift,
+      currentCount,
+      maxAllowed
+    };
+  }
+
+  // 5. اكتمال العدد الأقصى للحجوزات
   const fullyBooked = currentCount >= maxAllowed;
   if (fullyBooked) {
     return {
@@ -313,6 +501,7 @@ export function checkClinicAvailability(
       reason: `اكتمل العدد الأقصى لحجوزات العيادة اليوم (${maxAllowed} حالة).`,
       isOffline: false,
       isNotScheduledToday: false,
+      isFutureDate: false,
       isShiftEnded: false,
       isFullyBooked: true,
       shift,
@@ -325,6 +514,7 @@ export function checkClinicAvailability(
     allowed: true,
     isOffline: false,
     isNotScheduledToday: false,
+    isFutureDate: false,
     isShiftEnded: false,
     isFullyBooked: false,
     shift,

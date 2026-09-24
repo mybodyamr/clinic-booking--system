@@ -51,7 +51,8 @@ import {
 import { 
   checkClinicAvailability, 
   ClinicAvailabilityResult,
-  parseDoctorShiftTimes
+  parseDoctorShiftTimes,
+  getLocalDateStr
 } from '../services/scheduleService';
 import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 import { 
@@ -304,6 +305,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const localHashes = getStoredStaffPasswordHashes();
             const merged = { ...localHashes, ...freshHashes };
             localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(merged));
+          }
+        } catch {
+          // ignore
+        }
+      })
+      .on('broadcast', { event: 'doctors_updated' }, async () => {
+        if (!isMounted) return;
+        try {
+          const freshDoctors = await fetchDoctorsFromDb();
+          if (freshDoctors && freshDoctors.length > 0 && isMounted) {
+            setDoctors(freshDoctors);
+            saveDoctors(freshDoctors);
           }
         } catch {
           // ignore
@@ -798,7 +811,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     // 2. جدول العمل الأسبوعي (أيام العمل)
     // 3. انتهاء وقت العيادة الحقيقي
     // 4. اكتمال العدد الأقصى للحجوزات
-    const bookingDate = data.date || new Date().toISOString().split('T')[0];
+    const todayStr = getLocalDateStr();
+    const bookingDate = data.date || todayStr;
+
+    // حظر الحجز المسبق للأيام المستقبلية أو الماضية قطيعاً
+    if (bookingDate > todayStr) {
+      return {
+        success: false,
+        error: 'عذراً، الحجز متاح فقط لليوم الحالي. جدول حضور الطبيب ظاهر للاطلاع، ويُفتح الحجز للأيام القادمة تلقائياً في صباح يوم الكشف.'
+      };
+    }
+    if (bookingDate < todayStr) {
+      return {
+        success: false,
+        error: 'لا يمكن تسجيل حجز بتاريخ سابق.'
+      };
+    }
+
     const availabilityCheck = checkClinicAvailability(doctor, clinic.id, bookingDate, bookings);
 
     if (!availabilityCheck.allowed) {
@@ -992,14 +1021,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     shiftStartTime?: string,
     shiftEndTime?: string
   ) => {
+    const shift = parseDoctorShiftTimes({ 
+      scheduleHours, 
+      shiftStartTime, 
+      shiftEndTime 
+    });
+    const finalStartTime = shiftStartTime || shift.startTime;
+    const finalEndTime = shiftEndTime || shift.endTime;
+
     const updated = doctors.map(d => {
       if (d.id === doctorId) {
         return { 
           ...d, 
           scheduleDays, 
           scheduleHours,
-          ...(shiftStartTime ? { shiftStartTime } : {}),
-          ...(shiftEndTime ? { shiftEndTime } : {})
+          shiftStartTime: finalStartTime,
+          shiftEndTime: finalEndTime
         };
       }
       return d;
@@ -1012,6 +1049,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         scheduleDays,
         scheduleHours
       });
+      try {
+        const channel = supabase.channel('system_updates');
+        channel.send({
+          type: 'broadcast',
+          event: 'doctors_updated',
+          payload: { doctorId, scheduleDays, scheduleHours }
+        });
+      } catch {
+        // ignore
+      }
     }
 
     addToast({
@@ -1033,6 +1080,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured) {
       updateDoctorMaxPatientsInDb(doctorId, maxDailyBookings);
+      try {
+        const channel = supabase.channel('system_updates');
+        channel.send({
+          type: 'broadcast',
+          event: 'doctors_updated',
+          payload: { doctorId, maxDailyBookings }
+        });
+      } catch {
+        // ignore
+      }
     }
 
     addToast({
