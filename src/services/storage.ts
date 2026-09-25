@@ -6,6 +6,7 @@ const STORAGE_KEYS = {
   CLINICS: 'sharaya_clinics_v2',
   DOCTORS: 'sharaya_doctors_v2',
   BOOKINGS: 'sharaya_bookings_v2',
+  BOOKINGS_CUTOFF: 'sharaya_bookings_cutoff_v2',
   SESSION: 'sharaya_session_v2',
   THEME: 'sharaya_theme_v2',
   DAILY_SCHEDULE: 'sharaya_daily_schedule_v2',
@@ -201,28 +202,59 @@ export function saveDoctors(doctors: Doctor[]): void {
   }
 }
 
+export function getStoredBookingsCutoffDate(): string {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function saveStoredBookingsCutoffDate(dateStr: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS_CUTOFF, dateStr);
+  } catch {}
+}
+
 export function getStoredBookings(): Booking[] {
   try {
+    const cutoffDate = localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
     const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
     if (!raw) {
+      if (cutoffDate) return [];
       localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
       return INITIAL_BOOKINGS;
     }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
+      if (cutoffDate) return [];
       localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
       return INITIAL_BOOKINGS;
     }
-    return parsed;
+    // تصفية أي حجوزات محذوفة صراحة أو تسبق تاريخ القطع
+    const filtered = parsed.filter((b: Booking) => {
+      if (!b) return false;
+      if (b.notes === '__PURGED_PAST_BOOKING__') return false;
+      if (cutoffDate && b.date < cutoffDate) return false;
+      return true;
+    });
+    return filtered;
   } catch (e) {
     console.error('فشل قراءة بيانات الحجوزات:', e);
-    return INITIAL_BOOKINGS;
+    return [];
   }
 }
 
 export function saveBookings(bookings: Booking[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(bookings));
+    const cutoffDate = localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
+    const valid = (bookings || []).filter((b: Booking) => {
+      if (!b) return false;
+      if (b.notes === '__PURGED_PAST_BOOKING__') return false;
+      if (cutoffDate && b.date < cutoffDate) return false;
+      return true;
+    });
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(valid));
   } catch (e) {
     console.error('فشل حفظ بيانات الحجوزات:', e);
   }
@@ -230,12 +262,19 @@ export function saveBookings(bookings: Booking[]): void {
 
 export function removeBookingsBeforeDate(dateStr: string): Booking[] {
   try {
-    const current = getStoredBookings();
-    const remaining = current.filter(b => b.date >= dateStr);
-    saveBookings(remaining);
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS_CUTOFF, dateStr);
+    const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
+    let current: Booking[] = [];
+    if (raw) {
+      try {
+        current = JSON.parse(raw);
+      } catch {}
+    }
+    const remaining = current.filter(b => b && b.date >= dateStr && b.notes !== '__PURGED_PAST_BOOKING__');
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(remaining));
     return remaining;
   } catch (e) {
-    return getStoredBookings();
+    return [];
   }
 }
 

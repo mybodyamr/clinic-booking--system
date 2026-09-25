@@ -2,17 +2,40 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
 const envProcess = typeof process !== 'undefined' ? process.env : undefined;
 
-const rawUrl = (
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) ||
-  envProcess?.VITE_SUPABASE_URL ||
-  'https://rugwzfaiensjdxtoipop.supabase.co'
-).trim();
+const getCandidateUrl = (): string => {
+  const metaUrl = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) || '';
+  const procUrl = envProcess?.VITE_SUPABASE_URL || '';
+  for (const candidate of [metaUrl, procUrl]) {
+    if (
+      candidate && 
+      !candidate.includes('placeholder') && 
+      !candidate.includes('olfpqxtmywhfhglofebc') &&
+      candidate.startsWith('https://')
+    ) {
+      return candidate.trim();
+    }
+  }
+  return 'https://rugwzfaiensjdxtoipop.supabase.co';
+};
 
-const rawKey = (
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) ||
-  envProcess?.VITE_SUPABASE_ANON_KEY ||
-  'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2'
-).trim();
+const getCandidateKey = (): string => {
+  const metaKey = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) || '';
+  const procKey = envProcess?.VITE_SUPABASE_ANON_KEY || '';
+  for (const candidate of [metaKey, procKey]) {
+    if (
+      candidate && 
+      !candidate.includes('placeholder') && 
+      candidate.length > 20 &&
+      !candidate.includes('0YGqEJcwas7CqewI4iL_sA_9E9CPQps')
+    ) {
+      return candidate.trim();
+    }
+  }
+  return 'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2';
+};
+
+const rawUrl = getCandidateUrl();
+const rawKey = getCandidateKey();
 
 // التحقق من أن الرابط ليس الرابط المحذوف القديم أو مجرد قالب وهمي
 const isDefunctOrPlaceholder = 

@@ -24,6 +24,8 @@ import {
   saveDoctors,
   getStoredBookings, 
   saveBookings,
+  removeBookingsBeforeDate,
+  saveStoredBookingsCutoffDate,
   getStoredSession, 
   saveSession,
   getStoredTheme, 
@@ -322,6 +324,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // ignore
         }
       })
+      .on('broadcast', { event: 'bookings_purged' }, async (payload: any) => {
+        if (!isMounted) return;
+        const cutoff = payload?.payload?.cutoffDate;
+        if (cutoff) {
+          saveStoredBookingsCutoffDate(cutoff);
+        }
+        const fresh = await fetchBookingsFromDb();
+        if (fresh && isMounted) {
+          setBookings(fresh);
+          saveBookings(fresh);
+        }
+      })
       .subscribe();
 
     // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات محدثة لحظياً
@@ -329,7 +343,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!isMounted) return;
       try {
         const fresh = await fetchBookingsFromDb();
-        if (fresh && fresh.length > 0 && isMounted) {
+        if (fresh && isMounted) {
           setBookings(prev => {
             if (JSON.stringify(prev) !== JSON.stringify(fresh)) {
               saveBookings(fresh);
@@ -1517,6 +1531,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.removeItem('sharaya_clinics_v2');
     localStorage.removeItem('sharaya_doctors_v2');
     localStorage.removeItem('sharaya_bookings_v2');
+    localStorage.removeItem('sharaya_bookings_cutoff_v2');
     localStorage.removeItem('sharaya_daily_schedule_v2');
     localStorage.removeItem('sharaya_role_permissions_v2');
     localStorage.removeItem('sharaya_support_info_text_v2');
@@ -1524,21 +1539,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearPastBookings = async (beforeDate?: string): Promise<{ success: boolean; count: number }> => {
-    const cutoffDate = beforeDate || new Date().toISOString().split('T')[0];
+    const cutoffDate = beforeDate || getLocalDateStr(new Date());
     const toRemove = bookings.filter(b => b.date < cutoffDate);
-    const remaining = bookings.filter(b => b.date >= cutoffDate);
+    const remaining = bookings.filter(b => b.date >= cutoffDate && b.notes !== '__PURGED_PAST_BOOKING__');
 
+    // 1. تحديث التخزين المحلي فورياً مع حفظ تاريخ القطع واستبعاد المحذوفات
+    removeBookingsBeforeDate(cutoffDate);
     setBookings(remaining);
     saveBookings(remaining);
 
+    // 2. تحديث وتطهير السجلات في قاعدة البيانات السحابية Supabase
     if (isSupabaseConfigured) {
       await deleteBookingsBeforeDateFromDb(cutoffDate);
+      const freshBookings = await fetchBookingsFromDb();
+      if (freshBookings) {
+        setBookings(freshBookings);
+        saveBookings(freshBookings);
+      }
     }
 
     addToast({
       type: 'success',
-      title: 'تم تنظيف الحجوزات السابقة',
-      message: `تم مسح ${toRemove.length} حجز من الأيام السابقة بنجاح.`
+      title: 'تم مسح سجلات الأيام السابقة',
+      message: `تم حذف ${toRemove.length} حجز من الأيام السابقة نهائياً من قاعدة البيانات والتخزين المحلي.`
     });
 
     return { success: true, count: toRemove.length };

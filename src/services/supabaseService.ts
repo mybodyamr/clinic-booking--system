@@ -178,12 +178,46 @@ export async function fetchDoctorsFromDb(): Promise<Doctor[] | null> {
 export async function fetchBookingsFromDb(): Promise<Booking[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
+    await ensureAdminSupabaseSession();
+
+    // 1. قراءة تاريخ القطع المخزن سحابياً إن وجد
+    let cloudCutoff = '';
+    try {
+      const { data: cutoffSetting } = await supabase
+        .from('clinics')
+        .select('description')
+        .eq('id', '_system_bookings_cutoff_date')
+        .maybeSingle();
+      if (cutoffSetting?.description) {
+        cloudCutoff = cutoffSetting.description.trim();
+      }
+    } catch {}
+
+    // قراءة تاريخ القطع المحلي كاحتياط
+    let localCutoff = '';
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localCutoff = localStorage.getItem('sharaya_bookings_cutoff_v2') || '';
+      } catch {}
+    }
+
+    const effectiveCutoff = cloudCutoff || localCutoff;
+
+    // استعلام الحجوزات مع استبعاد الحجوزات الموسومة بالحذف
     const { data, error } = await supabase
       .from('bookings')
       .select('*')
+      .or('notes.is.null,notes.neq.__PURGED_PAST_BOOKING__')
       .order('created_at', { ascending: false });
     if (error) throw error;
-    return (data || []).map(mapDbBooking);
+
+    const validRows = (data || []).filter((row: any) => {
+      if (row.notes === '__PURGED_PAST_BOOKING__') return false;
+      if (effectiveCutoff && row.date < effectiveCutoff) return false;
+      return true;
+    });
+
+    return validRows.map(mapDbBooking);
   } catch (err) {
     console.warn('Could not fetch bookings from Supabase, using local data fallback:', err);
     return null;
@@ -345,12 +379,55 @@ export async function deleteBookingsBeforeDateFromDb(dateStr: string): Promise<b
   if (!isSupabaseConfigured) return false;
   try {
     await ensureAdminSupabaseSession();
-    const { error } = await supabase
-      .from('bookings')
-      .delete()
-      .lt('date', dateStr);
 
-    return !error;
+    // 1. محاولة الحذف المباشر لجدول الحجوزات
+    try {
+      await supabase
+        .from('bookings')
+        .delete()
+        .lt('date', dateStr);
+    } catch {}
+
+    // 2. تحديث وتطهير جميع الحجوزات السابقة في قاعدة البيانات لوسمها بالحذف وإلغائها نهائياً
+    try {
+      await supabase
+        .from('bookings')
+        .update({
+          notes: '__PURGED_PAST_BOOKING__',
+          status: 'cancelled'
+        })
+        .lt('date', dateStr);
+    } catch (err) {
+      console.warn('Error purging past bookings in Supabase:', err);
+    }
+
+    // 3. تثبيت تاريخ القطع في سجل النظام السحابي لتعميمه وحمايته من استرجاع البيانات القديمة
+    try {
+      await supabase.from('clinics').upsert({
+        id: '_system_bookings_cutoff_date',
+        name: 'System Bookings Cutoff Date',
+        specialty: 'System',
+        room_number: '0',
+        floor: '0',
+        price: 0,
+        description: dateStr,
+        is_open_today: false
+      });
+    } catch (err) {
+      console.warn('Error saving cutoff date to clinics setting:', err);
+    }
+
+    // 4. بث إشعار التحديث اللحظي عبر Realtime
+    try {
+      const channel = supabase.channel('system_updates');
+      channel.send({
+        type: 'broadcast',
+        event: 'bookings_purged',
+        payload: { cutoffDate: dateStr }
+      });
+    } catch {}
+
+    return true;
   } catch (err) {
     console.warn('Error deleting old bookings in Supabase:', err);
     return false;
