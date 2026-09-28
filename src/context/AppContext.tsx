@@ -15,7 +15,9 @@ import {
   DailyScheduleState,
   SystemPermission,
   RolePermissionsMap,
-  StaffAccount
+  StaffAccount,
+  SystemErrorLog,
+  SystemErrorSource
 } from '../types';
 import { 
   getStoredClinics, 
@@ -32,6 +34,7 @@ import {
   saveTheme,
   sanitizeText,
   validateTripleName,
+  validateEgyptianPhone,
   checkBookingRateLimit,
   getStoredDailySchedule,
   saveDailySchedule,
@@ -39,6 +42,8 @@ import {
   saveRolePermissions,
   getStoredSupportInfoText,
   saveSupportInfoText,
+  getStoredOfficialWorkingHours,
+  saveOfficialWorkingHours,
   hashPassword,
   getStoredStaffPasswordHashes,
   saveStaffPasswordHash,
@@ -48,13 +53,26 @@ import {
   getStoredStaffAccounts,
   saveStaffAccounts,
   deleteStaffAccountById,
-  updateStaffAccountRecoveryEmail
+  updateStaffAccountRecoveryEmail,
+  markClinicDeletedLocally,
+  unmarkClinicDeletedLocally,
+  markDoctorDeletedLocally,
+  unmarkDoctorDeletedLocally,
+  getDeletedBookingIds,
+  markBookingDeletedLocally,
+  unmarkBookingDeletedLocally,
+  getStoredErrorLogs,
+  saveErrorLogs,
+  getPendingErrorLogs,
+  savePendingErrorLogs,
+  recordLocalSystemError
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
   ClinicAvailabilityResult,
   parseDoctorShiftTimes,
-  getLocalDateStr
+  getLocalDateStr,
+  isDoctorScheduledOnDate
 } from '../services/scheduleService';
 import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 import { 
@@ -69,15 +87,18 @@ import {
   saveStaffPasswordHashToDb,
   createPublicBookingRpc, 
   confirmPaymentRpc, 
+  fetchPatientTicketSecureRpc,
   markPatientLateAndCallNextRpc, 
   updateBookingStatusInDb, 
   updateDoctorStatusInDb, 
   updateDoctorInDb,
   updateDoctorMaxPatientsInDb,
   addDoctorToDb,
+  deleteDoctorFromDb,
   updateClinicInDb,
   addClinicToDb,
   deleteClinicFromDb,
+  createStaffAccountInDb,
   updateStaffAccountInDb,
   saveDailyScheduleToDb, 
   deleteStaffAccountRpc, 
@@ -86,7 +107,9 @@ import {
   subscribeToBookingsRealtime,
   ensureAdminSupabaseSession,
   adminChangeStaffPassword,
-  deleteBookingsBeforeDateFromDb
+  deleteBookingsBeforeDateFromDb,
+  deleteBookingFromDb,
+  reportClientErrorToDb
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -99,9 +122,29 @@ interface AppContextType {
   login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
   resetPasswordByAdmin: (username: string, newPass: string) => Promise<boolean>;
   staffAccounts: StaffAccount[];
-  deleteStaffAccount: (id: string) => boolean;
+  createStaffAccount: (input: {
+    username: string;
+    password: string;
+    displayName: string;
+    role: UserRole;
+    doctorId?: string | null;
+    clinicId?: string | null;
+    recoveryEmail?: string;
+  }) => Promise<boolean>;
+  deleteStaffAccount: (id: string) => Promise<boolean>;
   updateStaffRecoveryEmail: (id: string, email: string) => void;
-  updateStaffAccount: (id: string, updates: { username?: string; displayName?: string; recoveryEmail?: string; password?: string }) => Promise<boolean>;
+  updateStaffAccount: (
+    id: string,
+    updates: {
+      username?: string;
+      displayName?: string;
+      role?: UserRole;
+      doctorId?: string | null;
+      clinicId?: string | null;
+      recoveryEmail?: string;
+      password?: string;
+    }
+  ) => Promise<boolean>;
   logout: () => void;
   clinics: Clinic[];
   doctors: Doctor[];
@@ -115,6 +158,8 @@ interface AppContextType {
   hasPermission: (role: UserRole | undefined, permission: SystemPermission) => boolean;
   supportInfoText: string;
   updateSupportInfoText: (text: string) => Promise<boolean>;
+  officialWorkingHours: string;
+  updateOfficialWorkingHours: (text: string) => Promise<boolean>;
   getActiveClinicsForBooking: () => { clinic: Clinic; assignedDoctor?: Doctor }[];
   createBooking: (data: {
     patientName: string;
@@ -127,9 +172,10 @@ interface AppContextType {
     notes?: string;
   }) => Promise<{ success: boolean; booking?: Booking; error?: string }>;
   updateBookingStatus: (bookingId: string, status: BookingStatus) => void;
-  updatePaymentStatus: (bookingId: string, paymentStatus: PaymentStatus, method?: PaymentMethod) => void;
-  updateDoctorStatus: (doctorId: string, status: DoctorStatus, reason?: string) => void;
-  updateDoctorSchedule: (doctorId: string, scheduleDays: string[], scheduleHours: string, shiftStartTime?: string, shiftEndTime?: string) => void;
+  updatePaymentStatus: (bookingId: string, paymentStatus: PaymentStatus, method?: PaymentMethod) => boolean;
+  deleteBooking: (bookingId: string) => Promise<{ success: boolean; error?: string }>;
+  updateDoctorStatus: (doctorId: string, status: DoctorStatus, reason?: string) => Promise<boolean>;
+  updateDoctorSchedule: (doctorId: string, scheduleDays: string[], scheduleHours: string, shiftStartTime?: string, shiftEndTime?: string) => Promise<boolean>;
   updateDoctorMaxBookings: (doctorId: string, maxDailyBookings: number) => void;
   checkClinicAvailabilityStatus: (clinicId: string, doctorId: string, date?: string) => ClinicAvailabilityResult | null;
   admitPatient: (bookingId: string) => void;
@@ -140,6 +186,8 @@ interface AppContextType {
   updateClinic: (clinicId: string, data: Partial<Clinic>) => void;
   deleteClinic: (clinicId: string) => Promise<{ success: boolean; error?: string }>;
   addDoctor: (doctor: Omit<Doctor, 'id'>) => void;
+  updateDoctor: (doctorId: string, data: Partial<Doctor>) => Promise<boolean>;
+  deleteDoctor: (doctorId: string) => Promise<{ success: boolean; error?: string }>;
   resetToInitialData: () => void;
   toasts: ToastMessage[];
   addToast: (toast: Omit<ToastMessage, 'id'>) => void;
@@ -150,6 +198,18 @@ interface AppContextType {
   setPatientHistoryPhone: (phone: string) => void;
   toggleClinicStatus: (clinicId: string) => void;
   clearPastBookings: (beforeDate?: string) => Promise<{ success: boolean; count: number }>;
+  errorLogs: SystemErrorLog[];
+  logSystemError: (input: {
+    source: SystemErrorSource;
+    message: string;
+    stack?: string;
+    componentStack?: string;
+  }) => Promise<void>;
+  resolveErrorLog: (errorId: string, resolved?: boolean) => Promise<void>;
+  resolveAllErrorLogs: () => Promise<void>;
+  deleteErrorLog: (errorId: string) => Promise<void>;
+  clearAllErrorLogs: () => Promise<void>;
+  syncErrorLogsNow: () => Promise<boolean>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -161,7 +221,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [clinics, setClinics] = useState<Clinic[]>(getStoredClinics);
   const [doctors, setDoctors] = useState<Doctor[]>(getStoredDoctors);
   const [bookings, setBookings] = useState<Booking[]>(getStoredBookings);
-  const [selectedTicket, setSelectedTicket] = useState<Booking | null>(null);
+  const [selectedTicket, setSelectedTicketState] = useState<Booking | null>(() => {
+    try {
+      const raw = typeof sessionStorage !== 'undefined' ? sessionStorage.getItem('sharaya_selected_ticket_v2') : null;
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
+  const selectedTicketRef = React.useRef<Booking | null>(selectedTicket);
+  const setSelectedTicket = (ticket: Booking | null) => {
+    selectedTicketRef.current = ticket;
+    setSelectedTicketState(ticket);
+    try {
+      if (typeof sessionStorage !== 'undefined') {
+        if (ticket) {
+          sessionStorage.setItem('sharaya_selected_ticket_v2', JSON.stringify(ticket));
+        } else {
+          sessionStorage.removeItem('sharaya_selected_ticket_v2');
+        }
+      }
+    } catch {}
+  };
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [patientHistoryModalOpen, setPatientHistoryModalOpen] = useState(false);
   const [patientHistoryPhone, setPatientHistoryPhone] = useState('');
@@ -175,8 +256,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // نص استفسارات ومساعدة فورية بالرئيسية
   const [supportInfoText, setSupportInfoText] = useState<string>(getStoredSupportInfoText);
 
+  // مواعيد العمل الرسمية بالصفحة الرئيسية (قابلة للتعديل من قبل الأدمن ومربوطة بقاعدة البيانات)
+  const [officialWorkingHours, setOfficialWorkingHours] = useState<string>(getStoredOfficialWorkingHours);
+
   // قائمة حسابات الكادر والمستخدمين الديناميكية
   const [staffAccounts, setStaffAccounts] = useState<StaffAccount[]>(getStoredStaffAccounts);
+
+  // سجلات أخطاء النظام المجمعة من جميع الأجهزة (ErrorBoundary + vite:preloadError + Runtime)
+  const [errorLogs, setErrorLogs] = useState<SystemErrorLog[]>(getStoredErrorLogs);
+
+  const mergeErrorLogLists = (cloudList: SystemErrorLog[], localList: SystemErrorLog[]): SystemErrorLog[] => {
+    const map = new Map<string, SystemErrorLog>();
+    for (const item of localList) {
+      if (item && item.id) {
+        map.set(item.id, item);
+      }
+    }
+    for (const item of cloudList) {
+      if (item && item.id) {
+        const existing = map.get(item.id);
+        map.set(item.id, {
+          ...existing,
+          ...item,
+          resolved: Boolean(item.resolved || existing?.resolved),
+          syncedToDb: true
+        });
+      }
+    }
+    return Array.from(map.values())
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 100);
+  };
 
   // تطبيق كلاس dark على وسم html لضمان التوافق التام مع نمط التصميم وحفظه في localStorage
   useEffect(() => {
@@ -196,14 +306,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!isSupabaseConfigured) return;
 
     let isMounted = true;
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getLocalDateStr(new Date());
+    const isDoctorRoleSession = () => getStoredSession()?.role === 'doctor';
+
+    const mergeWithSelectedTicket = (list: Booking[]): Booking[] => {
+      const currentTicket = selectedTicketRef.current;
+      if (!currentTicket || getStoredSession()) return list;
+      if (getDeletedBookingIds().has(currentTicket.id)) return list;
+      const exists = list.some(b => b.id === currentTicket.id);
+      if (!exists) {
+        return [currentTicket, ...list];
+      }
+      return list.map(b =>
+        b.id === currentTicket.id
+          ? {
+              ...b,
+              patientName: currentTicket.patientName || b.patientName,
+              patientPhone: currentTicket.patientPhone || b.patientPhone,
+              timeSlot: currentTicket.timeSlot || b.timeSlot,
+              fee: currentTicket.fee || b.fee,
+              notes: currentTicket.notes || b.notes
+            }
+          : b
+      );
+    };
 
     async function loadSupabaseData() {
       try {
-        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings, dbPasswordHashes] = await Promise.all([
+        const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings] = await Promise.all([
           fetchClinicsFromDb(),
           fetchDoctorsFromDb(),
-          fetchBookingsFromDb(),
+          isDoctorRoleSession() ? Promise.resolve(null) : fetchBookingsFromDb(),
           fetchDailyScheduleFromDb(todayStr),
           fetchStaffAccountsFromDb(),
           fetchSettingsFromDb(),
@@ -221,8 +354,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveDoctors(dbDoctors);
         }
         if (dbBookings) {
-          setBookings(dbBookings);
-          saveBookings(dbBookings);
+          const merged = mergeWithSelectedTicket(dbBookings);
+          setBookings(merged);
+          saveBookings(merged);
         }
         const effectiveClinics = (dbClinics && dbClinics.length > 0) ? dbClinics : clinics;
         const effectiveDoctors = (dbDoctors && dbDoctors.length > 0) ? dbDoctors : doctors;
@@ -232,7 +366,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveDailySchedule(dbSchedule);
         } else if (effectiveClinics.length > 0) {
           const defaultItems: DailyClinicScheduleItem[] = effectiveClinics.map(c => {
-            const doc = effectiveDoctors.find(d => d.clinicId === c.id) || effectiveDoctors[0];
+            const doc = effectiveDoctors.find(d => d.clinicId === c.id);
             return {
               clinicId: c.id,
               doctorId: doc?.id || '',
@@ -251,20 +385,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setStaffAccounts(dbStaff);
           saveStaffAccounts(dbStaff);
         }
-        if (dbPasswordHashes && typeof dbPasswordHashes === 'object') {
-          const localHashes = getStoredStaffPasswordHashes();
-          const mergedHashes = { ...localHashes, ...dbPasswordHashes };
-          localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(mergedHashes));
-        }
         if (dbSettings && dbSettings['support_info_text']) {
           setSupportInfoText(dbSettings['support_info_text']);
           saveSupportInfoText(dbSettings['support_info_text']);
         }
+        if (dbSettings && dbSettings['official_working_hours_text']) {
+          setOfficialWorkingHours(dbSettings['official_working_hours_text']);
+          saveOfficialWorkingHours(dbSettings['official_working_hours_text']);
+        }
+        if (dbSettings && dbSettings['role_permissions']) {
+          try {
+            const parsedPerms = JSON.parse(dbSettings['role_permissions']);
+            if (parsedPerms && typeof parsedPerms === 'object') {
+              setRolePermissions(parsedPerms);
+              saveRolePermissions(parsedPerms);
+            }
+          } catch {}
+        }
+        if (dbSettings && dbSettings['system_error_logs_json']) {
+          try {
+            const parsedLogs = JSON.parse(dbSettings['system_error_logs_json']);
+            if (Array.isArray(parsedLogs)) {
+              const mergedLogs = mergeErrorLogLists(parsedLogs, getStoredErrorLogs());
+              setErrorLogs(mergedLogs);
+              saveErrorLogs(mergedLogs);
+            }
+          } catch {}
+        }
 
-        // Auto-ensure admin session if stored session is admin
+        // دفع أي أخطاء محلية معلقة لم يتم رفعها بعد إلى قاعدة البيانات السحابية
+        const pendingErrors = getPendingErrorLogs();
+        if (pendingErrors.length > 0) {
+          const remainingPending: SystemErrorLog[] = [];
+          for (const pendingItem of pendingErrors) {
+            const ok = await reportClientErrorToDb(pendingItem);
+            if (!ok) {
+              remainingPending.push(pendingItem);
+            }
+          }
+          savePendingErrorLogs(remainingPending);
+        }
+
+        // فحص أمان الجلسة ضد التلاعب عبر الكونسول (Session Integrity & Anti-Tampering Check)
         const currentStored = getStoredSession();
-        if (currentStored?.role === 'admin') {
-          ensureAdminSupabaseSession();
+        if (currentStored) {
+          const { data: authSessionData } = await supabase.auth.getSession();
+          const authUid = authSessionData?.session?.user?.id;
+          const authoritativeList = (dbStaff && dbStaff.length > 0) ? dbStaff : getStoredStaffAccounts();
+          const matchedStaff = authoritativeList.find(
+            s => (authUid && s.authUserId === authUid) || s.username.toLowerCase() === currentStored.username.toLowerCase()
+          );
+
+          if (matchedStaff) {
+            // إذا كان الحساب مرتبطاً بـ Supabase Auth، يشترط وجود جلسة JWT سحابية نشطة ومطابقة
+            if (matchedStaff.authUserId && (!authUid || matchedStaff.authUserId !== authUid)) {
+              setCurrentUser(null);
+              saveSession(null);
+              setActiveView('landing');
+            } else if (
+              currentStored.role !== matchedStaff.role ||
+              currentStored.id !== matchedStaff.id
+            ) {
+              // تصحيح أي محاولة لتزوير الصلاحية (Role Escalation) عبر sessionStorage في الكونسول
+              const correctedSession: UserSession = {
+                id: matchedStaff.id,
+                username: matchedStaff.username,
+                displayName: matchedStaff.displayName,
+                role: matchedStaff.role,
+                doctorId: matchedStaff.doctorId,
+                clinicId: matchedStaff.clinicId,
+              };
+              setCurrentUser(correctedSession);
+              saveSession(correctedSession);
+            }
+          }
         }
       } catch (err) {
         console.warn('Supabase initial sync error, using local state:', err);
@@ -275,14 +469,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // تفعيل التحديث اللحظي عبر Supabase Realtime لجدول bookings
     const unsubscribeBookings = subscribeToBookingsRealtime(async () => {
+      if (isDoctorRoleSession()) return;
       const freshBookings = await fetchBookingsFromDb();
       if (freshBookings && isMounted) {
-        setBookings(freshBookings);
-        saveBookings(freshBookings);
+        const merged = mergeWithSelectedTicket(freshBookings);
+        setBookings(merged);
+        saveBookings(merged);
       }
     });
 
-    // الاستماع لقناة التحديثات اللحظية العامة (نص الاستفسارات، وتعديل حسابات وكلمات مرور الكادر)
+    // الاستماع لقناة التحديثات اللحظية العامة (نص الاستفسارات، وتعديل حسابات الكادر)
     const systemChannel = supabase.channel('system_updates');
     systemChannel
       .on('broadcast', { event: 'support_info_updated' }, (payload: any) => {
@@ -292,21 +488,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveSupportInfoText(newText);
         }
       })
+      .on('broadcast', { event: 'working_hours_updated' }, (payload: any) => {
+        const newHours = payload?.payload?.value;
+        if (newHours && isMounted) {
+          setOfficialWorkingHours(newHours);
+          saveOfficialWorkingHours(newHours);
+        }
+      })
+      .on('broadcast', { event: 'role_permissions_updated' }, (payload: any) => {
+        const rawVal = payload?.payload?.value;
+        if (rawVal && isMounted) {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (parsed && typeof parsed === 'object') {
+              setRolePermissions(parsed);
+              saveRolePermissions(parsed);
+            }
+          } catch {}
+        }
+      })
+      .on('broadcast', { event: 'schedule_updated' }, async () => {
+        if (!isMounted) return;
+        try {
+          const currentToday = getLocalDateStr(new Date());
+          const [freshSched, freshClinics] = await Promise.all([
+            fetchDailyScheduleFromDb(currentToday),
+            fetchClinicsFromDb()
+          ]);
+          if (freshSched && freshSched.items.length > 0 && isMounted) {
+            setDailySchedule(freshSched);
+            saveDailySchedule(freshSched);
+          }
+          if (freshClinics && freshClinics.length > 0 && isMounted) {
+            setClinics(freshClinics);
+            saveClinics(freshClinics);
+          }
+        } catch {}
+      })
       .on('broadcast', { event: 'staff_updated' }, async () => {
         if (!isMounted) return;
         try {
-          const [freshStaff, freshHashes] = await Promise.all([
-            fetchStaffAccountsFromDb(),
-            fetchStaffPasswordHashesFromDb()
-          ]);
+          const freshStaff = await fetchStaffAccountsFromDb();
           if (freshStaff && freshStaff.length > 0 && isMounted) {
             setStaffAccounts(freshStaff);
             saveStaffAccounts(freshStaff);
-          }
-          if (freshHashes && typeof freshHashes === 'object') {
-            const localHashes = getStoredStaffPasswordHashes();
-            const merged = { ...localHashes, ...freshHashes };
-            localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(merged));
           }
         } catch {
           // ignore
@@ -330,31 +555,147 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (cutoff) {
           saveStoredBookingsCutoffDate(cutoff);
         }
+        if (isDoctorRoleSession()) return;
         const fresh = await fetchBookingsFromDb();
         if (fresh && isMounted) {
-          setBookings(fresh);
-          saveBookings(fresh);
+          const merged = mergeWithSelectedTicket(fresh);
+          setBookings(merged);
+          saveBookings(merged);
+        }
+      })
+      .on('broadcast', { event: 'booking_deleted' }, (payload: any) => {
+        if (!isMounted) return;
+        const deletedId = payload?.payload?.bookingId;
+        if (deletedId && typeof deletedId === 'string') {
+          markBookingDeletedLocally(deletedId);
+          if (selectedTicketRef.current?.id === deletedId) {
+            setSelectedTicket(null);
+          }
+          setBookings(prev => {
+            const next = prev.filter(b => b.id !== deletedId);
+            saveBookings(next);
+            return next;
+          });
+        }
+      })
+      .on('broadcast', { event: 'error_logged' }, async (payload: any) => {
+        if (!isMounted) return;
+        const incomingError = payload?.payload?.errorLog as SystemErrorLog | undefined;
+        if (incomingError && incomingError.id) {
+          setErrorLogs(prev => {
+            const next = mergeErrorLogLists([incomingError], prev);
+            saveErrorLogs(next);
+            if (getStoredSession()?.role === 'admin') {
+              saveSettingToDb('system_error_logs_json', JSON.stringify(next)).catch(() => {});
+            }
+            return next;
+          });
+        }
+      })
+      .on('broadcast', { event: 'error_logs_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (Array.isArray(parsed)) {
+              setErrorLogs(parsed);
+              saveErrorLogs(parsed);
+            }
+          } catch {}
         }
       })
       .subscribe();
 
-    // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات محدثة لحظياً
+    const handleLocalErrorLogged = (event: Event) => {
+      const customEvt = event as CustomEvent<SystemErrorLog>;
+      if (customEvt?.detail && isMounted) {
+        setErrorLogs(prev => {
+          const next = mergeErrorLogLists([customEvt.detail], prev);
+          saveErrorLogs(next);
+          return next;
+        });
+      }
+    };
+    window.addEventListener('sharaya:system-error-logged', handleLocalErrorLogged);
+
+    // مراقبة أي تلاعب مباشر بـ Storage من خلال الكونسول وإعادة التحقق الفوري
+    const handleStorageTamper = () => {
+      const stored = getStoredSession();
+      if (!stored) {
+        setCurrentUser(null);
+      }
+    };
+    window.addEventListener('storage', handleStorageTamper);
+
+    // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات محدثة لحظياً وفحص سلامة الجلسة
     const syncInterval = setInterval(async () => {
       if (!isMounted) return;
       try {
-        const fresh = await fetchBookingsFromDb();
-        if (fresh && isMounted) {
-          setBookings(prev => {
-            if (JSON.stringify(prev) !== JSON.stringify(fresh)) {
-              saveBookings(fresh);
-              return fresh;
+        const currentToday = getLocalDateStr(new Date());
+
+        // إذا كان الزائر يعرض تذكرته الحالية، نحدّث حالة التذكرة المباشرة بأمان
+        const activeTicket = selectedTicketRef.current;
+        if ((activeTicket?.ticketNumber || activeTicket?.id) && activeTicket?.patientPhone && !getStoredSession()) {
+          const refreshedTicket = await fetchPatientTicketSecureRpc(activeTicket.ticketNumber || activeTicket.id, activeTicket.patientPhone);
+          if (refreshedTicket && isMounted) {
+            if (JSON.stringify(activeTicket) !== JSON.stringify(refreshedTicket)) {
+              setSelectedTicket(refreshedTicket);
+            }
+          }
+        }
+
+        if (!isDoctorRoleSession()) {
+          const fresh = await fetchBookingsFromDb();
+          if (fresh && isMounted) {
+            const merged = mergeWithSelectedTicket(fresh);
+            setBookings(prev => {
+              if (JSON.stringify(prev) !== JSON.stringify(merged)) {
+                saveBookings(merged);
+                return merged;
+              }
+              return prev;
+            });
+          }
+        }
+
+        const [freshClinics, freshDoctors, freshSchedule, freshSettings] = await Promise.all([
+          fetchClinicsFromDb(),
+          fetchDoctorsFromDb(),
+          fetchDailyScheduleFromDb(currentToday),
+          fetchSettingsFromDb()
+        ]);
+
+        if (freshClinics && freshClinics.length > 0 && isMounted) {
+          setClinics(prev => {
+            if (JSON.stringify(prev) !== JSON.stringify(freshClinics)) {
+              saveClinics(freshClinics);
+              return freshClinics;
             }
             return prev;
           });
         }
 
-        // مزامنة نص الاستفسارات والمساعدة دورياً لتظهر التحديثات لجميع الأجهزة والزوار فوراً
-        const freshSettings = await fetchSettingsFromDb();
+        if (freshDoctors && freshDoctors.length > 0 && isMounted) {
+          setDoctors(prev => {
+            if (JSON.stringify(prev) !== JSON.stringify(freshDoctors)) {
+              saveDoctors(freshDoctors);
+              return freshDoctors;
+            }
+            return prev;
+          });
+        }
+
+        if (freshSchedule && freshSchedule.items.length > 0 && isMounted) {
+          setDailySchedule(prev => {
+            if (JSON.stringify(prev) !== JSON.stringify(freshSchedule)) {
+              saveDailySchedule(freshSchedule);
+              return freshSchedule;
+            }
+            return prev;
+          });
+        }
+
         if (freshSettings?.['support_info_text'] && isMounted) {
           setSupportInfoText(prev => {
             if (prev !== freshSettings['support_info_text']) {
@@ -365,12 +706,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
 
-        // مزامنة تجزئات كلمات المرور وحسابات الكادر دورياً
-        const freshHashes = await fetchStaffPasswordHashesFromDb();
-        if (freshHashes && typeof freshHashes === 'object') {
-          const localHashes = getStoredStaffPasswordHashes();
-          const merged = { ...localHashes, ...freshHashes };
-          localStorage.setItem('sharaya_staff_passwords_v2', JSON.stringify(merged));
+        if (freshSettings?.['official_working_hours_text'] && isMounted) {
+          setOfficialWorkingHours(prev => {
+            if (prev !== freshSettings['official_working_hours_text']) {
+              saveOfficialWorkingHours(freshSettings['official_working_hours_text']);
+              return freshSettings['official_working_hours_text'];
+            }
+            return prev;
+          });
+        }
+
+        if (freshSettings?.['role_permissions'] && isMounted) {
+          try {
+            const parsedPerms = JSON.parse(freshSettings['role_permissions']);
+            if (parsedPerms && typeof parsedPerms === 'object') {
+              setRolePermissions(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(parsedPerms)) {
+                  saveRolePermissions(parsedPerms);
+                  return parsedPerms;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
+
+        if (freshSettings?.['system_error_logs_json'] && isMounted) {
+          try {
+            const parsedLogs = JSON.parse(freshSettings['system_error_logs_json']);
+            if (Array.isArray(parsedLogs)) {
+              setErrorLogs(prev => {
+                const merged = mergeErrorLogLists(parsedLogs, prev);
+                if (JSON.stringify(prev) !== JSON.stringify(merged)) {
+                  saveErrorLogs(merged);
+                  return merged;
+                }
+                return prev;
+              });
+            }
+          } catch {}
         }
       } catch {
         // silent fallback
@@ -379,6 +753,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => {
       isMounted = false;
+      window.removeEventListener('storage', handleStorageTamper);
+      window.removeEventListener('sharaya:system-error-logged', handleLocalErrorLogged);
       unsubscribeBookings();
       supabase.removeChannel(systemChannel);
       clearInterval(syncInterval);
@@ -418,6 +794,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (found) {
         setSelectedTicket(found);
       }
+    }
+
+    // منع الطبيب من الانتقال لشاشة حجز المرضى وتوجيهه لبوابة الطبيب الخاصة به
+    if (view === 'booking' && currentUser?.role === 'doctor') {
+      addToast({
+        type: 'info',
+        title: 'بوابة الطبيب المخصصة',
+        message: 'حساب الطبيب مخصص لإدارة التواجد اليومي والجدول الأسبوعي فقط.'
+      });
+      setActiveView('doctor');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
     }
 
     // الشاشات العامة: الهبوط، الحجز بدون تسجيل، وعرض التذكرة، شاشة الانتظار العامة، وصفحة تسجيل الدخول
@@ -502,12 +890,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // التحقق المباشر عبر Supabase Auth عند توفر الإعدادات
+    let rejectedByCloudAuth = false;
     if (isSupabaseConfigured) {
       const authRes = await loginWithSupabaseAuth(cleanUser, pass);
       if (authRes.success && authRes.session) {
         resetLoginAttempts(cleanUser);
         setCurrentUser(authRes.session);
         saveSession(authRes.session);
+
+        // جلب البيانات الخاصة بصلاحية الموظف فور تسجيل الدخول دون انتظار دورة المزامنة
+        if (authRes.session.role !== 'doctor') {
+          fetchBookingsFromDb().then(freshB => {
+            if (freshB) {
+              setBookings(freshB);
+              saveBookings(freshB);
+            }
+          }).catch(() => {});
+        }
+        if (authRes.session.role === 'admin') {
+          fetchStaffAccountsFromDb().then(freshS => {
+            if (freshS && freshS.length > 0) {
+              setStaffAccounts(freshS);
+              saveStaffAccounts(freshS);
+            }
+          }).catch(() => {});
+        }
+
         addToast({
           type: 'success',
           title: 'تم تسجيل الدخول بنجاح',
@@ -532,18 +940,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         return { success: true };
       }
-      // في حال عدم العثور على الحساب في Supabase Auth (مثل حسابات الأطباء الإضافية أو كلمات المرور المعدلة محلياً)، نتابع التحقق عبر حسابات الكادر
+      if (authRes.authoritativeReject) {
+        rejectedByCloudAuth = true;
+      }
     }
 
     let authSuccess = false;
     let matchedUser: UserSession | null = null;
 
-    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification)
+    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline أو للحسابات المحلية غير المرتبطة بـ authUserId
     const matchedAccount = staffAccounts.find(
       acc => acc.username.toLowerCase() === cleanUser
     );
 
-    if (matchedAccount) {
+    if (matchedAccount && (!rejectedByCloudAuth || !matchedAccount.authUserId)) {
       const storedHashes = getStoredStaffPasswordHashes();
       const providedHash = await hashPassword(pass);
       const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
@@ -613,13 +1023,231 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const deleteStaffAccount = (id: string): boolean => {
-    if (isSupabaseConfigured) {
-      deleteStaffAccountRpc(id).then(res => {
-        if (!res.success) {
-          console.warn('Supabase delete staff account error:', res.error);
-        }
+  const createStaffAccount = async (input: {
+    username: string;
+    password: string;
+    displayName: string;
+    role: UserRole;
+    doctorId?: string | null;
+    clinicId?: string | null;
+    recoveryEmail?: string;
+  }): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إنشاء حسابات الموظفين مخصص لمدير النظام فقط.'
       });
+      return false;
+    }
+    const cleanUsername = input.username.trim().toLowerCase();
+    const cleanDisplayName = sanitizeText(input.displayName);
+    const cleanEmail = input.recoveryEmail ? input.recoveryEmail.trim().toLowerCase() : undefined;
+    const allowedRoles: UserRole[] = ['admin', 'doctor', 'reception', 'cashier'];
+
+    if (!/^[a-z0-9_.-]{3,30}$/.test(cleanUsername)) {
+      addToast({
+        type: 'error',
+        title: 'اسم مستخدم غير صالح',
+        message: 'يجب أن يتكون اسم المستخدم من 3 إلى 30 حرفاً إنجليزياً أو أرقاماً أو (._-) بدون مسافات.'
+      });
+      return false;
+    }
+
+    if (!input.password || input.password.length < 6) {
+      addToast({
+        type: 'error',
+        title: 'كلمة مرور ضعيفة',
+        message: 'يجب ألا تقل كلمة المرور عن 6 أحرف أو أرقام.'
+      });
+      return false;
+    }
+
+    if (!cleanDisplayName || cleanDisplayName.length < 2) {
+      addToast({
+        type: 'error',
+        title: 'الاسم الظاهر مطلوب',
+        message: 'يرجى إدخال الاسم الظاهر للموظف.'
+      });
+      return false;
+    }
+
+    if (!allowedRoles.includes(input.role)) {
+      addToast({
+        type: 'error',
+        title: 'دور وظيفي غير صالح',
+        message: 'الأدوار المسموحة فقط هي: admin, doctor, reception, cashier.'
+      });
+      return false;
+    }
+
+    if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      addToast({
+        type: 'error',
+        title: 'بريد إلكتروني غير صالح',
+        message: 'يرجى إدخال بريد إلكتروني صحيح للاستعادة.'
+      });
+      return false;
+    }
+
+    if (staffAccounts.some(acc => acc.username.toLowerCase() === cleanUsername)) {
+      addToast({
+        type: 'error',
+        title: 'اسم المستخدم مكرر',
+        message: `اسم المستخدم (${cleanUsername}) مسجل بالفعل لموظف آخر.`
+      });
+      return false;
+    }
+
+    let finalDoctorId: string | undefined = undefined;
+    let finalClinicId: string | undefined = undefined;
+
+    if (input.role === 'doctor') {
+      if (!input.doctorId) {
+        addToast({
+          type: 'error',
+          title: 'تحديد الطبيب مطلوب',
+          message: 'يرجى اختيار الطبيب المرتبط بهذا الحساب من قائمة الأطباء.'
+        });
+        return false;
+      }
+      const matchedDoc = doctors.find(d => d.id === input.doctorId);
+      if (!matchedDoc) {
+        addToast({
+          type: 'error',
+          title: 'الطبيب غير موجود',
+          message: 'الطبيب المختار غير موجود في قائمة الأطباء.'
+        });
+        return false;
+      }
+      finalDoctorId = matchedDoc.id;
+      finalClinicId = input.clinicId || matchedDoc.clinicId || undefined;
+    }
+
+    if (isSupabaseConfigured) {
+      const apiRes = await createStaffAccountInDb({
+        username: cleanUsername,
+        password: input.password,
+        displayName: cleanDisplayName,
+        role: input.role,
+        doctorId: finalDoctorId || null,
+        clinicId: finalClinicId || null,
+        recoveryEmail: cleanEmail
+      });
+
+      if (!apiRes.success || !apiRes.staff) {
+        addToast({
+          type: 'error',
+          title: 'تعذر إنشاء الحساب',
+          message: apiRes.error || 'فشل إنشاء حساب الموظف في الخادم.'
+        });
+        return false;
+      }
+
+      const passHash = await hashPassword(input.password);
+      saveStaffPasswordHash(cleanUsername, passHash);
+      resetLoginAttempts(cleanUsername);
+
+      const updatedAccounts = [...staffAccounts.filter(a => a.id !== apiRes.staff!.id), apiRes.staff];
+      setStaffAccounts(updatedAccounts);
+      saveStaffAccounts(updatedAccounts);
+
+      addToast({
+        type: 'success',
+        title: 'تم إنشاء حساب الموظف بنجاح',
+        message: `تم إنشاء حساب (${apiRes.staff.displayName} - @${apiRes.staff.username}) وربطه بالمصادقة السحابية.`
+      });
+      return true;
+    }
+
+    // Offline / Local fallback
+    const passHash = await hashPassword(input.password);
+    saveStaffPasswordHash(cleanUsername, passHash);
+    resetLoginAttempts(cleanUsername);
+
+    const newStaff: StaffAccount = {
+      id: `staff-${cleanUsername.replace(/[^a-z0-9]/g, '-')}-${Date.now().toString().slice(-6)}`,
+      username: cleanUsername,
+      displayName: cleanDisplayName,
+      role: input.role,
+      doctorId: finalDoctorId,
+      clinicId: finalClinicId,
+      recoveryEmail: cleanEmail
+    };
+
+    const updatedAccounts = [...staffAccounts, newStaff];
+    setStaffAccounts(updatedAccounts);
+    saveStaffAccounts(updatedAccounts);
+
+    addToast({
+      type: 'success',
+      title: 'تم إنشاء حساب الموظف',
+      message: `تم إضافة حساب (${newStaff.displayName}) بنجاح.`
+    });
+    return true;
+  };
+
+  const deleteStaffAccount = async (id: string): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'حذف حسابات الموظفين مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
+    const target = staffAccounts.find(a => a.id === id);
+    if (!target) {
+      addToast({
+        type: 'error',
+        title: 'تعذر الحذف',
+        message: 'حساب الموظف غير موجود.'
+      });
+      return false;
+    }
+
+    if (
+      currentUser &&
+      (target.id === currentUser.id || target.username.toLowerCase() === currentUser.username.toLowerCase())
+    ) {
+      addToast({
+        type: 'error',
+        title: 'عملية غير مسموحة',
+        message: 'لا يمكنك حذف حسابك الشخصي المسجل به حالياً.'
+      });
+      return false;
+    }
+
+    if (target.role === 'admin') {
+      if (target.username.toLowerCase() === 'admin') {
+        addToast({
+          type: 'error',
+          title: 'حساب محمي',
+          message: 'لا يمكن حذف حساب المدير الرئيسي للمنظومة (admin).'
+        });
+        return false;
+      }
+      const adminCount = staffAccounts.filter(a => a.role === 'admin').length;
+      if (adminCount <= 1) {
+        addToast({
+          type: 'error',
+          title: 'تعذر الحذف',
+          message: 'لا يمكن حذف آخر حساب مدير متبقٍ في المنظومة لضمان استمرارية الإدارة.'
+        });
+        return false;
+      }
+    }
+
+    if (isSupabaseConfigured) {
+      const cloudRes = await deleteStaffAccountRpc(id);
+      if (!cloudRes.success) {
+        addToast({
+          type: 'error',
+          title: 'تعذر الحذف',
+          message: cloudRes.error || 'فشلت عملية حذف الحساب من الخادم.'
+        });
+        return false;
+      }
     }
 
     const res = deleteStaffAccountById(id);
@@ -635,17 +1263,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast({
       type: 'success',
       title: 'تم الحذف بنجاح',
-      message: 'تمت إزالة الحساب من منظومة الموظفين.'
+      message: `تمت إزالة حساب (${target.displayName}) نهائياً من منظومة الموظفين والمصادقة.`
     });
     return true;
   };
 
   const updateStaffRecoveryEmail = (id: string, email: string) => {
-    const updated = updateStaffAccountRecoveryEmail(id, email);
-    setStaffAccounts(updated);
-    if (isSupabaseConfigured) {
-      updateStaffAccountInDb(id, { recoveryEmail: email });
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل بريد استعادة الحسابات مخصص لمدير النظام فقط.'
+      });
+      return;
     }
+    const cleanEmail = email.trim().toLowerCase();
+    if (isSupabaseConfigured) {
+      updateStaffAccountInDb(id, { recoveryEmail: cleanEmail }).then((res) => {
+        if (!res.success) {
+          addToast({
+            type: 'error',
+            title: 'تعذر تحديث البريد الإلكتروني',
+            message: res.error || 'فشل الاتصال بالخادم لتحديث بريد الاستعادة.'
+          });
+          return;
+        }
+        const updated = updateStaffAccountRecoveryEmail(id, cleanEmail);
+        setStaffAccounts(updated);
+        addToast({
+          type: 'success',
+          title: 'تم حفظ البريد الإلكتروني',
+          message: 'تم تحديث بريد استعادة الحساب عبر الخادم بنجاح.'
+        });
+      });
+      return;
+    }
+
+    const updated = updateStaffAccountRecoveryEmail(id, cleanEmail);
+    setStaffAccounts(updated);
     addToast({
       type: 'success',
       title: 'تم حفظ البريد الإلكتروني',
@@ -655,23 +1310,75 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateStaffAccount = async (
     id: string,
-    updates: { username?: string; displayName?: string; recoveryEmail?: string; password?: string }
+    updates: {
+      username?: string;
+      displayName?: string;
+      role?: UserRole;
+      doctorId?: string | null;
+      clinicId?: string | null;
+      recoveryEmail?: string;
+      password?: string;
+    }
   ): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل بيانات الموظفين مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
     const target = staffAccounts.find(s => s.id === id);
     if (!target) return false;
 
     let cleanUsername = target.username;
     if (updates.username) {
       const sanitized = updates.username.trim().toLowerCase();
-      if (!/^[a-z0-9_.-]{3,25}$/.test(sanitized)) {
+      if (!/^[a-z0-9_.-]{3,30}$/.test(sanitized)) {
         addToast({
           type: 'error',
           title: 'اسم مستخدم غير صالح',
-          message: 'يجب أن يتكون اسم المستخدم من 3 إلى 25 حرفاً إنجليزياً أو أرقام بدون مسافات.'
+          message: 'يجب أن يتكون اسم المستخدم من 3 إلى 30 حرفاً إنجليزياً أو أرقام بدون مسافات.'
+        });
+        return false;
+      }
+      if (
+        sanitized !== target.username.toLowerCase() &&
+        staffAccounts.some(s => s.id !== id && s.username.toLowerCase() === sanitized)
+      ) {
+        addToast({
+          type: 'error',
+          title: 'اسم المستخدم مكرر',
+          message: 'اسم المستخدم الجديد مسجل بالفعل لموظف آخر.'
         });
         return false;
       }
       cleanUsername = sanitized;
+    }
+
+    const effectiveRole: UserRole = updates.role || target.role;
+    let effectiveDoctorId: string | undefined =
+      effectiveRole === 'doctor'
+        ? (updates.doctorId !== undefined ? (updates.doctorId || undefined) : target.doctorId)
+        : undefined;
+    let effectiveClinicId: string | undefined =
+      effectiveRole === 'doctor'
+        ? (updates.clinicId !== undefined ? (updates.clinicId || undefined) : target.clinicId)
+        : undefined;
+
+    if (effectiveRole === 'doctor') {
+      if (!effectiveDoctorId) {
+        addToast({
+          type: 'error',
+          title: 'تحديد الطبيب مطلوب',
+          message: 'يرجى اختيار الطبيب المرتبط بالحساب عند تحديد دور طبيب (doctor).'
+        });
+        return false;
+      }
+      const docObj = doctors.find(d => d.id === effectiveDoctorId);
+      if (docObj && !effectiveClinicId) {
+        effectiveClinicId = docObj.clinicId;
+      }
     }
 
     if (updates.password && updates.password.length < 6) {
@@ -681,6 +1388,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: 'يجب ألا تقل كلمة المرور عن 6 أحرف/أرقام.'
       });
       return false;
+    }
+
+    let dbUpdated = false;
+    let returnedStaff: StaffAccount | undefined = undefined;
+
+    if (isSupabaseConfigured) {
+      const dbRes = await updateStaffAccountInDb(id, {
+        username: updates.username ? cleanUsername : undefined,
+        displayName: updates.displayName,
+        role: effectiveRole,
+        doctorId: effectiveRole === 'doctor' ? (effectiveDoctorId || null) : null,
+        clinicId: effectiveRole === 'doctor' ? (effectiveClinicId || null) : null,
+        recoveryEmail: updates.recoveryEmail,
+        password: updates.password
+      });
+      if (!dbRes.success) {
+        addToast({
+          type: 'error',
+          title: 'تعذر تحديث الحساب',
+          message: dbRes.error || 'حدث خطأ أثناء تحديث بيانات الموظف.'
+        });
+        return false;
+      }
+      dbUpdated = true;
+      returnedStaff = dbRes.staff;
     }
 
     // إذا تغير اسم المستخدم ولم تُقدم كلمة مرور جديدة، ننقل التجزئة الحالية إلى الاسم الجديد محلياً
@@ -699,26 +1431,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       resetLoginAttempts(cleanUsername);
     }
 
-    let dbUpdated = false;
-    if (isSupabaseConfigured) {
-      const dbRes = await updateStaffAccountInDb(id, {
-        username: updates.username ? cleanUsername : undefined,
-        displayName: updates.displayName,
-        recoveryEmail: updates.recoveryEmail,
-        password: updates.password
-      });
-      dbUpdated = dbRes.success;
-      if (!dbRes.success) {
-        console.warn('Supabase staff update error:', dbRes.error);
-      }
-    }
-
     const updatedList = staffAccounts.map(s => {
       if (s.id === id) {
+        if (returnedStaff) {
+          return returnedStaff;
+        }
         return {
           ...s,
           username: cleanUsername,
           displayName: updates.displayName || s.displayName,
+          role: effectiveRole,
+          doctorId: effectiveDoctorId,
+          clinicId: effectiveClinicId,
           recoveryEmail: updates.recoveryEmail !== undefined ? updates.recoveryEmail : s.recoveryEmail
         };
       }
@@ -738,25 +1462,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const resetPasswordByAdmin = async (targetUser: string, newPass: string): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إعادة تعيين كلمات المرور مخصصة لمدير النظام فقط.'
+      });
+      return false;
+    }
     try {
       const cleanUser = targetUser.toLowerCase().trim();
+      if (!newPass || newPass.length < 6) {
+        addToast({
+          type: 'error',
+          title: 'كلمة مرور ضعيفة',
+          message: 'يجب ألا تقل كلمة المرور الجديدة عن 6 أحرف أو أرقام.'
+        });
+        return false;
+      }
+
+      if (isSupabaseConfigured) {
+        const authRes = await adminChangeStaffPassword(cleanUser, newPass);
+        if (!authRes.success) {
+          addToast({
+            type: 'error',
+            title: 'تعذر تحديث كلمة المرور',
+            message: authRes.error || 'حدث خطأ أثناء تحديث كلمة المرور في خدمة المصادقة.'
+          });
+          return false;
+        }
+      }
+
       const newHash = await hashPassword(newPass);
       saveStaffPasswordHash(cleanUser, newHash);
       resetLoginAttempts(cleanUser);
-
-      if (isSupabaseConfigured) {
-        await saveStaffPasswordHashToDb(cleanUser, newHash);
-
-        const authRes = await adminChangeStaffPassword(cleanUser, newPass);
-        if (!authRes.success) {
-          console.warn('Supabase Auth update error:', authRes.error);
-        }
-
-        const staffAcc = staffAccounts.find(s => s.username.toLowerCase() === cleanUser);
-        if (staffAcc) {
-          await updateStaffAccountInDb(staffAcc.id, { password: newPass, username: cleanUser });
-        }
-      }
 
       addToast({
         type: 'success',
@@ -775,10 +1514,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
-    logoutFromSupabase();
     setCurrentUser(null);
     saveSession(null);
     setActiveView('landing');
+    logoutFromSupabase().then(async () => {
+      try {
+        const [publicBookings, publicStaff] = await Promise.all([
+          fetchBookingsFromDb(),
+          fetchStaffAccountsFromDb()
+        ]);
+        if (publicBookings) {
+          setBookings(publicBookings);
+          saveBookings(publicBookings);
+        }
+        if (publicStaff && publicStaff.length > 0) {
+          setStaffAccounts(publicStaff);
+          saveStaffAccounts(publicStaff);
+        }
+      } catch {}
+    });
     addToast({
       type: 'info',
       title: 'تسجيل الخروج',
@@ -801,16 +1555,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const cleanPhone = data.patientPhone.trim();
     const cleanNotes = sanitizeText(data.notes || '');
 
+    // منع دور الطبيب من إنشاء حجوزات للمرضى
+    if (currentUser?.role === 'doctor') {
+      return { success: false, error: 'غير مصرح للطبيب بإنشاء حجوزات للمرضى.' };
+    }
+
     // التحقق من أن اسم المريض ثلاثي على الأقل
     const nameCheck = validateTripleName(cleanName);
     if (!nameCheck.valid) {
       return { success: false, error: nameCheck.error || 'يجب كتابة اسم المريض ثلاثياً على الأقل.' };
     }
 
-    // فحص الحد المسموح ومعدل الحجوزات
-    const rateCheck = checkBookingRateLimit(cleanName, cleanPhone, data.clinicId, data.date);
-    if (!rateCheck.allowed) {
-      return { success: false, error: rateCheck.reason };
+    // التحقق من صحة رقم الهاتف المصري
+    const phoneCheck = validateEgyptianPhone(cleanPhone);
+    if (!phoneCheck.valid) {
+      return { success: false, error: phoneCheck.error || 'يرجى إدخال رقم هاتف محمول صحيح.' };
     }
 
     const clinic = clinics.find(c => c.id === data.clinicId);
@@ -818,6 +1577,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (!clinic || !doctor) {
       return { success: false, error: 'العيادة أو الطبيب غير متوفرين حالياً' };
+    }
+
+    if (doctor.clinicId !== clinic.id) {
+      return { success: false, error: 'الطبيب المحدد لا يتبع العيادة المختارة.' };
     }
 
     // التحقق الصارم من الركائز الأربعة على مستوى النظام وقواعد العمل (Backend/System Logic Level):
@@ -842,6 +1605,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
+    // فحص أن العيادة مفتوحة اليوم
+    const schedItem = dailySchedule.items.find(i => i.clinicId === clinic.id);
+    const isDailyOpen = schedItem ? schedItem.isOpen : (clinic.isOpenToday !== false);
+    if (clinic.active === false || clinic.isActive === false || !isDailyOpen) {
+      return {
+        success: false,
+        error: 'عذراً، هذه العيادة مغلقة اليوم ولا تستقبل حجوزات جديدة.'
+      };
+    }
+
     const availabilityCheck = checkClinicAvailability(doctor, clinic.id, bookingDate, bookings);
 
     if (!availabilityCheck.allowed) {
@@ -849,6 +1622,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         success: false,
         error: availabilityCheck.reason || 'العيادة غير متاحة للحجز حالياً.'
       };
+    }
+
+    // فحص الحد المسموح ومنع تكرار الحجز أو تضارب المواعيد
+    const rateCheck = checkBookingRateLimit(cleanName, cleanPhone, data.clinicId, bookingDate, data.timeSlot, bookings);
+    if (!rateCheck.allowed) {
+      return { success: false, error: rateCheck.reason };
     }
 
     // إذا كان اتصال Supabase مفعلاً، يتم الحجز واستخراج التذكرة بشكل ذري عبر دالة RPC المعتمدة
@@ -864,9 +1643,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       if (rpcRes.success && rpcRes.data) {
         const newBooking = rpcRes.data;
-        const updated = [newBooking, ...bookings.filter(b => b.id !== newBooking.id)];
-        setBookings(updated);
-        saveBookings(updated);
+        setBookings(prev => {
+          const updated = [newBooking, ...prev.filter(b => b.id !== newBooking.id)];
+          saveBookings(updated);
+          return updated;
+        });
         setSelectedTicket(newBooking);
 
         addToast({
@@ -887,11 +1668,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
-    // حساب رقم الدور التالي في نفس العيادة ونفس اليوم (المسار المحلي الاحتياطي)
-    const sameClinicTodayBookings = bookings.filter(
-      b => b.clinicId === data.clinicId && b.date === data.date && b.status !== 'cancelled'
-    );
-    const nextQueuePos = sameClinicTodayBookings.length + 1;
+    // حساب رقم الدور التالي في نفس العيادة ونفس اليوم بشكل متسلسل لا يتكرر حتى لو أُلغيت تذكرة سابقة
+    const maxQueuePosToday = bookings
+      .filter(b => b.clinicId === data.clinicId && b.date === bookingDate)
+      .reduce((max, b) => Math.max(max, b.queuePosition || 0), 0);
+    const nextQueuePos = maxQueuePosToday + 1;
 
     // توليد رمز تذكرة فريد وسهل النطق باللغة العربية
     const clinicPrefix = clinic.name.split(' ')[1] || 'كشف';
@@ -906,19 +1687,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clinicName: clinic.name,
       doctorId: data.doctorId,
       doctorName: doctor.name,
-      date: data.date,
+      date: bookingDate,
       timeSlot: data.timeSlot,
       queuePosition: nextQueuePos,
       status: 'waiting',
       paymentStatus: 'unpaid',
-      fee: data.fee,
+      fee: clinic.fee,
       notes: cleanNotes,
       createdAt: new Date().toISOString()
     };
 
-    const updated = [newBooking, ...bookings];
-    setBookings(updated);
-    saveBookings(updated);
+    setBookings(prev => {
+      const updated = [newBooking, ...prev];
+      saveBookings(updated);
+      return updated;
+    });
     setSelectedTicket(newBooking);
 
     addToast({
@@ -931,6 +1714,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateBookingStatus = (bookingId: string, status: BookingStatus) => {
+    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إدارة طابور وحالات الحجز مخصصة لموظفي الاستقبال وإدارة النظام فقط.'
+      });
+      return;
+    }
+
     const now = new Date().toISOString();
 
     if (isSupabaseConfigured) {
@@ -960,7 +1752,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updatePaymentStatus = (bookingId: string, paymentStatus: PaymentStatus, method: PaymentMethod = 'cash') => {
+  const updatePaymentStatus = (bookingId: string, paymentStatus: PaymentStatus, method: PaymentMethod = 'cash'): boolean => {
+    if (!currentUser || (currentUser.role !== 'cashier' && currentUser.role !== 'admin')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تأكيد عمليات السداد والخزينة مخصص لأمين الخزينة أو مدير النظام فقط.'
+      });
+      return false;
+    }
+
+    if ((paymentStatus === 'exempt' || method === 'charity_exempt') && !hasPermission(currentUser.role, 'manage_patient_exemptions')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح بالإعفاء',
+        message: 'ليست لديك صلاحية منح الإعفاءات الخيرية.'
+      });
+      return false;
+    }
+
     if (isSupabaseConfigured) {
       confirmPaymentRpc(bookingId, method).then(res => {
         if (!res.success) {
@@ -969,34 +1779,127 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    const updated = bookings.map(b => {
-      if (b.id === bookingId) {
-        return {
-          ...b,
-          paymentStatus,
-          paymentMethod: method,
-          paidAt: new Date().toISOString()
-        };
+    const paidAtNow = new Date().toISOString();
+    setBookings(prev => {
+      const updated = prev.map(b => {
+        if (b.id === bookingId) {
+          return {
+            ...b,
+            paymentStatus,
+            paymentMethod: method,
+            paidAt: paidAtNow
+          };
+        }
+        return b;
+      });
+      saveBookings(updated);
+      if (selectedTicketRef.current?.id === bookingId) {
+        const found = updated.find(b => b.id === bookingId) || null;
+        if (found) setSelectedTicket(found);
       }
-      return b;
+      return updated;
     });
-
-    setBookings(updated);
-    saveBookings(updated);
-    if (selectedTicket?.id === bookingId) {
-      setSelectedTicket(updated.find(b => b.id === bookingId) || null);
-    }
 
     addToast({
       type: 'success',
       title: 'تم تحديث حالة السداد',
       message: paymentStatus === 'paid' ? 'تم تسجيل الدفع بالخزينة وإصدار إيصال السداد.' : 'تم تسجيل الإعفاء الخيري.'
     });
+    return true;
   };
 
-  const updateDoctorStatus = (doctorId: string, status: DoctorStatus, reason?: string) => {
+  const deleteBooking = async (bookingId: string): Promise<{ success: boolean; error?: string }> => {
+    const canDeleteBooking =
+      currentUser?.role === 'admin' ||
+      currentUser?.role === 'cashier' ||
+      currentUser?.role === 'reception' ||
+      hasPermission(currentUser?.role, 'confirm_payments_exemptions') ||
+      hasPermission(currentUser?.role, 'call_queue_patients');
+
+    if (!currentUser || !canDeleteBooking) {
+      const msg = 'عفواً، حذف حجز المريض مخصص لمسؤولي الخزينة أو الاستقبال أو مدير النظام فقط.';
+      addToast({
+        type: 'error',
+        title: 'غير مصرح بالحذف',
+        message: msg
+      });
+      return { success: false, error: msg };
+    }
+
+    const targetBooking = bookings.find(b => b.id === bookingId);
+    const previousBookings = [...bookings];
+
+    // 1. تحديث فوري في الواجهة والتخزين المحلي (Optimistic UI & Local Tombstone)
+    markBookingDeletedLocally(bookingId);
+    const updatedBookings = bookings.filter(b => b.id !== bookingId);
+    setBookings(updatedBookings);
+    saveBookings(updatedBookings);
+
+    if (selectedTicketRef.current?.id === bookingId) {
+      setSelectedTicket(null);
+    }
+
+    // 2. الحذف الفعلي من قاعدة البيانات السحابية Supabase
     if (isSupabaseConfigured) {
-      updateDoctorStatusInDb(doctorId, status, reason);
+      const res = await deleteBookingFromDb(bookingId);
+      if (!res.success) {
+        unmarkBookingDeletedLocally(bookingId);
+        setBookings(previousBookings);
+        saveBookings(previousBookings);
+        addToast({
+          type: 'error',
+          title: 'تعذر حذف الحجز من قاعدة البيانات',
+          message: res.error || 'فشل حذف حجز المريض من قاعدة البيانات السحابية. يرجى المحاولة مرة أخرى.'
+        });
+        return { success: false, error: res.error };
+      }
+
+      const freshBookings = await fetchBookingsFromDb();
+      if (freshBookings) {
+        setBookings(freshBookings);
+        saveBookings(freshBookings);
+      }
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم حذف الحجز نهائياً',
+      message: targetBooking
+        ? `تم حذف حجز المريض "${targetBooking.patientName}" (تذكرة ${targetBooking.ticketNumber}) من الخزينة والطابور وقاعدة البيانات.`
+        : 'تم حذف حجز المريض نهائياً من قاعدة البيانات.'
+    });
+
+    return { success: true };
+  };
+
+  const updateDoctorStatus = async (doctorId: string, status: DoctorStatus, reason?: string): Promise<boolean> => {
+    const isOwnDoctorSession =
+      currentUser?.role === 'doctor' &&
+      (!currentUser.doctorId || currentUser.doctorId === doctorId);
+    const canModifyAttendance =
+      currentUser?.role === 'admin' ||
+      isOwnDoctorSession ||
+      hasPermission(currentUser?.role, 'manage_doctor_attendance');
+
+    if (!currentUser || !canModifyAttendance) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل حالة حضور الطبيب غير مصرح لهذا الحساب.'
+      });
+      return false;
+    }
+
+    if (isSupabaseConfigured) {
+      const saved = await updateDoctorStatusInDb(doctorId, status, reason);
+      if (!saved) {
+        addToast({
+          type: 'error',
+          title: 'تعذر تحديث حالة الطبيب',
+          message: 'فشل حفظ حالة التواجد اليومي للطبيب في قاعدة البيانات. يرجى التحقق من الاتصال أو الصلاحيات والمحاولة مرة أخرى.'
+        });
+        return false;
+      }
     }
 
     const updated = doctors.map(d => {
@@ -1012,6 +1915,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDoctors(updated);
     saveDoctors(updated);
 
+    if (isSupabaseConfigured) {
+      try {
+        const channel = supabase.channel('system_updates');
+        channel.send({
+          type: 'broadcast',
+          event: 'doctors_updated',
+          payload: { doctorId, status, unavailableReason: reason }
+        });
+      } catch {
+        // ignore
+      }
+    }
+
     const statusNames: Record<DoctorStatus, string> = {
       available: 'متاح للعمل ويستقبل الحالات',
       break: 'في استراحة مؤقتة',
@@ -1026,15 +1942,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? `تم تسجيل الطبيب: غير متاح (${reason || 'عذر طارئ'}) — تم حجب العيادة تلقائياً من شاشة حجز المرضى.`
         : `أصبحت حالة الطبيب الآن: ${statusNames[status]}`
     });
+    return true;
   };
 
-  const updateDoctorSchedule = (
+  const updateDoctorSchedule = async (
     doctorId: string, 
     scheduleDays: string[], 
     scheduleHours: string,
     shiftStartTime?: string,
     shiftEndTime?: string
-  ) => {
+  ): Promise<boolean> => {
+    if (!hasPermission(currentUser?.role, 'manage_doctor_attendance')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح بالتعديل',
+        message: 'لا يمتلك حسابك صلاحية تعديل الجدول الأسبوعي للطبيب.'
+      });
+      return false;
+    }
+
     const shift = parseDoctorShiftTimes({ 
       scheduleHours, 
       shiftStartTime, 
@@ -1042,6 +1968,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     const finalStartTime = shiftStartTime || shift.startTime;
     const finalEndTime = shiftEndTime || shift.endTime;
+
+    if (isSupabaseConfigured) {
+      const saved = await updateDoctorInDb(doctorId, {
+        scheduleDays,
+        scheduleHours
+      });
+
+      if (!saved) {
+        addToast({
+          type: 'error',
+          title: 'تعذر حفظ الجدول الأسبوعي',
+          message: 'فشل حفظ وتثبيت جدول الطبيب في قاعدة البيانات. يرجى التحقق من الاتصال أو الصلاحيات والمحاولة مرة أخرى.'
+        });
+        return false;
+      }
+    }
 
     const updated = doctors.map(d => {
       if (d.id === doctorId) {
@@ -1059,10 +2001,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveDoctors(updated);
 
     if (isSupabaseConfigured) {
-      updateDoctorInDb(doctorId, {
-        scheduleDays,
-        scheduleHours
-      });
       try {
         const channel = supabase.channel('system_updates');
         channel.send({
@@ -1080,9 +2018,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       title: 'الجدول الأسبوعي للطبيب',
       message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل بنجاح.'
     });
+    return true;
   };
 
   const updateDoctorMaxBookings = (doctorId: string, maxDailyBookings: number) => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل الحد الأقصى للحالات اليومية مخصص لمدير النظام فقط.'
+      });
+      return;
+    }
     const updated = doctors.map(d => {
       if (d.id === doctorId) {
         return { ...d, maxDailyBookings };
@@ -1115,6 +2062,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // منطق تخطي الدور وتحويل المرضى المتغيبين إلى "متأخر" تلقائياً
   const admitPatient = (targetBookingId: string) => {
+    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إدخال المرضى وإدارة الطابور مخصص لمكتب الاستقبال وإدارة النظام فقط.'
+      });
+      return;
+    }
     const targetBooking = bookings.find(b => b.id === targetBookingId);
     if (!targetBooking) return;
 
@@ -1181,6 +2136,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const markPatientLate = (bookingId: string) => {
+    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تسجيل تأخر المرضى مخصص لمكتب الاستقبال وإدارة النظام فقط.'
+      });
+      return;
+    }
     if (isSupabaseConfigured) {
       updateBookingStatusInDb(bookingId, { status: 'late' });
     }
@@ -1196,6 +2159,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const restoreLatePatient = (bookingId: string, action: 'admit_now' | 'return_to_queue') => {
+    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إعادة المتأخرين للطابور مخصصة لمكتب الاستقبال وإدارة النظام فقط.'
+      });
+      return;
+    }
     const target = bookings.find(b => b.id === bookingId);
     if (!target) return;
 
@@ -1203,7 +2174,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (isSupabaseConfigured) {
       updateBookingStatusInDb(bookingId, {
         status: action === 'admit_now' ? 'in-progress' : 'waiting',
-        calledAt: action === 'admit_now' ? now : undefined
+        calledAt: action === 'admit_now' ? now : undefined,
+        paidAt: action === 'return_to_queue' ? now : undefined
       });
     }
 
@@ -1277,20 +2249,78 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const toggleClinicStatus = (clinicId: string) => {
-    const updated = clinics.map(c => (c.id === clinicId ? { ...c, active: !c.active } : c));
+    if (currentUser?.role !== 'admin' && !hasPermission(currentUser?.role, 'manage_daily_clinics')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تغيير حالة تشغيل العيادة يتطلب صلاحية إدارة جدول عيادات اليوم.'
+      });
+      return;
+    }
+    const target = clinics.find(c => c.id === clinicId);
+    if (!target) return;
+    const nextActive = !target.active;
+    const updated = clinics.map(c =>
+      c.id === clinicId
+        ? { ...c, active: nextActive, isActive: nextActive, isOpenToday: nextActive }
+        : c
+    );
     setClinics(updated);
     saveClinics(updated);
+
+    const updatedSched: DailyScheduleState = {
+      date: dailySchedule.date,
+      items: dailySchedule.items.map(i =>
+        i.clinicId === clinicId ? { ...i, isOpen: nextActive } : i
+      )
+    };
+    setDailySchedule(updatedSched);
+    saveDailySchedule(updatedSched);
+
+    if (isSupabaseConfigured) {
+      updateClinicInDb(clinicId, {
+        active: nextActive,
+        isActive: nextActive,
+        isOpenToday: nextActive
+      });
+      saveDailyScheduleToDb(updatedSched);
+    }
   };
 
   const addClinic = (newClinic: Omit<Clinic, 'id'>) => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إضافة العيادات التخصصية مخصصة لمدير النظام فقط.'
+      });
+      return;
+    }
     const id = `clinic-${Date.now()}`;
-    const fullClinic: Clinic = { ...newClinic, id };
+    unmarkClinicDeletedLocally(id);
+    const fullClinic: Clinic = {
+      ...newClinic,
+      id,
+      active: newClinic.active ?? true,
+      isActive: newClinic.isActive ?? true,
+      isOpenToday: newClinic.isOpenToday ?? true
+    };
     const updated = [...clinics, fullClinic];
     setClinics(updated);
     saveClinics(updated);
 
+    // إضافة العيادة الجديدة لجدول تشغيل اليوم تلقائياً
+    const updatedSchedItems: DailyClinicScheduleItem[] = [
+      ...dailySchedule.items.filter(i => i.clinicId !== id),
+      { clinicId: id, doctorId: '', isOpen: true }
+    ];
+    const updatedSched: DailyScheduleState = { date: getLocalDateStr(), items: updatedSchedItems };
+    setDailySchedule(updatedSched);
+    saveDailySchedule(updatedSched);
+
     if (isSupabaseConfigured) {
       addClinicToDb(fullClinic);
+      saveDailyScheduleToDb(updatedSched);
     }
 
     addToast({
@@ -1301,9 +2331,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateClinic = (clinicId: string, data: Partial<Clinic>) => {
+    if (currentUser?.role !== 'admin' && !hasPermission(currentUser?.role, 'manage_clinic_fees')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل بيانات أو رسوم العيادة غير مصرح لهذا الحساب.'
+      });
+      return;
+    }
     const updated = clinics.map(c => c.id === clinicId ? { ...c, ...data } : c);
     setClinics(updated);
     saveClinics(updated);
+
+    // إذا تم تعديل اسم العيادة، نحدّث clinicName لدى الأطباء التابعين لها
+    if (data.name) {
+      const updatedDocs = doctors.map(d => d.clinicId === clinicId ? { ...d, clinicName: data.name! } : d);
+      setDoctors(updatedDocs);
+      saveDoctors(updatedDocs);
+    }
 
     if (isSupabaseConfigured) {
       updateClinicInDb(clinicId, data);
@@ -1317,12 +2362,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const deleteClinic = async (clinicId: string): Promise<{ success: boolean; error?: string }> => {
+    if (currentUser?.role !== 'admin') {
+      const err = 'حذف العيادات مخصص لمدير النظام فقط.';
+      addToast({ type: 'error', title: 'غير مصرح', message: err });
+      return { success: false, error: err };
+    }
+
     const targetClinic = clinics.find(c => c.id === clinicId);
     const clinicName = targetClinic?.name || 'العيادة';
 
     // 1. Check active bookings locally
     const activeBookings = bookings.filter(
-      b => b.clinicId === clinicId && ['pending', 'confirmed', 'waiting', 'in_consultation'].includes(b.status)
+      b => b.clinicId === clinicId && ['waiting', 'in-progress', 'late'].includes(b.status)
     );
     if (activeBookings.length > 0) {
       const err = `لا يمكن حذف (${clinicName}) لوجود ${activeBookings.length} حجز نشط جارٍ عليها. يرجى استكمال الحالات أو إلغاؤها أولاً.`;
@@ -1334,7 +2385,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: err };
     }
 
-    // 2. Perform DB deletion / archiving
+    // 2. Perform DB deletion
     if (isSupabaseConfigured) {
       const res = await deleteClinicFromDb(clinicId);
       if (!res.success) {
@@ -1345,24 +2396,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         return { success: false, error: res.error };
       }
-
-      if (res.action === 'archived') {
-        const updated = clinics.map(c => c.id === clinicId ? { ...c, active: false, isOpenToday: false } : c);
-        setClinics(updated);
-        saveClinics(updated);
-        addToast({
-          type: 'warning',
-          title: 'تم أرشفة العيادة',
-          message: res.message || 'تم إغلاق وأرشفة العيادة لوجود حجوزات سابقة مرتبطة بها.'
-        });
-        return { success: true };
-      }
     }
 
-    // Hard deletion
+    // 3. تسجيل الحذف محلياً لضمان عدم رجوع العيادة بعد تحديث الصفحة أو إعادة فتح التطبيق
+    markClinicDeletedLocally(clinicId);
+
     const remaining = clinics.filter(c => c.id !== clinicId);
     setClinics(remaining);
     saveClinics(remaining);
+
+    // تحديث جدول اليوم وفك ارتباط الأطباء بالعيادة المحذوفة
+    const updatedSched: DailyScheduleState = {
+      date: dailySchedule.date,
+      items: dailySchedule.items.filter(i => i.clinicId !== clinicId)
+    };
+    setDailySchedule(updatedSched);
+    saveDailySchedule(updatedSched);
+
+    const updatedDocs = doctors.map(d =>
+      d.clinicId === clinicId ? { ...d, clinicId: '', clinicName: 'غير معين' } : d
+    );
+    setDoctors(updatedDocs);
+    saveDoctors(updatedDocs);
+
     addToast({
       type: 'success',
       title: 'تم حذف العيادة',
@@ -1372,11 +2428,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const addDoctor = (newDoctor: Omit<Doctor, 'id'>) => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إضافة الأطباء مخصصة لمدير النظام فقط.'
+      });
+      return;
+    }
     const id = `doc-${Date.now()}`;
-    const fullDoctor: Doctor = { ...newDoctor, id };
+    unmarkDoctorDeletedLocally(id);
+    const shift = parseDoctorShiftTimes(newDoctor);
+    const fullDoctor: Doctor = {
+      ...newDoctor,
+      id,
+      shiftStartTime: newDoctor.shiftStartTime || shift.startTime,
+      shiftEndTime: newDoctor.shiftEndTime || shift.endTime
+    };
     const updated = [...doctors, fullDoctor];
     setDoctors(updated);
     saveDoctors(updated);
+
+    // إذا كانت العيادة التابعة للطبيب ليس لها طبيب معين في جدول اليوم، نعين هذا الطبيب تلقائياً
+    if (fullDoctor.clinicId) {
+      const existingItem = dailySchedule.items.find(i => i.clinicId === fullDoctor.clinicId);
+      if (!existingItem || !existingItem.doctorId) {
+        const nextItems = existingItem
+          ? dailySchedule.items.map(i => i.clinicId === fullDoctor.clinicId ? { ...i, doctorId: id } : i)
+          : [...dailySchedule.items, { clinicId: fullDoctor.clinicId, doctorId: id, isOpen: true }];
+        const nextSchedule: DailyScheduleState = { date: dailySchedule.date, items: nextItems };
+        setDailySchedule(nextSchedule);
+        saveDailySchedule(nextSchedule);
+        if (isSupabaseConfigured) {
+          saveDailyScheduleToDb(nextSchedule);
+        }
+      }
+    }
 
     if (isSupabaseConfigured) {
       addDoctorToDb(fullDoctor);
@@ -1385,15 +2472,135 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast({
       type: 'success',
       title: 'تمت إضافة الطبيب',
-      message: `تم تسجيل د. ${fullDoctor.name} في الكادر الطبي.`
+      message: `تم تسجيل ${fullDoctor.name} في الكادر الطبي.`
     });
   };
 
+  const updateDoctor = async (doctorId: string, data: Partial<Doctor>): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل بيانات الطبيب الأساسية مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
+
+    const target = doctors.find(d => d.id === doctorId);
+    if (!target) return false;
+
+    const resolvedClinic = data.clinicId
+      ? clinics.find(c => c.id === data.clinicId)
+      : clinics.find(c => c.id === target.clinicId);
+
+    const mergedDoc: Doctor = {
+      ...target,
+      ...data,
+      clinicName: data.clinicName || resolvedClinic?.name || target.clinicName
+    };
+
+    if (data.scheduleHours || data.shiftStartTime || data.shiftEndTime) {
+      const shift = parseDoctorShiftTimes(mergedDoc);
+      mergedDoc.shiftStartTime = data.shiftStartTime || shift.startTime;
+      mergedDoc.shiftEndTime = data.shiftEndTime || shift.endTime;
+    }
+
+    if (isSupabaseConfigured) {
+      await updateDoctorInDb(doctorId, mergedDoc);
+    }
+
+    const updated = doctors.map(d => (d.id === doctorId ? mergedDoc : d));
+    setDoctors(updated);
+    saveDoctors(updated);
+
+    addToast({
+      type: 'success',
+      title: 'تم تحديث بيانات الطبيب',
+      message: `تم حفظ تعديلات بيانات (${mergedDoc.name}) بنجاح.`
+    });
+    return true;
+  };
+
+  const deleteDoctor = async (doctorId: string): Promise<{ success: boolean; error?: string }> => {
+    if (currentUser?.role !== 'admin') {
+      const err = 'حذف الأطباء مخصص لمدير النظام فقط.';
+      addToast({ type: 'error', title: 'غير مصرح', message: err });
+      return { success: false, error: err };
+    }
+
+    const targetDoc = doctors.find(d => d.id === doctorId);
+    const docName = targetDoc?.name || 'الطبيب';
+
+    // 1. فحص عدم وجود حجوزات نشطة جارية للطبيب
+    const activeBookings = bookings.filter(
+      b => b.doctorId === doctorId && ['waiting', 'in-progress', 'late'].includes(b.status)
+    );
+    if (activeBookings.length > 0) {
+      const err = `لا يمكن حذف (${docName}) لوجود ${activeBookings.length} حجز نشط جارٍ له. يرجى استكمال الحالات أو إلغاؤها أولاً.`;
+      addToast({
+        type: 'error',
+        title: 'تعذر حذف الطبيب',
+        message: err
+      });
+      return { success: false, error: err };
+    }
+
+    // 2. الحذف من قاعدة البيانات إن كانت مفعلة
+    if (isSupabaseConfigured) {
+      const res = await deleteDoctorFromDb(doctorId);
+      if (!res.success) {
+        addToast({
+          type: 'error',
+          title: 'تعذر حذف الطبيب',
+          message: res.error || 'حدث خطأ أثناء حذف الطبيب من قاعدة البيانات.'
+        });
+        return { success: false, error: res.error };
+      }
+    }
+
+    // 3. تسجيل الحذف محلياً لضمان عدم رجوع الطبيب بعد تحديث الصفحة أو إعادة فتح التطبيق
+    markDoctorDeletedLocally(doctorId);
+
+    const remaining = doctors.filter(d => d.id !== doctorId);
+    setDoctors(remaining);
+    saveDoctors(remaining);
+
+    // 4. تحديث جدول تشغيل اليوم إذا كان الطبيب المحذوف معيناً في إحدى العيادات
+    const updatedSchedItems = dailySchedule.items.map(item => {
+      if (item.doctorId === doctorId) {
+        const replacementDoc = remaining.find(d => d.clinicId === item.clinicId);
+        return { ...item, doctorId: replacementDoc?.id || '' };
+      }
+      return item;
+    });
+    const updatedSched: DailyScheduleState = { date: dailySchedule.date, items: updatedSchedItems };
+    setDailySchedule(updatedSched);
+    saveDailySchedule(updatedSched);
+    if (isSupabaseConfigured) {
+      saveDailyScheduleToDb(updatedSched);
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم حذف الطبيب',
+      message: `تم حذف (${docName}) نهائياً من النظام.`
+    });
+    return { success: true };
+  };
+
   const updateDailySchedule = (items: DailyClinicScheduleItem[]) => {
-    const todayStr = new Date().toISOString().split('T')[0];
+    if (currentUser?.role !== 'admin' && !hasPermission(currentUser?.role, 'manage_daily_clinics')) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل جدول تشغيل العيادات اليومي يتطلب صلاحية إدارة جدول اليوم.'
+      });
+      return;
+    }
+    const todayStr = getLocalDateStr(new Date());
     const sanitized = items.map(item => {
       if (!item.doctorId) {
-        const doc = doctors.find(d => d.clinicId === item.clinicId) || doctors[0];
+        const doc = doctors.find(d => d.clinicId === item.clinicId);
         return { ...item, doctorId: doc?.id || '' };
       }
       return item;
@@ -1406,7 +2613,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured) {
       saveDailyScheduleToDb(newSchedule);
+      try {
+        const channel = supabase.channel('system_updates');
+        channel.send({
+          type: 'broadcast',
+          event: 'schedule_updated',
+          payload: { date: todayStr }
+        });
+      } catch {}
     }
+
+    // مزامنة حالة isOpenToday في قائمة العيادات المحلية مع جدول اليوم
+    const updatedClinics = clinics.map(c => {
+      const item = sanitized.find(i => i.clinicId === c.id);
+      return item ? { ...c, isOpenToday: item.isOpen, active: item.isOpen, isActive: item.isOpen } : c;
+    });
+    setClinics(updatedClinics);
+    saveClinics(updatedClinics);
 
     setDailySchedule(newSchedule);
     saveDailySchedule(newSchedule);
@@ -1418,12 +2641,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateRolePermissions = (role: UserRole, permissions: SystemPermission[]) => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل مصفوفة الصلاحيات مخصص لمدير النظام فقط.'
+      });
+      return;
+    }
+    if (role === 'admin') return; // الأدمن يحتفظ بكافة الصلاحيات دائماً
     const updated: RolePermissionsMap = {
       ...rolePermissions,
       [role]: permissions
     };
     setRolePermissions(updated);
     saveRolePermissions(updated);
+    if (isSupabaseConfigured) {
+      saveSettingToDb('role_permissions', JSON.stringify(updated));
+    }
     const roleLabels: Record<UserRole, string> = {
       admin: 'الإدارة العامة',
       doctor: 'الأطباء',
@@ -1445,6 +2680,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateSupportInfoText = async (text: string): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل إعدادات الشاشة الرئيسية مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
     const sanitized = sanitizeText(text);
     setSupportInfoText(sanitized);
     saveSupportInfoText(sanitized);
@@ -1470,6 +2713,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
+  const updateOfficialWorkingHours = async (text: string): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل مواعيد العمل الرسمية مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
+    const sanitized = sanitizeText(text);
+    if (!sanitized) {
+      addToast({
+        type: 'error',
+        title: 'حقل مطلوب',
+        message: 'يرجى كتابة مواعيد العمل الرسمية.'
+      });
+      return false;
+    }
+    setOfficialWorkingHours(sanitized);
+    saveOfficialWorkingHours(sanitized);
+
+    let savedToCloud = false;
+    if (isSupabaseConfigured) {
+      savedToCloud = await saveSettingToDb('official_working_hours_text', sanitized);
+    }
+
+    if (savedToCloud) {
+      addToast({
+        type: 'success',
+        title: 'تم تحديث مواعيد العمل الرسمية',
+        message: 'تم حفظ مواعيد العمل في قاعدة البيانات وتعميمها فوراً على الشاشة الرئيسية لجميع الزوار.'
+      });
+    } else {
+      addToast({
+        type: 'success',
+        title: 'تم تحديث مواعيد العمل الرسمية',
+        message: 'تم حفظ مواعيد العمل الرسمية وتحديثها فوراً في الشاشة الرئيسية.'
+      });
+    }
+    return true;
+  };
+
   /**
    * العيادات المتاحة للحجز للمريض:
    * تعتمد بشكل صارم على الركائز الأربعة المطلوبة:
@@ -1479,8 +2764,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
    * 4. اكتمال عدد الحجوزات (هل وصلت الحجوزات المؤكدة إلى الحد الأقصى للطبيب؟)
    */
   const getActiveClinicsForBooking = (): { clinic: Clinic; assignedDoctor?: Doctor }[] => {
-    const todayStr = new Date().toISOString().split('T')[0];
     const available: { clinic: Clinic; assignedDoctor?: Doctor }[] = [];
+    const todayStr = getLocalDateStr(new Date());
 
     for (const clinic of clinics) {
       // فحص أن العيادة مفعلة
@@ -1493,15 +2778,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // إذا كانت العيادة مغلقة صراحة اليوم، نتجاوزها
       if (!isDailyOpen) continue;
 
-      // العثور على الطبيب المناوب المعين في جدول اليوم أو أول طبيب مسجل للعيادة
-      const assignedDoctor = (scheduleItem?.doctorId && doctors.find(d => d.id === scheduleItem.doctorId)) || 
-                             doctors.find(d => d.clinicId === clinic.id) ||
-                             doctors[0];
+      // العثور على الطبيب المناوب المعين في جدول اليوم (بشرط تبعيته للعيادة وتواجده في جدول اليوم الفعلي) أو طبيب متاح مسجل لنفس العيادة
+      const scheduledDoc = scheduleItem?.doctorId
+        ? doctors.find(d => d.id === scheduleItem.doctorId && d.clinicId === clinic.id)
+        : undefined;
+      const assignedDoctor =
+        (scheduledDoc && scheduledDoc.status !== 'offline' && isDoctorScheduledOnDate(scheduledDoc, todayStr)
+          ? scheduledDoc
+          : undefined) ||
+        doctors.find(d => d.clinicId === clinic.id && d.status !== 'offline' && isDoctorScheduledOnDate(d, todayStr));
 
-      if (!assignedDoctor) continue;
-
-      // استبعاد الطبيب فقط إذا كان معتذراً رسمياً أو غير متاح بالكامل (offline)
-      if (assignedDoctor.status === 'offline') {
+      // إخفاء العيادة تلقائياً إذا لم يكن لها طبيب مسجل أو إذا كان الطبيب غير متاح (offline) أو غير مجدول في هذا اليوم الفعلي
+      if (!assignedDoctor || assignedDoctor.status === 'offline' || !isDoctorScheduledOnDate(assignedDoctor, todayStr)) {
         continue;
       }
 
@@ -1514,8 +2802,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const checkClinicAvailabilityStatus = (clinicId: string, doctorId: string, date?: string): ClinicAvailabilityResult | null => {
     const doctor = doctors.find(d => d.id === doctorId);
     if (!doctor) return null;
-    const targetDate = date || new Date().toISOString().split('T')[0];
-    return checkClinicAvailability(doctor, clinicId, targetDate, bookings);
+    const targetDate = date || getLocalDateStr(new Date());
+    const baseResult = checkClinicAvailability(doctor, clinicId, targetDate, bookings);
+
+    const clinic = clinics.find(c => c.id === clinicId);
+    const scheduleItem = dailySchedule.items.find(item => item.clinicId === clinicId);
+    const isDailyOpen = scheduleItem ? scheduleItem.isOpen : (clinic?.isOpenToday !== false);
+    if (!clinic || clinic.active === false || clinic.isActive === false || !isDailyOpen) {
+      return {
+        ...baseResult,
+        allowed: false,
+        reason: 'عذراً، هذه العيادة مغلقة اليوم ولا تستقبل حجوزات جديدة.'
+      };
+    }
+
+    return baseResult;
   };
 
   // مؤقت دوري كل 30 ثانية لتحديث انتهاء مواعيد العمل للعيادات تلقائياً في الواجهات الحية
@@ -1535,10 +2836,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     localStorage.removeItem('sharaya_daily_schedule_v2');
     localStorage.removeItem('sharaya_role_permissions_v2');
     localStorage.removeItem('sharaya_support_info_text_v2');
+    localStorage.removeItem('sharaya_deleted_clinics_v2');
+    localStorage.removeItem('sharaya_deleted_doctors_v2');
+    localStorage.removeItem('sharaya_deleted_bookings_v2');
     window.location.reload();
   };
 
   const clearPastBookings = async (beforeDate?: string): Promise<{ success: boolean; count: number }> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تطهير وأرشفة السجلات السابقة مخصص لمدير النظام فقط.'
+      });
+      return { success: false, count: 0 };
+    }
     const cutoffDate = beforeDate || getLocalDateStr(new Date());
     const toRemove = bookings.filter(b => b.date < cutoffDate);
     const remaining = bookings.filter(b => b.date >= cutoffDate && b.notes !== '__PURGED_PAST_BOOKING__');
@@ -1567,6 +2879,110 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: true, count: toRemove.length };
   };
 
+  const logSystemError = async (input: {
+    source: SystemErrorSource;
+    message: string;
+    stack?: string;
+    componentStack?: string;
+  }): Promise<void> => {
+    const entry = recordLocalSystemError(input);
+    const updated = [entry, ...errorLogs.filter(e => e.id !== entry.id)].slice(0, 100);
+    setErrorLogs(updated);
+    saveErrorLogs(updated);
+
+    if (isSupabaseConfigured) {
+      const ok = await reportClientErrorToDb(entry);
+      if (ok) {
+        const syncedList = updated.map(item =>
+          item.id === entry.id ? { ...item, syncedToDb: true } : item
+        );
+        setErrorLogs(syncedList);
+        saveErrorLogs(syncedList);
+        savePendingErrorLogs(getPendingErrorLogs().filter(p => p.id !== entry.id));
+      }
+    }
+  };
+
+  const resolveErrorLog = async (errorId: string, resolved: boolean = true): Promise<void> => {
+    if (currentUser?.role !== 'admin') return;
+    const updated = errorLogs.map(item =>
+      item.id === errorId ? { ...item, resolved, syncedToDb: true } : item
+    );
+    setErrorLogs(updated);
+    saveErrorLogs(updated);
+    if (isSupabaseConfigured) {
+      await saveSettingToDb('system_error_logs_json', JSON.stringify(updated));
+    }
+  };
+
+  const resolveAllErrorLogs = async (): Promise<void> => {
+    if (currentUser?.role !== 'admin') return;
+    const updated = errorLogs.map(item => ({ ...item, resolved: true, syncedToDb: true }));
+    setErrorLogs(updated);
+    saveErrorLogs(updated);
+    if (isSupabaseConfigured) {
+      await saveSettingToDb('system_error_logs_json', JSON.stringify(updated));
+    }
+    addToast({
+      type: 'success',
+      title: 'تم تحديث حالة الأخطاء',
+      message: 'تم تعليم جميع سجلات الأخطاء كـ (تمت المعالجة) ومزامنتها مع قاعدة البيانات.'
+    });
+  };
+
+  const deleteErrorLog = async (errorId: string): Promise<void> => {
+    if (currentUser?.role !== 'admin') return;
+    const updated = errorLogs.filter(item => item.id !== errorId);
+    setErrorLogs(updated);
+    saveErrorLogs(updated);
+    savePendingErrorLogs(getPendingErrorLogs().filter(p => p.id !== errorId));
+    if (isSupabaseConfigured) {
+      await saveSettingToDb('system_error_logs_json', JSON.stringify(updated));
+    }
+  };
+
+  const clearAllErrorLogs = async (): Promise<void> => {
+    if (currentUser?.role !== 'admin') return;
+    setErrorLogs([]);
+    saveErrorLogs([]);
+    savePendingErrorLogs([]);
+    if (isSupabaseConfigured) {
+      await saveSettingToDb('system_error_logs_json', JSON.stringify([]));
+    }
+    addToast({
+      type: 'success',
+      title: 'تم تفريغ سجل الأخطاء',
+      message: 'تم مسح كافة سجلات الأخطاء من الجهاز الحالي ومن قاعدة البيانات السحابية.'
+    });
+  };
+
+  const syncErrorLogsNow = async (): Promise<boolean> => {
+    if (!isSupabaseConfigured) return false;
+    try {
+      const pending = getPendingErrorLogs();
+      for (const item of pending) {
+        await reportClientErrorToDb(item);
+      }
+      savePendingErrorLogs([]);
+
+      const settings = await fetchSettingsFromDb();
+      let cloudLogs: SystemErrorLog[] = [];
+      if (settings['system_error_logs_json']) {
+        try {
+          const parsed = JSON.parse(settings['system_error_logs_json']);
+          if (Array.isArray(parsed)) cloudLogs = parsed;
+        } catch {}
+      }
+      const merged = mergeErrorLogLists(cloudLogs, getStoredErrorLogs());
+      setErrorLogs(merged);
+      saveErrorLogs(merged);
+      await saveSettingToDb('system_error_logs_json', JSON.stringify(merged));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -1590,10 +3006,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         hasPermission,
         supportInfoText,
         updateSupportInfoText,
+        officialWorkingHours,
+        updateOfficialWorkingHours,
         getActiveClinicsForBooking,
         createBooking,
         updateBookingStatus,
         updatePaymentStatus,
+        deleteBooking,
         updateDoctorStatus,
         updateDoctorSchedule,
         updateDoctorMaxBookings,
@@ -1606,9 +3025,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateClinic,
         deleteClinic,
         addDoctor,
+        updateDoctor,
+        deleteDoctor,
         resetToInitialData,
         resetPasswordByAdmin,
         staffAccounts,
+        createStaffAccount,
         deleteStaffAccount,
         updateStaffRecoveryEmail,
         updateStaffAccount,
@@ -1620,7 +3042,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         patientHistoryPhone,
         setPatientHistoryPhone,
         toggleClinicStatus,
-        clearPastBookings
+        clearPastBookings,
+        errorLogs,
+        logSystemError,
+        resolveErrorLog,
+        resolveAllErrorLogs,
+        deleteErrorLog,
+        clearAllErrorLogs,
+        syncErrorLogsNow
       }}
     >
       {children}

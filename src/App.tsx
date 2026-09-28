@@ -12,7 +12,6 @@ import { PatientHistoryModal } from './components/PatientHistoryModal';
 import { LandingView } from './views/LandingView';
 import { BookingView } from './views/BookingView';
 import { TicketView } from './views/TicketView';
-import { QueueView } from './views/QueueView';
 import { LoginView } from './views/LoginView';
 import { ReceptionView } from './views/ReceptionView';
 import { DoctorView } from './views/DoctorView';
@@ -20,30 +19,43 @@ import { CashierView } from './views/CashierView';
 import { AdminView } from './views/AdminView';
 import { OfflineBanner } from './components/OfflineBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Hospital, Moon, Sun } from 'lucide-react';
+import { Hospital, Moon, Sun, ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
-  const { currentView, theme, toggleTheme } = useApp();
+  const { currentView, currentUser, theme, toggleTheme } = useApp();
 
   const renderView = () => {
     switch (currentView) {
       case 'landing':
         return <LandingView />;
       case 'booking':
+        if (currentUser?.role === 'doctor') {
+          return <DoctorView />;
+        }
         return <BookingView />;
       case 'ticket':
         return <TicketView />;
-      case 'queue':
-        return <QueueView />;
       case 'login':
         return <LoginView />;
       case 'reception':
+        if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+          return <LoginView />;
+        }
         return <ReceptionView />;
       case 'doctor':
+        if (!currentUser || (currentUser.role !== 'doctor' && currentUser.role !== 'admin')) {
+          return <LoginView />;
+        }
         return <DoctorView />;
       case 'cashier':
+        if (!currentUser || (currentUser.role !== 'cashier' && currentUser.role !== 'admin')) {
+          return <LoginView />;
+        }
         return <CashierView />;
       case 'admin':
+        if (!currentUser || currentUser.role !== 'admin') {
+          return <LoginView />;
+        }
         return <AdminView />;
       default:
         return <LandingView />;
@@ -51,7 +63,7 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-900 text-slate-800 dark:text-slate-100 flex flex-col font-sans transition-colors duration-200">
+    <div className="min-h-screen bg-[#F7FAF8] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
       
       {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
       <OfflineBanner />
@@ -59,7 +71,7 @@ const AppContent: React.FC = () => {
       {/* الشريط العلوي العام */}
       <Navbar />
 
-      {/* المحتوى الرئيسي للشاشة الحالية مع تأثيرات انتقال ناعمة */}
+      {/* المحتوى الرئيسي للشاشة الحالية */}
       <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         <AnimatePresence mode="wait">
           <motion.div
@@ -67,46 +79,36 @@ const AppContent: React.FC = () => {
             initial={{ opacity: 0, y: 8 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
-            transition={{ duration: 0.2 }}
+            transition={{ duration: 0.2, ease: 'easeOut' }}
           >
             {renderView()}
           </motion.div>
         </AnimatePresence>
       </main>
 
-      {/* التذييل الطبي الرسمي للجمعية الشرعية */}
-      <footer className="no-print border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-950 py-6 text-xs text-slate-500">
+      {/* التذييل الطبي المؤسسي الهادئ والكلاسيكي (يدعم الوضع النهاري والليلي بدون تكرار أزرار) */}
+      <footer className="no-print border-t border-slate-200/80 dark:border-white/10 bg-white dark:bg-[#040B09] py-6 text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 rounded-md bg-emerald-800 text-amber-300 flex items-center justify-center">
-              <Hospital className="w-3.5 h-3.5" />
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs">
+              <Hospital className="w-4 h-4" />
             </div>
-            <span className="font-bold text-slate-700 dark:text-slate-300">
-              عيادات الجمعية الشرعية التخصصية
-            </span>
-            <span>— رعاية صحية تكافلية متميزة</span>
+            <div>
+              <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                <span>مجمع عيادات الجمعية الشرعية التخصصية</span>
+                <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 dark:bg-white/5 text-emerald-800 dark:text-amber-300 border border-emerald-200/70 dark:border-white/10">
+                  <ShieldCheck className="w-3 h-3 text-emerald-700 dark:text-amber-400" />
+                  <span>منظومة طبية رقمية معتمدة</span>
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                رعاية صحية تخصصية بإشراف نخبة من الأطباء الاستشاريين
+              </p>
+            </div>
           </div>
 
-          <div className="flex items-center gap-4 text-[11px]">
-            {/* زر تبديل الوضع الليلي لراحة العين في التذييل */}
-            <button
-              onClick={toggleTheme}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 text-slate-700 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-400 hover:bg-slate-200 dark:hover:bg-slate-850 transition-colors cursor-pointer"
-              title="تبديل مظهر النظام (الوضع الليلي للمناوبات / الوضع النهاري)"
-            >
-              {theme === 'dark' ? (
-                <>
-                  <Sun className="w-3.5 h-3.5 text-amber-400" />
-                  <span>الوضع النهاري (فاتح)</span>
-                </>
-              ) : (
-                <>
-                  <Moon className="w-3.5 h-3.5 text-slate-600" />
-                  <span>الوضع الليلي للمناوبات (داكن)</span>
-                </>
-              )}
-            </button>
-            <span className="hidden sm:inline">نظام إدارة العيادات والحجوزات الفورية (PWA)</span>
+          <div className="text-[11px] text-slate-400 dark:text-slate-500 font-medium">
+            جميع الحقوق محفوظة © {new Date().getFullYear()} • عيادات الجمعية الشرعية التخصصية
           </div>
         </div>
       </footer>

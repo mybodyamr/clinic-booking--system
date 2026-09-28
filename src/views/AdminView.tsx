@@ -14,6 +14,7 @@ import {
   AlertCircle,
   FileSpreadsheet,
   Calendar,
+  CalendarDays,
   CalendarCheck,
   Key,
   FileText,
@@ -23,12 +24,22 @@ import {
   ShieldCheck,
   Receipt,
   Mail,
-  RefreshCw
+  RefreshCw,
+  Clock,
+  Bug,
+  Activity,
+  Monitor,
+  Search,
+  Copy,
+  ChevronDown,
+  ChevronUp,
+  Cloud
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { AVAILABLE_PERMISSIONS } from '../services/storage';
-import { DailyClinicScheduleItem, SystemPermission, UserRole, StaffAccount, Doctor } from '../types';
-import { DailyScheduleExportModal } from '../components/DailyScheduleExportModal';
+import { AVAILABLE_PERMISSIONS, sanitizeSpreadsheetCell } from '../services/storage';
+import { getLocalDateStr, isDoctorScheduledOnDate, getArabicDayName } from '../services/scheduleService';
+import { DailyClinicScheduleItem, SystemPermission, UserRole, StaffAccount, Doctor, Clinic, SystemErrorSource } from '../types';
+import { DailyScheduleExportModal, ScheduleExportMode } from '../components/DailyScheduleExportModal';
 
 export const AdminView: React.FC = () => {
   const { 
@@ -38,6 +49,8 @@ export const AdminView: React.FC = () => {
     addClinic, 
     updateClinic, 
     addDoctor, 
+    updateDoctor,
+    deleteDoctor,
     addToast,
     dailySchedule,
     updateDailySchedule,
@@ -45,26 +58,65 @@ export const AdminView: React.FC = () => {
     updateRolePermissions,
     supportInfoText,
     updateSupportInfoText,
+    officialWorkingHours,
+    updateOfficialWorkingHours,
     updateDoctorStatus,
     updateDoctorSchedule,
     updateDoctorMaxBookings,
     resetPasswordByAdmin,
     staffAccounts,
+    createStaffAccount,
     deleteStaffAccount,
     updateStaffRecoveryEmail,
     deleteClinic,
     updateStaffAccount,
-    clearPastBookings
+    clearPastBookings,
+    currentUser,
+    errorLogs,
+    logSystemError,
+    resolveErrorLog,
+    resolveAllErrorLogs,
+    deleteErrorLog,
+    clearAllErrorLogs,
+    syncErrorLogsNow
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports' | 'error-logs'>('overview');
+
+  // فلاتر وحالات لوحة تحكم الأخطاء (Error Monitoring Dashboard)
+  const [errorSourceFilter, setErrorSourceFilter] = useState<'all' | SystemErrorSource>('all');
+  const [errorStatusFilter, setErrorStatusFilter] = useState<'all' | 'unresolved' | 'resolved'>('all');
+  const [errorSearchQuery, setErrorSearchQuery] = useState('');
+  const [expandedErrorIds, setExpandedErrorIds] = useState<Record<string, boolean>>({});
+  const [isSyncingErrors, setIsSyncingErrors] = useState(false);
+  const [showClearErrorsModal, setShowClearErrorsModal] = useState(false);
+
+  const unresolvedErrorsCount = errorLogs.filter(e => !e.resolved).length;
+  const errorBoundaryCount = errorLogs.filter(e => e.source === 'ErrorBoundary').length;
+  const preloadErrorCount = errorLogs.filter(e => e.source === 'vite:preloadError' || e.source === 'ChunkLoadError').length;
+
+  const filteredErrorLogs = errorLogs.filter(log => {
+    if (errorSourceFilter !== 'all' && log.source !== errorSourceFilter) return false;
+    if (errorStatusFilter === 'unresolved' && log.resolved) return false;
+    if (errorStatusFilter === 'resolved' && !log.resolved) return false;
+    if (errorSearchQuery.trim()) {
+      const q = errorSearchQuery.toLowerCase();
+      const matchMsg = log.message?.toLowerCase().includes(q);
+      const matchDevice = log.deviceInfo?.toLowerCase().includes(q);
+      const matchUser = log.username?.toLowerCase().includes(q) || log.userRole?.toLowerCase().includes(q);
+      const matchUrl = log.url?.toLowerCase().includes(q);
+      const matchSource = log.source?.toLowerCase().includes(q);
+      if (!matchMsg && !matchDevice && !matchUser && !matchUrl && !matchSource) return false;
+    }
+    return true;
+  });
 
   // نطاق عرض التقارير والسجلات (اليوم كافتراضي أو الأرشيف)
   const [reportScope, setReportScope] = useState<'today' | 'archive'>('today');
   const [showClearPastModal, setShowClearPastModal] = useState(false);
   const [isClearingPast, setIsClearingPast] = useState(false);
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateStr();
   const todayBookings = bookings.filter(b => b.date === todayStr);
   const pastBookings = bookings.filter(b => b.date < todayStr);
   const displayedReportBookings = reportScope === 'today' ? todayBookings : bookings;
@@ -80,10 +132,48 @@ export const AdminView: React.FC = () => {
   const [clinicToDelete, setClinicToDelete] = useState<typeof clinics[0] | null>(null);
   const [isDeletingClinic, setIsDeletingClinic] = useState(false);
 
+  // حالة تعديل بيانات العيادة بالكامل
+  const [editingClinicFull, setEditingClinicFull] = useState<Clinic | null>(null);
+  const [clinicEditName, setClinicEditName] = useState('');
+  const [clinicEditFee, setClinicEditFee] = useState(100);
+  const [clinicEditRoom, setClinicEditRoom] = useState('');
+  const [clinicEditDesc, setClinicEditDesc] = useState('');
+  const [clinicEditCapacity, setClinicEditCapacity] = useState(20);
+  const [isSavingClinicFull, setIsSavingClinicFull] = useState(false);
+
+  // حالة تعديل بيانات الطبيب بالكامل وحذفه
+  const [editingDoctorFull, setEditingDoctorFull] = useState<Doctor | null>(null);
+  const [docEditName, setDocEditName] = useState('');
+  const [docEditTitle, setDocEditTitle] = useState('');
+  const [docEditClinicId, setDocEditClinicId] = useState('');
+  const [docEditHours, setDocEditHours] = useState('');
+  const [docEditMaxBookings, setDocEditMaxBookings] = useState(20);
+  const [isSavingDoctorFull, setIsSavingDoctorFull] = useState(false);
+  const [doctorToDelete, setDoctorToDelete] = useState<{ id: string; name: string; clinicName?: string } | null>(null);
+  const [isDeletingDoctor, setIsDeletingDoctor] = useState(false);
+
+  // إنشاء حساب موظف جديد (Phase 3)
+  const [showCreateStaffModal, setShowCreateStaffModal] = useState(false);
+  const [createStaffUsername, setCreateStaffUsername] = useState('');
+  const [createStaffPassword, setCreateStaffPassword] = useState('');
+  const [createStaffDisplayName, setCreateStaffDisplayName] = useState('');
+  const [createStaffRole, setCreateStaffRole] = useState<UserRole>('reception');
+  const [createStaffDoctorId, setCreateStaffDoctorId] = useState(doctors[0]?.id || '');
+  const [createStaffClinicId, setCreateStaffClinicId] = useState(doctors[0]?.clinicId || clinics[0]?.id || '');
+  const [createStaffEmail, setCreateStaffEmail] = useState('');
+  const [isCreatingStaff, setIsCreatingStaff] = useState(false);
+
+  // حذف حساب موظف مع نافذة تأكيد آمنة
+  const [staffToDelete, setStaffToDelete] = useState<StaffAccount | null>(null);
+  const [isDeletingStaff, setIsDeletingStaff] = useState(false);
+
   // تعديل وتحديث بيانات الموظفين
   const [editingStaffForFullUpdate, setEditingStaffForFullUpdate] = useState<StaffAccount | null>(null);
   const [staffEditUsername, setStaffEditUsername] = useState('');
   const [staffEditDisplayName, setStaffEditDisplayName] = useState('');
+  const [staffEditRole, setStaffEditRole] = useState<UserRole>('reception');
+  const [staffEditDoctorId, setStaffEditDoctorId] = useState('');
+  const [staffEditClinicId, setStaffEditClinicId] = useState('');
   const [staffEditEmail, setStaffEditEmail] = useState('');
   const [staffEditPassword, setStaffEditPassword] = useState('');
   const [isSavingStaff, setIsSavingStaff] = useState(false);
@@ -98,8 +188,9 @@ export const AdminView: React.FC = () => {
   const [newDocClinicId, setNewDocClinicId] = useState(clinics[0]?.id || '');
   const [newDocHours, setNewDocHours] = useState('04:00 م - 09:00 م');
 
-  // نافذة تنزيل جدول تشغيل اليوم كصورة
+  // نافذة تنزيل جدول تشغيل اليوم أو الأسبوع كصورة
   const [showExportScheduleModal, setShowExportScheduleModal] = useState(false);
+  const [exportScheduleInitialMode, setExportScheduleInitialMode] = useState<ScheduleExportMode>('daily');
 
   // حالة نافذة إعادة تعيين كلمة المرور للموظفين
   const [showResetPassModal, setShowResetPassModal] = useState(false);
@@ -151,22 +242,23 @@ export const AdminView: React.FC = () => {
     });
   });
 
-  // مزامنة العناصر عند تحديث العيادات
+  // مزامنة العناصر عند تحديث العيادات أو جدول اليوم
   React.useEffect(() => {
     setScheduleItems(prev => {
       return clinics.map(c => {
         const clinicDoc = doctors.find(d => d.clinicId === c.id) || doctors[0];
-        const match = prev.find(p => p.clinicId === c.id) || dailySchedule.items.find(i => i.clinicId === c.id);
+        const match = dailySchedule.items.find(i => i.clinicId === c.id) || prev.find(p => p.clinicId === c.id);
         if (match) {
           return {
             ...match,
-            doctorId: match.doctorId || clinicDoc?.id || ''
+            doctorId: match.doctorId || clinicDoc?.id || '',
+            isOpen: match.isOpen !== undefined ? match.isOpen : Boolean(c.active !== false && c.isActive !== false && c.isOpenToday !== false)
           };
         }
         return {
           clinicId: c.id,
           doctorId: clinicDoc?.id || '',
-          isOpen: Boolean(c.active !== false && c.isActive !== false)
+          isOpen: Boolean(c.active !== false && c.isActive !== false && c.isOpenToday !== false)
         };
       });
     });
@@ -176,10 +268,18 @@ export const AdminView: React.FC = () => {
   const [supportTextDraft, setSupportTextDraft] = useState(supportInfoText);
   const [isSavingSupportText, setIsSavingSupportText] = useState(false);
 
+  // حالة مواعيد العمل الرسمية بالصفحة الرئيسية
+  const [workingHoursDraft, setWorkingHoursDraft] = useState(officialWorkingHours);
+  const [isSavingWorkingHours, setIsSavingWorkingHours] = useState(false);
+
   // تحديث مسودة النص عند ورود تحديثات فورية عبر Realtime أو مزامنة الخادم
   useEffect(() => {
     setSupportTextDraft(supportInfoText);
   }, [supportInfoText]);
+
+  useEffect(() => {
+    setWorkingHoursDraft(officialWorkingHours);
+  }, [officialWorkingHours]);
 
   // حالة تفويض الصلاحيات
   const [selectedRoleForPerms, setSelectedRoleForPerms] = useState<UserRole>('reception');
@@ -221,7 +321,7 @@ export const AdminView: React.FC = () => {
     }
   };
 
-  const handleSaveDoctorSchedule = (e: React.FormEvent) => {
+  const handleSaveDoctorSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingScheduleDoc) return;
     if (tempScheduleDays.length === 0) {
@@ -232,8 +332,10 @@ export const AdminView: React.FC = () => {
       });
       return;
     }
-    updateDoctorSchedule(editingScheduleDoc.id, tempScheduleDays, tempScheduleHours.trim() || '9:00 ص - 3:00 م');
-    setEditingScheduleDoc(null);
+    const ok = await updateDoctorSchedule(editingScheduleDoc.id, tempScheduleDays, tempScheduleHours.trim() || '9:00 ص - 3:00 م');
+    if (ok) {
+      setEditingScheduleDoc(null);
+    }
   };
 
   // حساب الإحصائيات العامة
@@ -248,19 +350,19 @@ export const AdminView: React.FC = () => {
   const handleExportToExcel = () => {
     try {
       const dataToExport = displayedReportBookings.map(b => ({
-        'رقم التذكرة': b.ticketNumber,
-        'اسم المريض': b.patientName,
-        'رقم الهاتف': b.patientPhone,
-        'العيادة التخصصية': b.clinicName,
-        'الطبيب المعالج': b.doctorName,
-        'التاريخ': b.date,
-        'الفترة': b.timeSlot,
+        'رقم التذكرة': sanitizeSpreadsheetCell(b.ticketNumber),
+        'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
+        'رقم الهاتف': sanitizeSpreadsheetCell(b.patientPhone),
+        'العيادة التخصصية': sanitizeSpreadsheetCell(b.clinicName),
+        'الطبيب المعالج': sanitizeSpreadsheetCell(b.doctorName),
+        'التاريخ': sanitizeSpreadsheetCell(b.date),
+        'الفترة': sanitizeSpreadsheetCell(b.timeSlot),
         'رقم الدور': b.queuePosition,
         'قيمة الكشف': b.fee,
         'حالة الكشف': b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي',
         'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد',
         'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'charity_exempt' ? 'تكافل خيري' : 'غير مسدد',
-        'ملاحظات التشخيص': b.doctorDiagnosis || '-'
+        'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || '-')
       }));
 
       const worksheet = XLSX.utils.json_to_sheet(dataToExport);
@@ -326,6 +428,35 @@ export const AdminView: React.FC = () => {
     setShowAddDoctorModal(false);
   };
 
+  const handleSaveFullClinicEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingClinicFull || !clinicEditName.trim()) return;
+    setIsSavingClinicFull(true);
+    await updateClinic(editingClinicFull.id, {
+      name: clinicEditName.trim(),
+      fee: Math.max(0, Number(clinicEditFee) || 0),
+      room: clinicEditRoom.trim() || 'غرفة العيادة',
+      description: clinicEditDesc.trim() || 'عيادة تخصصية لخدمة المرضى'
+    });
+    setIsSavingClinicFull(false);
+    setEditingClinicFull(null);
+  };
+
+  const handleSaveFullDoctorEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingDoctorFull || !docEditName.trim()) return;
+    setIsSavingDoctorFull(true);
+    await updateDoctor(editingDoctorFull.id, {
+      name: docEditName.trim(),
+      title: docEditTitle.trim() || 'أخصائي',
+      clinicId: docEditClinicId || editingDoctorFull.clinicId,
+      scheduleHours: docEditHours.trim() || editingDoctorFull.scheduleHours,
+      maxDailyBookings: Math.max(1, Number(docEditMaxBookings) || 20)
+    });
+    setIsSavingDoctorFull(false);
+    setEditingDoctorFull(null);
+  };
+
   // معالجات جدول تشغيل اليوم
   const handleSaveDailySchedule = () => {
     updateDailySchedule(scheduleItems);
@@ -379,6 +510,12 @@ export const AdminView: React.FC = () => {
     setIsSavingSupportText(false);
   };
 
+  const handleSaveWorkingHours = async () => {
+    setIsSavingWorkingHours(true);
+    await updateOfficialWorkingHours(workingHoursDraft);
+    setIsSavingWorkingHours(false);
+  };
+
   const handleSaveDoctorMaxCases = (doctorId: string, maxCases: number) => {
     updateDoctorMaxBookings(doctorId, maxCases);
     setEditingMaxDocId(null);
@@ -409,12 +546,28 @@ export const AdminView: React.FC = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => setShowExportScheduleModal(true)}
+            onClick={() => {
+              setExportScheduleInitialMode('daily');
+              setShowExportScheduleModal(true);
+            }}
             className="px-3.5 py-2 bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-950 dark:hover:bg-emerald-900 border border-emerald-300 dark:border-emerald-700 text-emerald-900 dark:text-emerald-200 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
-            title="تنزيل جدول تشغيل العيادات كصورة PNG أو ملف Excel"
+            title="تنزيل جدول العيادات المفتوحة في اليوم الفعلي كصورة PNG عالية الدقة"
           >
             <Download className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
-            <span>تنزيل جدول عيادات اليوم</span>
+            <span>تنزيل جدول عيادات اليوم (صورة)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              setExportScheduleInitialMode('weekly');
+              setShowExportScheduleModal(true);
+            }}
+            className="px-3.5 py-2 bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/80 dark:hover:bg-amber-900 border border-amber-300 dark:border-amber-700 text-amber-950 dark:text-amber-200 rounded-xl text-xs font-bold transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer"
+            title="تنزيل جدول أيام الأسبوع كاملة كصورة PNG عالية الدقة"
+          >
+            <CalendarDays className="w-4 h-4 text-amber-700 dark:text-amber-400" />
+            <span>تنزيل جدول الأسبوع كاملاً (صورة)</span>
           </button>
 
           <button
@@ -495,6 +648,27 @@ export const AdminView: React.FC = () => {
           }`}
         >
           سجلات حجوزات اليوم ({todayBookings.length})
+        </button>
+
+        <button
+          onClick={() => setActiveTab('error-logs')}
+          className={`px-4 py-2 rounded-xl transition-all whitespace-nowrap flex items-center gap-1.5 cursor-pointer ${
+            activeTab === 'error-logs'
+              ? 'bg-white dark:bg-slate-800 text-rose-700 dark:text-rose-300 shadow-xs'
+              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+          }`}
+        >
+          <Bug className="w-3.5 h-3.5 text-rose-600 dark:text-rose-400" />
+          <span>لوحة تحكم الأخطاء</span>
+          {unresolvedErrorsCount > 0 ? (
+            <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-rose-600 text-white font-mono animate-pulse">
+              {unresolvedErrorsCount}
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 font-mono">
+              0
+            </span>
+          )}
         </button>
       </div>
 
@@ -577,14 +751,6 @@ export const AdminView: React.FC = () => {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowExportScheduleModal(true)}
-                className="px-3.5 py-2.5 bg-white dark:bg-slate-800 border border-emerald-300 dark:border-emerald-700 hover:border-emerald-500 text-slate-800 dark:text-slate-200 text-xs font-bold rounded-xl hover:bg-emerald-50/50 dark:hover:bg-slate-700 transition-all flex items-center gap-2 cursor-pointer shadow-xs"
-              >
-                <Download className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                <span>تنزيل جدول عيادات اليوم</span>
-              </button>
               <button
                 type="button"
                 onClick={handleSaveDailySchedule}
@@ -687,7 +853,17 @@ export const AdminView: React.FC = () => {
                           {isDocOffline && (
                             <div className="p-2 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-300 text-[11px] flex items-center gap-1.5">
                               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
-                              <span>الطبيب غير متواجد اليوم (العيادة محجوبة تلقائياً من حجز المرضى)</span>
+                              <span>الطبيب غير متواجد اليوم (العيادة محجوبة تلقائياً من حجز المرضى ومن بوستر اليوم)</span>
+                            </div>
+                          )}
+
+                          {/* تنبيه إذا كان اليوم الفعلي ليس من أيام جدول الطبيب الأسبوعي */}
+                          {!isDocOffline && !isDoctorScheduledOnDate(assignedDoctor, dailySchedule.date || todayStr) && (
+                            <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-900 text-amber-900 dark:text-amber-300 text-[11px] flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5">
+                                <Calendar className="w-4 h-4 shrink-0 text-amber-600" />
+                                <span>اليوم الفعلي ({getArabicDayName(dailySchedule.date || todayStr)}) خارج جدول أيام عمل الطبيب ({(assignedDoctor.scheduleDays || []).join('، ')})</span>
+                              </div>
                             </div>
                           )}
 
@@ -799,11 +975,15 @@ export const AdminView: React.FC = () => {
                         </span>
                         <button
                           onClick={() => {
-                            setEditingClinicFeeId(c.id);
-                            setTempFeeValue(c.fee);
+                            setEditingClinicFull(c);
+                            setClinicEditName(c.name);
+                            setClinicEditFee(c.fee);
+                            setClinicEditRoom(c.room || '');
+                            setClinicEditDesc(c.description || '');
+                            setClinicEditCapacity(20);
                           }}
                           className="p-1 text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/60 rounded-lg transition-colors cursor-pointer"
-                          title="تعديل سعر كشف العيادة"
+                          title="تعديل بيانات العيادة بالكامل"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
@@ -856,15 +1036,40 @@ export const AdminView: React.FC = () => {
                     <h4 className="font-bold text-sm text-slate-900 dark:text-white">{d.name}</h4>
                     <div className="text-xs text-slate-500">{d.title} • {d.clinicName}</div>
                   </div>
-                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                    d.status === 'available'
-                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                      : d.status === 'break'
-                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                      : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
-                  }`}>
-                    {d.status === 'available' ? 'متاح' : d.status === 'break' ? 'استراحة' : 'غير متواجد'}
-                  </span>
+                  <div className="flex items-center gap-1">
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      d.status === 'available'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : d.status === 'break'
+                        ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                        : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
+                    }`}>
+                      {d.status === 'available' ? 'متاح' : d.status === 'break' ? 'استراحة' : 'غير متواجد'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingDoctorFull(d);
+                        setDocEditName(d.name);
+                        setDocEditTitle(d.title);
+                        setDocEditClinicId(d.clinicId);
+                        setDocEditHours(d.scheduleHours);
+                        setDocEditMaxBookings(d.maxDailyBookings || 30);
+                      }}
+                      className="p-1 text-slate-400 hover:text-emerald-700 dark:hover:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/60 rounded-lg transition-colors cursor-pointer"
+                      title="تعديل بيانات الطبيب والعيادة وساعات العمل"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDoctorToDelete({ id: d.id, name: d.name, clinicName: d.clinicName })}
+                      className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors cursor-pointer"
+                      title="حذف الطبيب"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="text-xs text-slate-600 dark:text-slate-400 space-y-2 pt-2 border-t border-slate-100 dark:border-slate-700/60">
@@ -1103,44 +1308,96 @@ export const AdminView: React.FC = () => {
             </div>
           </div>
 
-          {/* البطاقة 2: تعديل قسم استفسارات ومساعدة فورية بالصفحة الرئيسية */}
-          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2">
-                  <FileText className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
-                  <h3 className="font-bold text-base text-slate-900 dark:text-white">
-                    تعديل نص قسم "استفسارات ومساعدة فورية" (الصفحة الرئيسية)
-                  </h3>
+          {/* البطاقة 2: تعديل مواعيد العمل الرسمية وقسم استفسارات ومساعدة فورية بالصفحة الرئيسية */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* تعديل مواعيد العمل الرسمية */}
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4 flex flex-col justify-between">
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <Clock className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
+                      <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                        تعديل "مواعيد العمل الرسمية" (الشاشة الرئيسية)
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      تحديد مواعيد العمل الرسمية للمجمع الطبي التي تظهر لجميع المرضى والزوار في الشاشة الرئيسية وتُحفظ في قاعدة البيانات فوراً.
+                    </p>
+                  </div>
                 </div>
-                <p className="text-xs text-slate-500 mt-1">
-                  النص الإرشادي المعروض للمرضى والجمهور أسفل كارت الحجز (مواعيد العمل، أرقام الهاتف، والاستفسار).
-                </p>
+
+                <div>
+                  <input
+                    type="text"
+                    value={workingHoursDraft}
+                    onChange={(e) => setWorkingHoursDraft(e.target.value)}
+                    className="w-full p-3.5 rounded-2xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white leading-relaxed focus:ring-2 focus:ring-emerald-500"
+                    placeholder="مثال: يومياً من 9:00 ص حتى 10:00 م"
+                  />
+                </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleSaveSupportText}
-                disabled={isSavingSupportText}
-                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
-              >
-                {isSavingSupportText ? (
-                  <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4 text-emerald-200" />
-                )}
-                <span>{isSavingSupportText ? 'جاري الحفظ والتعميم...' : 'حفظ وتحديث النص للمرضى'}</span>
-              </button>
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={handleSaveWorkingHours}
+                  disabled={isSavingWorkingHours}
+                  className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isSavingWorkingHours ? (
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                  )}
+                  <span>{isSavingWorkingHours ? 'جاري الحفظ والتعميم...' : 'حفظ وتحديث مواعيد العمل للكل'}</span>
+                </button>
+              </div>
             </div>
 
-            <div>
-              <textarea
-                rows={3}
-                value={supportTextDraft}
-                onChange={(e) => setSupportTextDraft(e.target.value)}
-                className="w-full p-4 rounded-2xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white leading-relaxed focus:ring-2 focus:ring-emerald-500"
-                placeholder="أدخل النص الإرشادي للمرضى..."
-              />
+            {/* تعديل نص الاستفسارات وخدمة المراجعين */}
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4 flex flex-col justify-between">
+              <div className="space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <FileText className="w-5 h-5 text-emerald-700 dark:text-emerald-400" />
+                      <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                        تعديل نص "الاستعلامات وخدمة المراجعين" (الشاشة الرئيسية)
+                      </h3>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-1">
+                      النص الإرشادي المعروض للمرضى والجمهور في الشاشة الرئيسية (أرقام التواصل، الاستفسارات، وإرشادات الحضور).
+                    </p>
+                  </div>
+                </div>
+
+                <div>
+                  <textarea
+                    rows={2}
+                    value={supportTextDraft}
+                    onChange={(e) => setSupportTextDraft(e.target.value)}
+                    className="w-full p-3.5 rounded-2xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white leading-relaxed focus:ring-2 focus:ring-emerald-500"
+                    placeholder="أدخل النص الإرشادي للمرضى..."
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <button
+                  type="button"
+                  onClick={handleSaveSupportText}
+                  disabled={isSavingSupportText}
+                  className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-60 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  {isSavingSupportText ? (
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-200" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-200" />
+                  )}
+                  <span>{isSavingSupportText ? 'جاري الحفظ والتعميم...' : 'حفظ وتحديث النص للمرضى'}</span>
+                </button>
+              </div>
             </div>
           </div>
 
@@ -1159,18 +1416,39 @@ export const AdminView: React.FC = () => {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setResetTargetUser(staffAccounts[0]?.username || 'reception');
-                  setNewStaffPassword('');
-                  setShowResetPassModal(true);
-                }}
-                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto"
-              >
-                <Lock className="w-4 h-4 text-emerald-200" />
-                <span>إعادة تعيين كلمة مرور موظف</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const firstDoc = doctors[0];
+                    setCreateStaffUsername('');
+                    setCreateStaffPassword('');
+                    setCreateStaffDisplayName('');
+                    setCreateStaffRole('reception');
+                    setCreateStaffDoctorId(firstDoc?.id || '');
+                    setCreateStaffClinicId(firstDoc?.clinicId || clinics[0]?.id || '');
+                    setCreateStaffEmail('');
+                    setShowCreateStaffModal(true);
+                  }}
+                  className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Plus className="w-4 h-4 text-emerald-200" />
+                  <span>إضافة حساب موظف جديد</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setResetTargetUser(staffAccounts[0]?.username || 'reception');
+                    setNewStaffPassword('');
+                    setShowResetPassModal(true);
+                  }}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-700 dark:hover:bg-slate-600 text-slate-800 dark:text-slate-100 font-bold text-xs rounded-xl transition-all shadow-2xs flex items-center gap-1.5 cursor-pointer border border-slate-200 dark:border-slate-600"
+                >
+                  <Lock className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  <span>إعادة تعيين كلمة مرور موظف</span>
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-2">
@@ -1191,7 +1469,13 @@ export const AdminView: React.FC = () => {
                 };
                 const meta = getRoleMeta(acc.role);
                 const IconComponent = meta.icon;
-                const isProtectedAdmin = acc.role === 'admin' && acc.username === 'admin';
+                const isProtectedAdmin =
+                  (acc.role === 'admin' && acc.username.toLowerCase() === 'admin') ||
+                  (currentUser && (acc.id === currentUser.id || acc.username.toLowerCase() === currentUser.username.toLowerCase()));
+                const linkedDoctor = acc.role === 'doctor' && acc.doctorId ? doctors.find(d => d.id === acc.doctorId) : undefined;
+                const linkedClinic = acc.role === 'doctor' && (acc.clinicId || linkedDoctor?.clinicId)
+                  ? clinics.find(c => c.id === (acc.clinicId || linkedDoctor?.clinicId))
+                  : undefined;
 
                 return (
                   <div key={acc.id} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-all">
@@ -1214,6 +1498,12 @@ export const AdminView: React.FC = () => {
                           {meta.roleName}
                         </span>
                       </div>
+
+                      {acc.role === 'doctor' && (linkedDoctor || linkedClinic) && (
+                        <div className="text-[10px] text-blue-700 dark:text-blue-300 bg-blue-50/70 dark:bg-blue-950/40 px-2 py-1 rounded-lg border border-blue-200/60 dark:border-blue-800/60 truncate">
+                          {linkedDoctor ? linkedDoctor.name : 'طبيب'} {linkedClinic ? `• ${linkedClinic.name}` : ''}
+                        </div>
+                      )}
 
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 pt-1 truncate">
                         <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
@@ -1242,6 +1532,9 @@ export const AdminView: React.FC = () => {
                             setEditingStaffForFullUpdate(acc);
                             setStaffEditUsername(acc.username);
                             setStaffEditDisplayName(acc.displayName);
+                            setStaffEditRole(acc.role);
+                            setStaffEditDoctorId(acc.doctorId || doctors[0]?.id || '');
+                            setStaffEditClinicId(acc.clinicId || doctors.find(d => d.id === acc.doctorId)?.clinicId || clinics[0]?.id || '');
                             setStaffEditEmail(acc.recoveryEmail || '');
                             setStaffEditPassword('');
                           }}
@@ -1269,11 +1562,7 @@ export const AdminView: React.FC = () => {
                       {!isProtectedAdmin && (
                         <button
                           type="button"
-                          onClick={() => {
-                            if (window.confirm(`هل أنت متأكد من رغبتك في إزالة حساب الموظف (${acc.displayName}) نهائياً؟`)) {
-                              deleteStaffAccount(acc.id);
-                            }
-                          }}
+                          onClick={() => setStaffToDelete(acc)}
                           className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
                           title="حذف حساب الموظف"
                         >
@@ -1419,6 +1708,436 @@ export const AdminView: React.FC = () => {
         </div>
       )}
 
+      {/* التبويب 7: لوحة تحكم الأخطاء ومراقبة النظام لحظة بلحظة عبر كافة الأجهزة */}
+      {activeTab === 'error-logs' && (
+        <div className="space-y-6">
+          {/* شريط الرأس وحالة الربط السحابي اللحظي */}
+          <div className="bg-gradient-to-l from-rose-950/10 via-slate-50 to-emerald-950/10 dark:from-rose-950/30 dark:via-slate-800/90 dark:to-emerald-950/20 p-5 rounded-3xl border border-slate-200 dark:border-slate-700 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-9 h-9 rounded-2xl bg-rose-100 dark:bg-rose-950/80 text-rose-700 dark:text-rose-300 flex items-center justify-center shadow-2xs">
+                  <Bug className="w-5 h-5" />
+                </div>
+                <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                  لوحة تحكم الأخطاء ومراقبة النظام لحظة بلحظة
+                </h3>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300/60 dark:border-emerald-800">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping" />
+                  <span>مربوط بقاعدة البيانات السحابية (Realtime)</span>
+                </span>
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed max-w-3xl">
+                ترصد هذه اللوحة تلقائياً أي خطأ برمجي يلتقطه <code className="font-mono text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-950/50 px-1.5 py-0.5 rounded">ErrorBoundary</code> أو أخطاء تحديث الحزم <code className="font-mono text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 px-1.5 py-0.5 rounded">vite:preloadError</code> من جميع الأجهزة المتصلة (هواتف المرضى، الاستقبال، الخزينة، الأطباء، وشاشات العرض) وتخزنها في قاعدة البيانات ليراها الأدمن فوراً.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={isSyncingErrors}
+                onClick={async () => {
+                  setIsSyncingErrors(true);
+                  const ok = await syncErrorLogsNow();
+                  setIsSyncingErrors(false);
+                  addToast({
+                    type: ok ? 'success' : 'info',
+                    title: ok ? 'تمت المزامنة مع قاعدة البيانات' : 'تم تحديث السجل المحلي',
+                    message: ok
+                      ? 'تم جلب أحدث سجلات الأخطاء من جميع الأجهزة عبر قاعدة البيانات السحابية.'
+                      : 'تمت قراءة السجلات المحفوظة.'
+                  });
+                }}
+                className="px-3.5 py-2 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs disabled:opacity-50"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 text-emerald-600 ${isSyncingErrors ? 'animate-spin' : ''}`} />
+                <span>{isSyncingErrors ? 'جاري المزامنة...' : 'مزامنة السحابة الآن'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await logSystemError({
+                    source: 'ErrorBoundary',
+                    message: 'اختبار تشخيصي: محاكاة خطأ واجهة مستخدم للتأكد من الربط اللحظي بقاعدة البيانات عبر الأجهزة',
+                    stack: 'DiagnosticTestError: Simulated ErrorBoundary capture\n    at AdminErrorMonitorTest (AdminView.tsx:1680:15)',
+                    componentStack: 'in DiagnosticSimulator\n    in ErrorBoundary\n    in App'
+                  });
+                  addToast({
+                    type: 'info',
+                    title: 'تم تسجيل خطأ تجريبي',
+                    message: 'تم إرسال الخطأ التجريبي إلى قاعدة البيانات السحابية وبثه لحظياً لجميع أجهزة الأدمن.'
+                  });
+                }}
+                className="px-3.5 py-2 bg-amber-100 hover:bg-amber-200 dark:bg-amber-950/70 dark:hover:bg-amber-900 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer"
+                title="إرسال سجل خطأ تجريبي للتأكد من عمل الرصد السحابي بين الأجهزة"
+              >
+                <Activity className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
+                <span>اختبار رصد خطأ</span>
+              </button>
+
+              {unresolvedErrorsCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => resolveAllErrorLogs()}
+                  className="px-3.5 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-200" />
+                  <span>تعليم الكل كـ (تم الحل)</span>
+                </button>
+              )}
+
+              {errorLogs.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowClearErrorsModal(true)}
+                  className="px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>مسح السجل</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* بطاقات الإحصائيات السريعة للأخطاء */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs space-y-1">
+              <div className="text-slate-500 text-xs">إجمالي السجلات المرصودة</div>
+              <div className="text-2xl font-bold text-slate-900 dark:text-white font-mono">{errorLogs.length}</div>
+              <div className="text-[11px] text-slate-400">من كافة الأجهزة المتصلة</div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs space-y-1">
+              <div className="text-slate-500 text-xs">أخطاء نشطة (غير معالجة)</div>
+              <div className={`text-2xl font-bold font-mono ${unresolvedErrorsCount > 0 ? 'text-rose-600 dark:text-rose-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                {unresolvedErrorsCount}
+              </div>
+              <div className="text-[11px] text-slate-400">
+                {unresolvedErrorsCount === 0 ? 'النظام مستقر بنسبة 100%' : 'تحتاج إلى مراجعة'}
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs space-y-1">
+              <div className="text-slate-500 text-xs">أخطاء واجهة (ErrorBoundary)</div>
+              <div className="text-2xl font-bold text-amber-600 dark:text-amber-400 font-mono">{errorBoundaryCount}</div>
+              <div className="text-[11px] text-slate-400">أعطال مكونات React</div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shadow-xs space-y-1">
+              <div className="text-slate-500 text-xs">أخطاء التحميل (vite:preloadError)</div>
+              <div className="text-2xl font-bold text-blue-600 dark:text-blue-400 font-mono">{preloadErrorCount}</div>
+              <div className="text-[11px] text-slate-400">تحديثات الحزم والملفات</div>
+            </div>
+          </div>
+
+          {/* شريط الفلترة والبحث */}
+          <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs font-bold text-slate-500 ml-1">المصدر:</span>
+              {(
+                [
+                  { id: 'all', label: 'الكل' },
+                  { id: 'ErrorBoundary', label: 'ErrorBoundary' },
+                  { id: 'vite:preloadError', label: 'vite:preloadError' },
+                  { id: 'ChunkLoadError', label: 'ChunkLoadError' },
+                  { id: 'RuntimeError', label: 'RuntimeError' },
+                  { id: 'UnhandledRejection', label: 'Promise Rejection' },
+                ] as const
+              ).map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setErrorSourceFilter(item.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    errorSourceFilter === item.id
+                      ? 'bg-emerald-700 text-white shadow-2xs'
+                      : 'bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={errorStatusFilter}
+                onChange={(e) => setErrorStatusFilter(e.target.value as 'all' | 'unresolved' | 'resolved')}
+                className="px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-bold text-slate-700 dark:text-slate-200"
+              >
+                <option value="all">جميع الحالات ({errorLogs.length})</option>
+                <option value="unresolved">غير معالجة فقط ({unresolvedErrorsCount})</option>
+                <option value="resolved">تمت معالجتها ({errorLogs.length - unresolvedErrorsCount})</option>
+              </select>
+
+              <div className="relative flex-1 min-w-[210px]">
+                <Search className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={errorSearchQuery}
+                  onChange={(e) => setErrorSearchQuery(e.target.value)}
+                  placeholder="ابحث بالرسالة، نوع الجهاز، المستخدم..."
+                  className="w-full pr-9 pl-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* قائمة سجلات الأخطاء التفصيلية */}
+          <div className="bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 shadow-xs overflow-hidden">
+            <div className="p-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-800 dark:text-slate-200">
+                سجل الأخطاء المجمعة ({filteredErrorLogs.length} سجل معروض)
+              </span>
+              <span className="text-[11px] text-slate-400">
+                يتم الاحتفاظ بآخر 100 سجل ومزامنتها تلقائياً مع جدول إعدادات النظام بقاعدة البيانات
+              </span>
+            </div>
+
+            {filteredErrorLogs.length === 0 ? (
+              <div className="p-12 text-center space-y-3">
+                <div className="w-14 h-14 rounded-2xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center mx-auto">
+                  <CheckCircle2 className="w-8 h-8" />
+                </div>
+                <div className="text-sm font-bold text-slate-800 dark:text-slate-200">
+                  لا توجد أخطاء مسجلة مطابقة للبحث
+                </div>
+                <p className="text-xs text-slate-500 max-w-md mx-auto leading-relaxed">
+                  جميع الأجهزة المتصلة بالمنظومة تعمل بكفاءة واستقرار تام. في حال ظهور أي خطأ في أي جهاز سيظهر هنا فوراً مع تفاصيل الجهاز والمستخدم.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-100 dark:divide-slate-700/70">
+                {filteredErrorLogs.map((log) => {
+                  const isExpanded = Boolean(expandedErrorIds[log.id]);
+                  const roleLabel =
+                    log.userRole === 'admin'
+                      ? 'مدير النظام'
+                      : log.userRole === 'reception'
+                      ? 'الاستقبال'
+                      : log.userRole === 'cashier'
+                      ? 'الخزينة'
+                      : log.userRole === 'doctor'
+                      ? 'طبيب'
+                      : 'مريض / زائر';
+
+                  const sourceBadgeStyle =
+                    log.source === 'ErrorBoundary'
+                      ? 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border-rose-200 dark:border-rose-800'
+                      : log.source === 'vite:preloadError' || log.source === 'ChunkLoadError'
+                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300 border-amber-200 dark:border-amber-800'
+                      : 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300 border-blue-200 dark:border-blue-800';
+
+                  let formattedTime = log.timestamp;
+                  try {
+                    formattedTime = new Date(log.timestamp).toLocaleString('ar-EG', {
+                      year: 'numeric',
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                      second: '2-digit'
+                    });
+                  } catch {}
+
+                  return (
+                    <div
+                      key={log.id}
+                      className={`p-4 sm:p-5 transition-colors ${
+                        log.resolved
+                          ? 'bg-slate-50/60 dark:bg-slate-900/30 opacity-80'
+                          : 'hover:bg-slate-50/70 dark:hover:bg-slate-750'
+                      }`}
+                    >
+                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                        <div className="space-y-2.5 flex-1 min-w-0">
+                          {/* الشارات العلوية */}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={`px-2.5 py-0.5 rounded-full text-[11px] font-mono font-bold border ${sourceBadgeStyle}`}>
+                              {log.source}
+                            </span>
+
+                            <span
+                              className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                log.resolved
+                                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                  : 'bg-rose-600 text-white'
+                              }`}
+                            >
+                              {log.resolved ? 'تمت المعالجة' : 'نشط - جديد'}
+                            </span>
+
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium">
+                              <Monitor className="w-3 h-3 text-slate-500" />
+                              <span dir="ltr">{log.deviceInfo || 'جهاز متصل'}</span>
+                            </span>
+
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-purple-50 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 font-medium">
+                              <span>المستخدم: {log.username || 'زائر'} ({roleLabel})</span>
+                            </span>
+
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 font-medium">
+                              <Cloud className="w-3 h-3" />
+                              <span>{log.syncedToDb !== false ? 'محفوظ في قاعدة البيانات' : 'محلي'}</span>
+                            </span>
+
+                            <span className="text-[11px] text-slate-400 font-mono mr-auto">
+                              {formattedTime}
+                            </span>
+                          </div>
+
+                          {/* نص رسالة الخطأ */}
+                          <div className="font-mono text-xs sm:text-sm font-bold text-slate-900 dark:text-white break-words bg-slate-100/80 dark:bg-slate-900/70 p-3 rounded-xl border border-slate-200/70 dark:border-slate-700/70" dir="ltr">
+                            {log.message}
+                          </div>
+
+                          {/* الرابط والتفاصيل */}
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                            {log.url && (
+                              <span className="font-mono truncate max-w-xl" dir="ltr">
+                                URL: {log.url}
+                              </span>
+                            )}
+
+                            {(log.stack || log.componentStack) && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedErrorIds(prev => ({ ...prev, [log.id]: !prev[log.id] }))
+                                }
+                                className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 font-bold hover:underline cursor-pointer"
+                              >
+                                {isExpanded ? (
+                                  <>
+                                    <ChevronUp className="w-3.5 h-3.5" />
+                                    <span>إخفاء التتبع التقني (Stack Trace)</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <ChevronDown className="w-3.5 h-3.5" />
+                                    <span>عرض التتبع التقني الكامل (Stack Trace)</span>
+                                  </>
+                                )}
+                              </button>
+                            )}
+                          </div>
+
+                          {/* التفاصيل التقنية الكاملة عند التوسيع */}
+                          {isExpanded && (log.stack || log.componentStack) && (
+                            <div className="mt-2 space-y-2 text-left" dir="ltr">
+                              {log.stack && (
+                                <div className="p-3 rounded-xl bg-slate-950 text-slate-200 font-mono text-[11px] overflow-x-auto border border-slate-800">
+                                  <div className="text-rose-400 font-bold mb-1">Error Stack Trace:</div>
+                                  <pre className="whitespace-pre-wrap break-words leading-relaxed">{log.stack}</pre>
+                                </div>
+                              )}
+                              {log.componentStack && (
+                                <div className="p-3 rounded-xl bg-slate-900 text-amber-200 font-mono text-[11px] overflow-x-auto border border-slate-800">
+                                  <div className="text-amber-400 font-bold mb-1">React Component Stack:</div>
+                                  <pre className="whitespace-pre-wrap break-words leading-relaxed">{log.componentStack}</pre>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        {/* أزرار التحكم بالسجل */}
+                        <div className="flex sm:flex-row lg:flex-col items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => resolveErrorLog(log.id, !log.resolved)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                              log.resolved
+                                ? 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-300'
+                                : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs'
+                            }`}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>{log.resolved ? 'إعادة فتح' : 'تم الحل'}</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const reportText = [
+                                `Source: ${log.source}`,
+                                `Time: ${log.timestamp}`,
+                                `Device: ${log.deviceInfo}`,
+                                `User: ${log.username} (${log.userRole})`,
+                                `URL: ${log.url}`,
+                                `Message: ${log.message}`,
+                                log.stack ? `\nStack:\n${log.stack}` : '',
+                                log.componentStack ? `\nComponent Stack:\n${log.componentStack}` : ''
+                              ]
+                                .filter(Boolean)
+                                .join('\n');
+                              navigator.clipboard?.writeText(reportText);
+                              addToast({
+                                type: 'success',
+                                title: 'تم نسخ تفاصيل الخطأ',
+                                message: 'تم نسخ التقرير الفني الكامل للخطأ إلى الحافظة.'
+                              });
+                            }}
+                            className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            title="نسخ التقرير الفني"
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>نسخ</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => deleteErrorLog(log.id)}
+                            className="p-1.5 rounded-xl border border-rose-200 dark:border-rose-900/60 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors cursor-pointer"
+                            title="حذف هذا السجل"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تأكيد مسح كافة سجلات الأخطاء */}
+      {showClearErrorsModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-rose-600">
+              <AlertCircle className="w-6 h-6 shrink-0" />
+              <h3 className="font-bold text-base text-slate-900 dark:text-white">مسح سجل الأخطاء بالكامل</h3>
+            </div>
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              هل أنت متأكد من رغبتك في مسح جميع سجلات الأخطاء المرصودة ({errorLogs.length} سجل) من قاعدة البيانات السحابية ومن الجهاز الحالي؟
+            </p>
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowClearErrorsModal(false)}
+                className="px-4 py-2 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 text-xs font-bold rounded-xl hover:bg-slate-50 dark:hover:bg-slate-750 cursor-pointer"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await clearAllErrorLogs();
+                  setShowClearErrorsModal(false);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl transition-all cursor-pointer"
+              >
+                تأكيد مسح السجل
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* نافذة إضافة عيادة جديدة */}
       {showAddClinicModal && (
         <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
@@ -1554,7 +2273,7 @@ export const AdminView: React.FC = () => {
         </div>
       )}
 
-      {/* نافذة اختيار صيغة تنزيل جدول عيادات اليوم (صورة PNG أو ملف Excel) */}
+      {/* نافذة تنزيل جدول العيادات كصورة (جدول اليوم الفعلي أو الجدول الأسبوعي الشامل) */}
       <DailyScheduleExportModal
         isOpen={showExportScheduleModal}
         onClose={() => setShowExportScheduleModal(false)}
@@ -1562,6 +2281,8 @@ export const AdminView: React.FC = () => {
         doctors={doctors}
         scheduleItems={scheduleItems}
         scheduleDate={dailySchedule.date}
+        initialMode={exportScheduleInitialMode}
+        officialWorkingHours={officialWorkingHours}
         onSuccess={(msg) => addToast({ type: 'success', title: 'تم التنزيل بنجاح', message: msg })}
         onError={(msg) => addToast({ type: 'error', title: 'خطأ في التنزيل', message: msg })}
       />
@@ -1638,6 +2359,236 @@ export const AdminView: React.FC = () => {
         </div>
       )}
 
+      {/* نافذة تعديل بيانات العيادة بالكامل */}
+      {editingClinicFull && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <h3 className="font-bold text-base text-slate-900 dark:text-white">تعديل بيانات العيادة</h3>
+            <form onSubmit={handleSaveFullClinicEdit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">اسم العيادة:</label>
+                <input
+                  type="text"
+                  required
+                  value={clinicEditName}
+                  onChange={(e) => setClinicEditName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">رسوم الكشف (ج.م):</label>
+                  <input
+                    type="number"
+                    required
+                    min="0"
+                    value={clinicEditFee}
+                    onChange={(e) => setClinicEditFee(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">السعة اليومية:</label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    max="200"
+                    value={clinicEditCapacity}
+                    onChange={(e) => setClinicEditCapacity(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">رقم الغرفة والموقع:</label>
+                <input
+                  type="text"
+                  value={clinicEditRoom}
+                  onChange={(e) => setClinicEditRoom(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">وصف العيادة:</label>
+                <input
+                  type="text"
+                  value={clinicEditDesc}
+                  onChange={(e) => setClinicEditDesc(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingClinicFull}
+                  className="flex-1 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs cursor-pointer"
+                >
+                  {isSavingClinicFull ? 'جاري الحفظ...' : 'حفظ التعديلات'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingClinicFull(null)}
+                  className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تعديل بيانات الطبيب بالكامل */}
+      {editingDoctorFull && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <h3 className="font-bold text-base text-slate-900 dark:text-white">تعديل بيانات الطبيب</h3>
+            <form onSubmit={handleSaveFullDoctorEdit} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">اسم الطبيب:</label>
+                <input
+                  type="text"
+                  required
+                  value={docEditName}
+                  onChange={(e) => setDocEditName(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">الدرجة العلمية / التخصص:</label>
+                <input
+                  type="text"
+                  required
+                  value={docEditTitle}
+                  onChange={(e) => setDocEditTitle(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">العيادة التابعة:</label>
+                <select
+                  value={docEditClinicId}
+                  onChange={(e) => setDocEditClinicId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                >
+                  {clinics.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">ساعات العمل:</label>
+                  <input
+                    type="text"
+                    value={docEditHours}
+                    onChange={(e) => setDocEditHours(e.target.value)}
+                    placeholder="04:00 م - 09:00 م"
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">السعة القصوى اليومية:</label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200"
+                    value={docEditMaxBookings}
+                    onChange={(e) => setDocEditMaxBookings(Number(e.target.value))}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSavingDoctorFull}
+                  className="flex-1 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs cursor-pointer"
+                >
+                  {isSavingDoctorFull ? 'جاري الحفظ...' : 'حفظ التعديلات'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingDoctorFull(null)}
+                  className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تأكيد حذف الطبيب */}
+      {doctorToDelete && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
+              <div className="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">تأكيد حذف الطبيب</h3>
+                <p className="text-[11px] text-slate-500">
+                  {doctorToDelete.name} {doctorToDelete.clinicName ? `• ${doctorToDelete.clinicName}` : ''}
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              <p>
+                هل أنت متأكد من رغبتك في إزالة الطبيب <strong className="text-slate-900 dark:text-white">({doctorToDelete.name})</strong> من الكادر الطبي؟
+              </p>
+              <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-500 dark:text-slate-400">
+                سيتم التحقق من عدم وجود مرضى في قائمة الانتظار الحالية لهذا الطبيب قبل إتمام الحذف النهائي.
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingDoctor}
+                onClick={async () => {
+                  if (!doctorToDelete) return;
+                  setIsDeletingDoctor(true);
+                  await deleteDoctor(doctorToDelete.id);
+                  setIsDeletingDoctor(false);
+                  setDoctorToDelete(null);
+                }}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                {isDeletingDoctor ? (
+                  <span>جاري المعالجة...</span>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>تأكيد حذف الطبيب</span>
+                  </>
+                )}
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingDoctor}
+                onClick={() => setDoctorToDelete(null)}
+                className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* نافذة تأكيد حذف العيادة مع التحقق الذكي */}
       {clinicToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
@@ -1702,17 +2653,242 @@ export const AdminView: React.FC = () => {
         </div>
       )}
 
-      {/* نافذة تعديل بيانات حساب الموظف بالكامل (الاسم، المستخدم، البريد، الرمز) */}
-      {editingStaffForFullUpdate && (
+      {/* نافذة إنشاء حساب موظف جديد (Phase 3) */}
+      {showCreateStaffModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
+              <div className="w-10 h-10 rounded-2xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center">
+                <Users className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">إنشاء حساب موظف جديد</h3>
+                <p className="text-[11px] text-slate-500">ربط مباشر مع خدمة المصادقة السحابية وجدول الكادر الوظيفي</p>
+              </div>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setIsCreatingStaff(true);
+                const ok = await createStaffAccount({
+                  username: createStaffUsername,
+                  password: createStaffPassword,
+                  displayName: createStaffDisplayName,
+                  role: createStaffRole,
+                  doctorId: createStaffRole === 'doctor' ? createStaffDoctorId : null,
+                  clinicId: createStaffRole === 'doctor' ? createStaffClinicId : null,
+                  recoveryEmail: createStaffEmail || undefined
+                });
+                setIsCreatingStaff(false);
+                if (ok) {
+                  setShowCreateStaffModal(false);
+                }
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  اسم الموظف الظاهر:
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createStaffDisplayName}
+                  onChange={(e) => setCreateStaffDisplayName(e.target.value)}
+                  placeholder="مثال: أ. كريم حسن (مسؤول استقبال)"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  اسم المستخدم (لتسجيل الدخول):
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createStaffUsername}
+                  onChange={(e) => setCreateStaffUsername(e.target.value)}
+                  placeholder="مثال: reception.2 أو doctor.ent"
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  كلمة المرور (6 أحرف على الأقل):
+                </label>
+                <input
+                  type="password"
+                  required
+                  minLength={6}
+                  value={createStaffPassword}
+                  onChange={(e) => setCreateStaffPassword(e.target.value)}
+                  placeholder="أدخل كلمة مرور قوية"
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  الدور الوظيفي (Role):
+                </label>
+                <select
+                  value={createStaffRole}
+                  onChange={(e) => {
+                    const nextRole = e.target.value as UserRole;
+                    setCreateStaffRole(nextRole);
+                    if (nextRole === 'doctor' && !createStaffDoctorId && doctors[0]) {
+                      setCreateStaffDoctorId(doctors[0].id);
+                      setCreateStaffClinicId(doctors[0].clinicId);
+                    }
+                  }}
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                >
+                  <option value="reception">مسؤول الاستقبال (reception)</option>
+                  <option value="cashier">أمين الخزينة (cashier)</option>
+                  <option value="doctor">طبيب العيادة (doctor)</option>
+                  <option value="admin">مدير المنظومة (admin)</option>
+                </select>
+              </div>
+
+              {createStaffRole === 'doctor' && (
+                <div className="p-3 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/70 space-y-2.5">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                      الطبيب المرتبط بالحساب:
+                    </label>
+                    <select
+                      required
+                      value={createStaffDoctorId}
+                      onChange={(e) => {
+                        const docId = e.target.value;
+                        setCreateStaffDoctorId(docId);
+                        const doc = doctors.find(d => d.id === docId);
+                        if (doc?.clinicId) {
+                          setCreateStaffClinicId(doc.clinicId);
+                        }
+                      }}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                    >
+                      {doctors.map(doc => (
+                        <option key={doc.id} value={doc.id}>
+                          {doc.name} ({doc.clinicName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                      العيادة التخصصية التابعة:
+                    </label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={clinics.find(c => c.id === createStaffClinicId)?.name || 'العيادة المختارة'}
+                      className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  بريد استعادة الحساب (اختياري):
+                </label>
+                <input
+                  type="email"
+                  value={createStaffEmail}
+                  onChange={(e) => setCreateStaffEmail(e.target.value)}
+                  placeholder="employee@sharia-clinics.eg"
+                  dir="ltr"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 pt-2">
+                <button
+                  type="submit"
+                  disabled={isCreatingStaff}
+                  className="flex-1 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer"
+                >
+                  {isCreatingStaff ? 'جاري الإنشاء والربط...' : 'إنشاء حساب الموظف'}
+                </button>
+                <button
+                  type="button"
+                  disabled={isCreatingStaff}
+                  onClick={() => setShowCreateStaffModal(false)}
+                  className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تأكيد حذف حساب الموظف */}
+      {staffToDelete && (
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
+              <div className="w-10 h-10 rounded-2xl bg-rose-100 dark:bg-rose-950 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-bold text-sm text-slate-900 dark:text-white">تأكيد حذف حساب الموظف</h3>
+                <p className="text-[11px] text-slate-500">{staffToDelete.displayName} (@{staffToDelete.username})</p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              هل أنت متأكد من رغبتك في إزالة حساب الموظف <strong className="text-slate-900 dark:text-white">({staffToDelete.displayName})</strong> نهائياً؟ سيتم حذف الحساب من جدول الموظفين وإلغاء صلاحية دخوله فوراً.
+            </p>
+
+            <div className="flex items-center gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingStaff}
+                onClick={async () => {
+                  if (!staffToDelete) return;
+                  setIsDeletingStaff(true);
+                  await deleteStaffAccount(staffToDelete.id);
+                  setIsDeletingStaff(false);
+                  setStaffToDelete(null);
+                }}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer"
+              >
+                {isDeletingStaff ? 'جاري الحذف...' : 'تأكيد حذف الحساب'}
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingStaff}
+                onClick={() => setStaffToDelete(null)}
+                className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                إلغاء
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة تعديل بيانات حساب الموظف بالكامل (الاسم، المستخدم، الدور، الطبيب، البريد، الرمز) */}
+      {editingStaffForFullUpdate && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
             <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
               <div className="w-10 h-10 rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 flex items-center justify-center">
                 <Edit2 className="w-5 h-5" />
               </div>
               <div>
                 <h3 className="font-bold text-sm text-slate-900 dark:text-white">تعديل حساب الموظف</h3>
-                <p className="text-[11px] text-slate-500">تحديث بيانات الدخول والبريد الرسمي والمصادقة</p>
+                <p className="text-[11px] text-slate-500">تحديث بيانات الدخول والدور الوظيفي والبريد الرسمي والمصادقة</p>
               </div>
             </div>
 
@@ -1724,6 +2900,9 @@ export const AdminView: React.FC = () => {
                 const ok = await updateStaffAccount(editingStaffForFullUpdate.id, {
                   username: staffEditUsername,
                   displayName: staffEditDisplayName,
+                  role: staffEditRole,
+                  doctorId: staffEditRole === 'doctor' ? staffEditDoctorId : null,
+                  clinicId: staffEditRole === 'doctor' ? staffEditClinicId : null,
                   recoveryEmail: staffEditEmail,
                   password: staffEditPassword || undefined
                 });
@@ -1754,12 +2933,64 @@ export const AdminView: React.FC = () => {
                 <input
                   type="text"
                   required
+                  disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
                   value={staffEditUsername}
                   onChange={(e) => setStaffEditUsername(e.target.value)}
                   dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 disabled:opacity-60"
                 />
               </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  الدور الوظيفي (Role):
+                </label>
+                <select
+                  disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
+                  value={staffEditRole}
+                  onChange={(e) => {
+                    const nextRole = e.target.value as UserRole;
+                    setStaffEditRole(nextRole);
+                    if (nextRole === 'doctor' && !staffEditDoctorId && doctors[0]) {
+                      setStaffEditDoctorId(doctors[0].id);
+                      setStaffEditClinicId(doctors[0].clinicId);
+                    }
+                  }}
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white disabled:opacity-60"
+                >
+                  <option value="reception">مسؤول الاستقبال (reception)</option>
+                  <option value="cashier">أمين الخزينة (cashier)</option>
+                  <option value="doctor">طبيب العيادة (doctor)</option>
+                  <option value="admin">مدير المنظومة (admin)</option>
+                </select>
+              </div>
+
+              {staffEditRole === 'doctor' && (
+                <div className="p-3 rounded-2xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/70 space-y-2">
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    الطبيب المرتبط بالحساب:
+                  </label>
+                  <select
+                    required
+                    value={staffEditDoctorId}
+                    onChange={(e) => {
+                      const docId = e.target.value;
+                      setStaffEditDoctorId(docId);
+                      const doc = doctors.find(d => d.id === docId);
+                      if (doc?.clinicId) {
+                        setStaffEditClinicId(doc.clinicId);
+                      }
+                    }}
+                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                  >
+                    {doctors.map(doc => (
+                      <option key={doc.id} value={doc.id}>
+                        {doc.name} ({doc.clinicName})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">

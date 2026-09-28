@@ -18,17 +18,27 @@ import {
   UserX,
   ArrowRight,
   ShieldCheck,
-  AlertTriangle
+  AlertTriangle,
+  CalendarCheck,
+  Coins,
+  FileSpreadsheet,
+  Edit2
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { useApp } from '../context/AppContext';
-import { maskPhoneNumber, validateTripleName, validateEgyptianPhone } from '../services/storage';
-import { Booking, BookingStatus } from '../types';
+import { maskPhoneNumber, validateTripleName, validateEgyptianPhone, sanitizeSpreadsheetCell } from '../services/storage';
+import { getLocalDateStr } from '../services/scheduleService';
+import { verifyTicketForStaffRpc } from '../services/supabaseService';
+import { Booking, BookingStatus, DailyClinicScheduleItem } from '../types';
 
 export const ReceptionView: React.FC = () => {
   const { 
     bookings, 
     clinics, 
     doctors, 
+    dailySchedule,
+    updateDailySchedule,
+    updateClinic,
     updateBookingStatus, 
     admitPatient,
     markPatientLate,
@@ -42,7 +52,7 @@ export const ReceptionView: React.FC = () => {
     updateDoctorStatus
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'queue' | 'new-booking' | 'scanner' | 'doctors'>('queue');
+  const [activeTab, setActiveTab] = useState<'queue' | 'new-booking' | 'scanner' | 'doctors' | 'daily-clinics' | 'clinic-fees' | 'financial-reports'>('queue');
   const [selectedClinicFilter, setSelectedClinicFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('waiting');
   const [searchQuery, setSearchQuery] = useState('');
@@ -61,7 +71,7 @@ export const ReceptionView: React.FC = () => {
   const [walkinDoctorId, setWalkinDoctorId] = useState('');
   const [walkinNotes, setWalkinNotes] = useState('');
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateStr();
 
   // قاعدة صارمة: يظهر في طابور الاستقبال فقط المرضى الذين تم تأكيد سدادهم (دفع نقدي / تأمين) أو إعفاؤهم خيرياً في تاريخ اليوم
   // وترتيب الطابور يكون حسب وقت تسجيل السداد / الإعفاء (أول من سدد يدخل أولاً)
@@ -92,12 +102,31 @@ export const ReceptionView: React.FC = () => {
   const completedCount = confirmedBookings.filter(b => b.status === 'completed' && b.date === todayStr).length;
 
   const canManageDoctorStatus = hasPermission(currentUser?.role, 'manage_doctor_attendance');
+  const canManageDailyClinics = hasPermission(currentUser?.role, 'manage_daily_clinics');
+  const canManageClinicFees = hasPermission(currentUser?.role, 'manage_clinic_fees');
+  const canViewFinancialReports = hasPermission(currentUser?.role, 'view_financial_reports');
+
+  // حالة تعديل رسوم العيادات (عند تفويض الصلاحية للاستقبال)
+  const [editingFeeClinicId, setEditingFeeClinicId] = useState<string | null>(null);
+  const [tempClinicFee, setTempClinicFee] = useState<number>(30);
+
+  // إعادة التوجيه التلقائي للتبويب الأساسي إذا سحب الأدمن صلاحية التبويب المفوض
+  React.useEffect(() => {
+    if (activeTab === 'daily-clinics' && !canManageDailyClinics) setActiveTab('queue');
+    if (activeTab === 'clinic-fees' && !canManageClinicFees) setActiveTab('queue');
+    if (activeTab === 'financial-reports' && !canViewFinancialReports) setActiveTab('queue');
+  }, [activeTab, canManageDailyClinics, canManageClinicFees, canViewFinancialReports]);
 
   const availableDoctorsInClinic = doctors.filter(d => d.clinicId === walkinClinicId);
 
   React.useEffect(() => {
-    if (availableDoctorsInClinic.length > 0 && !walkinDoctorId) {
+    if (
+      availableDoctorsInClinic.length > 0 &&
+      (!walkinDoctorId || !availableDoctorsInClinic.some(d => d.id === walkinDoctorId))
+    ) {
       setWalkinDoctorId(availableDoctorsInClinic[0].id);
+    } else if (availableDoctorsInClinic.length === 0) {
+      setWalkinDoctorId('');
     }
   }, [walkinClinicId, availableDoctorsInClinic, walkinDoctorId]);
 
@@ -123,17 +152,26 @@ export const ReceptionView: React.FC = () => {
       return;
     }
 
-    const doc = doctors.find(d => d.id === walkinDoctorId) || availableDoctorsInClinic[0];
+    const doc = availableDoctorsInClinic.find(d => d.id === walkinDoctorId) || availableDoctorsInClinic[0];
     const cln = clinics.find(c => c.id === walkinClinicId);
+
+    if (!doc || !cln) {
+      addToast({
+        type: 'error',
+        title: 'بيانات العيادة غير مكتملة',
+        message: 'يرجى اختيار عيادة مفتوحة يتوفر بها طبيب مناوب.'
+      });
+      return;
+    }
 
     const res = await createBooking({
       patientName: walkinName,
       patientPhone: walkinPhone,
       clinicId: walkinClinicId,
-      doctorId: doc?.id || doctors[0].id,
+      doctorId: doc.id,
       date: todayStr,
       timeSlot: 'حجز فوري بالاستقبال',
-      fee: cln?.fee || 30,
+      fee: cln.fee || 30,
       notes: walkinNotes ? `حجز مباشر بالاستقبال - ${walkinNotes}` : 'حجز مباشر بالاستقبال'
     });
 
@@ -157,23 +195,34 @@ export const ReceptionView: React.FC = () => {
   };
 
   // التحقق من رمز الـ QR أو كود التذكرة
-  const handleVerifyScan = (inputVal?: string) => {
+  const handleVerifyScan = async (inputVal?: string) => {
     const code = (inputVal || scannedTicketInput).trim();
     if (!code) return;
 
     let targetTicketNumber = code;
+    let targetBookingId = '';
     try {
       const parsed = JSON.parse(code);
-      if (parsed.ticket) targetTicketNumber = parsed.ticket;
+      if (parsed.ticket) targetTicketNumber = String(parsed.ticket);
+      if (parsed.id) targetBookingId = String(parsed.id);
     } catch {
       // ليس JSON، استخدام النص المدخل
     }
 
-    const matched = bookings.find(b => 
+    let matched = bookings.find(b => 
+      (targetBookingId && b.id === targetBookingId) ||
       b.ticketNumber.toLowerCase() === targetTicketNumber.toLowerCase() ||
       b.id === targetTicketNumber ||
       b.patientPhone === targetTicketNumber
     );
+
+    // إذا لم تكن التذكرة في قائمة الاستقبال المحلية (مثلاً لأنها غير مسددة بعد في الخزينة)، نفحصها عبر الخادم
+    if (!matched) {
+      const remoteTicket = await verifyTicketForStaffRpc(targetBookingId || targetTicketNumber);
+      if (remoteTicket) {
+        matched = remoteTicket;
+      }
+    }
 
     if (matched) {
       setScanResult(matched);
@@ -287,6 +336,48 @@ export const ReceptionView: React.FC = () => {
             <Stethoscope className="w-3.5 h-3.5" />
             <span>حالة الأطباء</span>
           </button>
+
+          {canManageDailyClinics && (
+            <button
+              onClick={() => setActiveTab('daily-clinics')}
+              className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'daily-clinics'
+                  ? 'bg-white dark:bg-slate-800 text-emerald-800 dark:text-emerald-300 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              <CalendarCheck className="w-3.5 h-3.5" />
+              <span>جدول عيادات اليوم</span>
+            </button>
+          )}
+
+          {canManageClinicFees && (
+            <button
+              onClick={() => setActiveTab('clinic-fees')}
+              className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'clinic-fees'
+                  ? 'bg-white dark:bg-slate-800 text-emerald-800 dark:text-emerald-300 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              <Coins className="w-3.5 h-3.5" />
+              <span>أسعار الكشف</span>
+            </button>
+          )}
+
+          {canViewFinancialReports && (
+            <button
+              onClick={() => setActiveTab('financial-reports')}
+              className={`px-3 py-2 rounded-lg transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
+                activeTab === 'financial-reports'
+                  ? 'bg-white dark:bg-slate-800 text-emerald-800 dark:text-emerald-300 shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
+              }`}
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              <span>التقارير المالية</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -854,6 +945,232 @@ export const ReceptionView: React.FC = () => {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* التبويب 5 (مفوض بأمر الإدارة): إدارة جدول عيادات اليوم */}
+      {activeTab === 'daily-clinics' && canManageDailyClinics && (
+        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                <CalendarCheck className="w-5 h-5 text-emerald-600" />
+                <span>جدول تشغيل العيادات اليومي وتعيين الأطباء (صلاحية مفوضة)</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                تحديد العيادات المفتوحة اليوم للمرضى وتعيين الطبيب المناوب لكل عيادة
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {clinics.map(clinic => {
+              const schedItem = dailySchedule.items.find(i => i.clinicId === clinic.id);
+              const isOpen = schedItem ? schedItem.isOpen : (clinic.isOpenToday !== false && clinic.active !== false);
+              const clinicDocs = doctors.filter(d => d.clinicId === clinic.id);
+              const assignedDocId = schedItem?.doctorId || clinicDocs[0]?.id || '';
+
+              const handleToggleOpen = () => {
+                const existingItems = dailySchedule.items.length > 0
+                  ? dailySchedule.items
+                  : clinics.map(c => ({
+                      clinicId: c.id,
+                      isOpen: c.isOpenToday !== false && c.active !== false,
+                      doctorId: doctors.find(d => d.clinicId === c.id)?.id || ''
+                    }));
+                const nextItems: DailyClinicScheduleItem[] = existingItems.some(i => i.clinicId === clinic.id)
+                  ? existingItems.map(i => i.clinicId === clinic.id ? { ...i, isOpen: !isOpen } : i)
+                  : [...existingItems, { clinicId: clinic.id, isOpen: !isOpen, doctorId: assignedDocId }];
+                updateDailySchedule(nextItems);
+              };
+
+              const handleChangeDoc = (newDocId: string) => {
+                const existingItems = dailySchedule.items.length > 0
+                  ? dailySchedule.items
+                  : clinics.map(c => ({
+                      clinicId: c.id,
+                      isOpen: c.isOpenToday !== false && c.active !== false,
+                      doctorId: doctors.find(d => d.clinicId === c.id)?.id || ''
+                    }));
+                const nextItems: DailyClinicScheduleItem[] = existingItems.some(i => i.clinicId === clinic.id)
+                  ? existingItems.map(i => i.clinicId === clinic.id ? { ...i, doctorId: newDocId } : i)
+                  : [...existingItems, { clinicId: clinic.id, isOpen, doctorId: newDocId }];
+                updateDailySchedule(nextItems);
+              };
+
+              return (
+                <div
+                  key={clinic.id}
+                  className={`p-4 rounded-2xl border space-y-3 transition-all ${
+                    isOpen
+                      ? 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800/70'
+                      : 'bg-slate-50 dark:bg-slate-900/50 border-slate-200 dark:border-slate-800 opacity-75'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="font-bold text-sm text-slate-900 dark:text-white">{clinic.name}</h4>
+                      <span className="text-[11px] text-slate-500">{clinic.room} • {clinic.floor}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleOpen}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold cursor-pointer transition-all ${
+                        isOpen
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          : 'bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-300'
+                      }`}
+                    >
+                      {isOpen ? 'مفتوحة اليوم' : 'مغلقة اليوم'}
+                    </button>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                      الطبيب المناوب اليوم:
+                    </label>
+                    <select
+                      value={assignedDocId}
+                      onChange={(e) => handleChangeDoc(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                    >
+                      {clinicDocs.length > 0 ? (
+                        clinicDocs.map(d => (
+                          <option key={d.id} value={d.id}>{d.name}</option>
+                        ))
+                      ) : (
+                        <option value="">لا يوجد طبيب مسجل</option>
+                      )}
+                    </select>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* التبويب 6 (مفوض بأمر الإدارة): تعديل أسعار ورسوم الكشف */}
+      {activeTab === 'clinic-fees' && canManageClinicFees && (
+        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div>
+            <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+              <Coins className="w-5 h-5 text-emerald-600" />
+              <span>إدارة أسعار ورسوم الكشف للعيادات (صلاحية مفوضة)</span>
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              تحديث قيمة تذكرة الكشف لكل عيادة تخصصية
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {clinics.map(c => (
+              <div key={c.id} className="p-4 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-900/40 flex items-center justify-between gap-3">
+                <div>
+                  <h4 className="font-bold text-sm text-slate-900 dark:text-white">{c.name}</h4>
+                  <span className="text-xs text-emerald-700 dark:text-emerald-400 font-mono font-bold">
+                    السعر الحالي: {c.fee} ج.م
+                  </span>
+                </div>
+
+                {editingFeeClinicId === c.id ? (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      value={tempClinicFee}
+                      onChange={(e) => setTempClinicFee(Number(e.target.value))}
+                      className="w-20 px-2.5 py-1.5 rounded-lg border border-emerald-500 bg-white dark:bg-slate-900 text-xs font-mono font-bold text-center"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        updateClinic(c.id, { fee: Math.max(0, tempClinicFee) });
+                        setEditingFeeClinicId(null);
+                      }}
+                      className="px-2.5 py-1.5 bg-emerald-600 text-white rounded-lg text-xs font-bold cursor-pointer"
+                    >
+                      حفظ
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingFeeClinicId(c.id);
+                      setTempClinicFee(c.fee);
+                    }}
+                    className="px-3 py-1.5 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 hover:border-emerald-500 flex items-center gap-1 cursor-pointer"
+                  >
+                    <Edit2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>تعديل</span>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* التبويب 7 (مفوض بأمر الإدارة): التقارير المالية والإيرادات */}
+      {activeTab === 'financial-reports' && canViewFinancialReports && (
+        <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                <span>ملخص التقارير المالية وإيرادات اليوم (صلاحية مفوضة)</span>
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                استعراض حصيلة الخزينة اليومية وتصدير السجلات بصيغة Excel
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                const todayList = bookings.filter(b => b.date === todayStr && b.status !== 'cancelled');
+                const rows = todayList.map(b => ({
+                  'رقم التذكرة': sanitizeSpreadsheetCell(b.ticketNumber),
+                  'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
+                  'العيادة': sanitizeSpreadsheetCell(b.clinicName),
+                  'الطبيب': sanitizeSpreadsheetCell(b.doctorName),
+                  'قيمة الكشف': b.fee,
+                  'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد',
+                  'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'charity_exempt' ? 'إعفاء خيري' : '-'
+                }));
+                const ws = XLSX.utils.json_to_sheet(rows);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, 'تقرير اليوم');
+                XLSX.writeFile(wb, `تقرير_مالي_يومي_${todayStr}.xlsx`);
+              }}
+              className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer self-start"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              <span>تصدير التقرير المالي (Excel)</span>
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
+              <div className="text-xs text-slate-500">إجمالي التحصيل النقدي اليوم</div>
+              <div className="text-2xl font-extrabold text-emerald-800 dark:text-emerald-300 font-mono mt-1">
+                {confirmedBookings.filter(b => b.paymentMethod === 'cash').reduce((sum, b) => sum + b.fee, 0)} ج.م
+              </div>
+            </div>
+            <div className="p-4 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800">
+              <div className="text-xs text-slate-500">حالات التأمين الطبي اليوم</div>
+              <div className="text-2xl font-extrabold text-blue-800 dark:text-blue-300 font-mono mt-1">
+                {confirmedBookings.filter(b => b.paymentMethod === 'insurance').length} حالة
+              </div>
+            </div>
+            <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
+              <div className="text-xs text-slate-500">حالات الإعفاء الخيري اليوم</div>
+              <div className="text-2xl font-extrabold text-amber-800 dark:text-amber-300 font-mono mt-1">
+                {confirmedBookings.filter(b => b.paymentStatus === 'exempt').length} حالة
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

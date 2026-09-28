@@ -12,6 +12,7 @@ export interface Clinic {
   id: string;
   name: string;
   iconName: string;
+  icon?: string;
   specialty?: string;
   department?: string;
   description?: string;
@@ -80,6 +81,7 @@ export interface UserSession {
 
 export interface StaffAccount {
   id: string;
+  authUserId?: string;
   username: string;
   displayName: string;
   role: UserRole;
@@ -122,6 +124,8 @@ export type SystemPermission =
   | 'manage_daily_clinics'
   | 'manage_clinic_fees'
   | 'view_financial_reports'
+  | 'confirm_payments_exemptions'
+  | 'call_queue_patients'
   | 'manage_patient_exemptions';
 
 export interface PermissionDefinition {
@@ -131,3 +135,27 @@ export interface PermissionDefinition {
 }
 
 export type RolePermissionsMap = Record<UserRole, SystemPermission[]>;
+
+export type SystemErrorSource =
+  | 'ErrorBoundary'
+  | 'vite:preloadError'
+  | 'ChunkLoadError'
+  | 'RuntimeError'
+  | 'UnhandledRejection';
+
+export interface SystemErrorLog {
+  id: string;
+  source: SystemErrorSource;
+  message: string;
+  stack?: string;
+  componentStack?: string;
+  url: string;
+  userAgent: string;
+  deviceInfo: string;
+  userRole?: string;
+  username?: string;
+  timestamp: string;
+  resolved?: boolean;
+  syncedToDb?: boolean;
+}
+

@@ -1,6 +1,7 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { AlertTriangle, RefreshCw, Trash2, Home } from 'lucide-react';
-import { clearAppCacheAndReload } from '../services/storage';
+import { AlertTriangle, RefreshCw, Home } from 'lucide-react';
+import { clearAppCacheAndReload, recordLocalSystemError } from '../services/storage';
+import { reportClientErrorToDb } from '../services/supabaseService';
 
 interface Props {
   children: ReactNode;
@@ -23,6 +24,17 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('ErrorBoundary caught an unhandled error:', error, errorInfo);
+    try {
+      const entry = recordLocalSystemError({
+        source: 'ErrorBoundary',
+        message: error?.message || String(error),
+        stack: error?.stack,
+        componentStack: errorInfo?.componentStack || undefined,
+      });
+      reportClientErrorToDb(entry).catch(() => {});
+    } catch (loggingErr) {
+      console.warn('Failed to log ErrorBoundary exception:', loggingErr);
+    }
   }
 
   private handleReload = () => {

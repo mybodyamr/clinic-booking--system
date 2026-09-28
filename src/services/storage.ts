@@ -1,4 +1,4 @@
-import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission } from '../types';
+import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission, SystemErrorLog, SystemErrorSource } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
 
@@ -12,12 +12,19 @@ const STORAGE_KEYS = {
   DAILY_SCHEDULE: 'sharaya_daily_schedule_v2',
   ROLE_PERMISSIONS: 'sharaya_role_permissions_v2',
   SUPPORT_INFO_TEXT: 'sharaya_support_info_text_v2',
+  OFFICIAL_WORKING_HOURS: 'sharaya_official_working_hours_v2',
   STAFF_PASSWORDS: 'sharaya_staff_passwords_v2',
   LOGIN_ATTEMPTS: 'sharaya_login_attempts_v2',
   STAFF_ACCOUNTS: 'sharaya_staff_accounts_v2',
+  DELETED_CLINICS: 'sharaya_deleted_clinics_v2',
+  DELETED_DOCTORS: 'sharaya_deleted_doctors_v2',
+  DELETED_BOOKINGS: 'sharaya_deleted_bookings_v2',
+  ERROR_LOGS: 'sharaya_system_error_logs_v1',
+  PENDING_ERROR_LOGS: 'sharaya_pending_error_logs_v1',
 };
 
 export const DEFAULT_SUPPORT_INFO_TEXT = 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.';
+export const DEFAULT_OFFICIAL_WORKING_HOURS = 'يومياً من 9:00 ص حتى 10:00 م';
 
 export const AVAILABLE_PERMISSIONS: PermissionDefinition[] = [
   {
@@ -53,13 +60,17 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissionsMap = {
     'manage_daily_clinics',
     'manage_clinic_fees',
     'view_financial_reports',
+    'confirm_payments_exemptions',
+    'call_queue_patients',
     'manage_patient_exemptions',
   ],
   doctor: [],
   reception: [
     'manage_doctor_attendance', // الاستقبال مفوض افتراضياً بصلاحية تعديل حضور الأطباء
+    'call_queue_patients',
   ],
   cashier: [
+    'confirm_payments_exemptions',
     'manage_patient_exemptions',
   ],
 };
@@ -67,14 +78,30 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissionsMap = {
 // ==================== أمان وتنقية البيانات (Security & Sanitization) ====================
 
 /**
- * تنقية وتطهير النصوص لمنع هجمات حقن الأكواد XSS
+ * تنقية وتطهير النصوص لمنع هجمات حقن الأكواد XSS والمحارف التحكمية
  */
 export function sanitizeText(input: string): string {
-  if (!input) return '';
+  if (!input || typeof input !== 'string') return '';
   return input
+    .replace(/[\u0000-\u001F\u007F]/g, '') // إزالة المحارف التحكمية المخفية
     .replace(/[<>]/g, '') // إزالة وسوم HTML
-    .replace(/javascript:/gi, '') // إزالة الروابط المشبوهة
+    .replace(/(?:javascript|data|vbscript):/gi, '') // إزالة البروتوكولات الخطرة
+    .replace(/\bon\w+\s*=/gi, '') // إزالة محاولات حقن الأحداث
     .trim();
+}
+
+/**
+ * حماية خلايا Excel / CSV من هجمات حقن المعادلات (CSV / Formula Injection)
+ * بمنع بدء الخلية برموز التنفيذ التلقائي (=, +, -, @, Tab, CR)
+ */
+export function sanitizeSpreadsheetCell(value: unknown): string | number {
+  if (typeof value === 'number') return value;
+  const str = String(value ?? '').trim();
+  if (!str) return '';
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
 }
 
 /**
@@ -134,26 +161,120 @@ export function maskPhoneNumber(phone: string): string {
 
 // ==================== التخزين المحلي واسترجاع البيانات ====================
 
+export function getDeletedClinicIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DELETED_CLINICS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function markClinicDeletedLocally(clinicId: string): void {
+  try {
+    const set = getDeletedClinicIds();
+    set.add(clinicId);
+    localStorage.setItem(STORAGE_KEYS.DELETED_CLINICS, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+export function unmarkClinicDeletedLocally(clinicId: string): void {
+  try {
+    const set = getDeletedClinicIds();
+    if (set.has(clinicId)) {
+      set.delete(clinicId);
+      localStorage.setItem(STORAGE_KEYS.DELETED_CLINICS, JSON.stringify(Array.from(set)));
+    }
+  } catch {}
+}
+
+export function getDeletedDoctorIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DELETED_DOCTORS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function markDoctorDeletedLocally(doctorId: string): void {
+  try {
+    const set = getDeletedDoctorIds();
+    set.add(doctorId);
+    localStorage.setItem(STORAGE_KEYS.DELETED_DOCTORS, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+export function unmarkDoctorDeletedLocally(doctorId: string): void {
+  try {
+    const set = getDeletedDoctorIds();
+    if (set.has(doctorId)) {
+      set.delete(doctorId);
+      localStorage.setItem(STORAGE_KEYS.DELETED_DOCTORS, JSON.stringify(Array.from(set)));
+    }
+  } catch {}
+}
+
+export function getDeletedBookingIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.DELETED_BOOKINGS);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? new Set(parsed.map(String)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+export function markBookingDeletedLocally(bookingId: string): void {
+  try {
+    const set = getDeletedBookingIds();
+    set.add(bookingId);
+    const arr = Array.from(set).slice(-500);
+    localStorage.setItem(STORAGE_KEYS.DELETED_BOOKINGS, JSON.stringify(arr));
+  } catch {}
+}
+
+export function unmarkBookingDeletedLocally(bookingId: string): void {
+  try {
+    const set = getDeletedBookingIds();
+    if (set.has(bookingId)) {
+      set.delete(bookingId);
+      localStorage.setItem(STORAGE_KEYS.DELETED_BOOKINGS, JSON.stringify(Array.from(set)));
+    }
+  } catch {}
+}
+
 export function getStoredClinics(): Clinic[] {
   try {
+    const deletedIds = getDeletedClinicIds();
     const raw = localStorage.getItem(STORAGE_KEYS.CLINICS);
     if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
-      return INITIAL_CLINICS;
+      const initial = INITIAL_CLINICS.filter(c => !deletedIds.has(c.id));
+      localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(initial));
+      return initial;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
+    const legacyIds = new Set(['1', '2', '3', '4']);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some((c: any) => !c || typeof c.id !== 'string' || typeof c.name !== 'string' || legacyIds.has(c.id))
+    ) {
+      const initial = INITIAL_CLINICS.filter(c => !deletedIds.has(c.id));
+      localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(initial));
+      return initial;
+    }
+    if (parsed.length === 0 && deletedIds.size === 0) {
       localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
       return INITIAL_CLINICS;
     }
-    // تنقية العيادات للتأكد من مطابقة العيادات الرسمية الأربعة المعتمدة بقاعدة البيانات
-    const validIds = new Set(INITIAL_CLINICS.map(c => c.id));
-    const filtered = parsed.filter(c => validIds.has(c.id));
-    if (filtered.length === INITIAL_CLINICS.length) {
-      return filtered;
-    }
-    localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(INITIAL_CLINICS));
-    return INITIAL_CLINICS;
+    return parsed.filter(
+      (c: any) => !String(c.id).startsWith('_system') && !deletedIds.has(c.id) && c.description !== '__DELETED_CLINIC__'
+    );
   } catch (e) {
     console.error('فشل قراءة بيانات العيادات:', e);
     return INITIAL_CLINICS;
@@ -162,7 +283,11 @@ export function getStoredClinics(): Clinic[] {
 
 export function saveClinics(clinics: Clinic[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(clinics));
+    const deletedIds = getDeletedClinicIds();
+    const filtered = (clinics || []).filter(
+      c => !String(c.id).startsWith('_system') && !deletedIds.has(c.id) && c.description !== '__DELETED_CLINIC__'
+    );
+    localStorage.setItem(STORAGE_KEYS.CLINICS, JSON.stringify(filtered));
   } catch (e) {
     console.error('فشل حفظ بيانات العيادات:', e);
   }
@@ -170,24 +295,28 @@ export function saveClinics(clinics: Clinic[]): void {
 
 export function getStoredDoctors(): Doctor[] {
   try {
+    const deletedIds = getDeletedDoctorIds();
     const raw = localStorage.getItem(STORAGE_KEYS.DOCTORS);
     if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
-      return INITIAL_DOCTORS;
+      const initial = INITIAL_DOCTORS.filter(d => !deletedIds.has(d.id));
+      localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(initial));
+      return initial;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) {
+    const legacyIds = new Set(['1', '2', '3', '4']);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some((d: any) => !d || typeof d.id !== 'string' || typeof d.name !== 'string' || legacyIds.has(d.id))
+    ) {
+      const initial = INITIAL_DOCTORS.filter(d => !deletedIds.has(d.id));
+      localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(initial));
+      return initial;
+    }
+    if (parsed.length === 0 && deletedIds.size === 0) {
       localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
       return INITIAL_DOCTORS;
     }
-    // تنقية الأطباء للتأكد من مطابقة الأطباء الأربعة المعتمدين بقاعدة البيانات
-    const validIds = new Set(INITIAL_DOCTORS.map(d => d.id));
-    const filtered = parsed.filter(d => validIds.has(d.id));
-    if (filtered.length === INITIAL_DOCTORS.length) {
-      return filtered;
-    }
-    localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(INITIAL_DOCTORS));
-    return INITIAL_DOCTORS;
+    return parsed.filter((d: any) => !deletedIds.has(d.id) && d.bio !== '__DELETED_DOCTOR__');
   } catch (e) {
     console.error('فشل قراءة بيانات الأطباء:', e);
     return INITIAL_DOCTORS;
@@ -196,7 +325,9 @@ export function getStoredDoctors(): Doctor[] {
 
 export function saveDoctors(doctors: Doctor[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(doctors));
+    const deletedIds = getDeletedDoctorIds();
+    const filtered = (doctors || []).filter(d => !deletedIds.has(d.id) && d.bio !== '__DELETED_DOCTOR__');
+    localStorage.setItem(STORAGE_KEYS.DOCTORS, JSON.stringify(filtered));
   } catch (e) {
     console.error('فشل حفظ بيانات الأطباء:', e);
   }
@@ -218,22 +349,26 @@ export function saveStoredBookingsCutoffDate(dateStr: string): void {
 
 export function getStoredBookings(): Booking[] {
   try {
+    const deletedIds = getDeletedBookingIds();
     const cutoffDate = localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
     const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
     if (!raw) {
       if (cutoffDate) return [];
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
-      return INITIAL_BOOKINGS;
+      const initial = INITIAL_BOOKINGS.filter(b => !deletedIds.has(b.id));
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(initial));
+      return initial;
     }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
       if (cutoffDate) return [];
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(INITIAL_BOOKINGS));
-      return INITIAL_BOOKINGS;
+      const initial = INITIAL_BOOKINGS.filter(b => !deletedIds.has(b.id));
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(initial));
+      return initial;
     }
     // تصفية أي حجوزات محذوفة صراحة أو تسبق تاريخ القطع
     const filtered = parsed.filter((b: Booking) => {
       if (!b) return false;
+      if (deletedIds.has(String(b.id))) return false;
       if (b.notes === '__PURGED_PAST_BOOKING__') return false;
       if (cutoffDate && b.date < cutoffDate) return false;
       return true;
@@ -247,9 +382,11 @@ export function getStoredBookings(): Booking[] {
 
 export function saveBookings(bookings: Booking[]): void {
   try {
+    const deletedIds = getDeletedBookingIds();
     const cutoffDate = localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
     const valid = (bookings || []).filter((b: Booking) => {
       if (!b) return false;
+      if (deletedIds.has(String(b.id))) return false;
       if (b.notes === '__PURGED_PAST_BOOKING__') return false;
       if (cutoffDate && b.date < cutoffDate) return false;
       return true;
@@ -292,6 +429,9 @@ export function saveSession(session: UserSession | null): void {
   try {
     if (!session) {
       sessionStorage.removeItem(STORAGE_KEYS.SESSION);
+      localStorage.removeItem(STORAGE_KEYS.SESSION);
+      localStorage.removeItem(STORAGE_KEYS.BOOKINGS);
+      localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
     } else {
       sessionStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
     }
@@ -331,15 +471,15 @@ export async function hashPassword(plainText: string): Promise<string> {
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// الكلمات السرية الافتراضية المحمية بالتجزئة للحسابات الإدارية والطبية (SHA-256 مضبوطة بـ 64 خانة مع الملح)
+// تجزئات احتياطية مشفرة بـ SHA-256 لوضع عدم الاتصال المحلي فقط (بدون أي كلمات مرور نصية أو تخزين في المتصفح)
 export const DEFAULT_PASSWORD_HASHES: Record<string, string> = {
-  admin: '2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558', // Adm@Sharia2026!
-  reception: '8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804', // Rcp@Sharia2026!
-  cashier: '3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6', // Csh@Sharia2026!
-  doctor: '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
-  'doctor.pediatrics': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
-  'doctor.ortho': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
-  'doctor.dental': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6', // Doc@Sharia2026!
+  admin: '2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558',
+  reception: '8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804',
+  cashier: '3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6',
+  doctor: '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
+  'doctor.pediatrics': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
+  'doctor.ortho': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
+  'doctor.dental': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
 };
 
 // ==================== قائمة حسابات الكادر والمستخدمين الديناميكية ====================
@@ -349,21 +489,18 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     username: 'admin',
     displayName: 'د. أحمد الشناوي (مدير المنظومة)',
     role: 'admin',
-    recoveryEmail: 'admin@sharia-clinics.eg'
   },
   {
     id: 'staff-reception',
     username: 'reception',
     displayName: 'أ. سارة مصطفى (مسؤولة الاستقبال)',
     role: 'reception',
-    recoveryEmail: 'reception@sharia-clinics.eg'
   },
   {
     id: 'staff-cashier',
     username: 'cashier',
     displayName: 'أ. محمود إبراهيم (أمين الصندوق والخزينة)',
     role: 'cashier',
-    recoveryEmail: 'cashier@sharia-clinics.eg'
   },
   {
     id: 'staff-doctor',
@@ -372,7 +509,6 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     role: 'doctor',
     doctorId: 'doc-1',
     clinicId: 'clinic-internal',
-    recoveryEmail: 'doctor.internal@sharia-clinics.eg'
   },
   {
     id: 'staff-doctor-pediatrics',
@@ -381,7 +517,6 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     role: 'doctor',
     doctorId: 'doc-2',
     clinicId: 'clinic-pediatrics',
-    recoveryEmail: 'doctor.pediatrics@sharia-clinics.eg'
   },
   {
     id: 'staff-doctor-ortho',
@@ -390,7 +525,6 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     role: 'doctor',
     doctorId: 'doc-3',
     clinicId: 'clinic-orthopedics',
-    recoveryEmail: 'doctor.ortho@sharia-clinics.eg'
   },
   {
     id: 'staff-doctor-dental',
@@ -399,7 +533,6 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     role: 'doctor',
     doctorId: 'doc-4',
     clinicId: 'clinic-dental',
-    recoveryEmail: 'doctor.dental@sharia-clinics.eg'
   }
 ];
 
@@ -412,20 +545,7 @@ export function getStoredStaffAccounts(): StaffAccount[] {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      // التأكد من شمول كافة حسابات الأطباء الافتراضية
-      const existingUsernames = new Set(parsed.map((a: any) => String(a.username || '').toLowerCase()));
-      let hasAdded = false;
-      const merged = [...parsed];
-      for (const def of DEFAULT_STAFF_ACCOUNTS) {
-        if (!existingUsernames.has(def.username.toLowerCase())) {
-          merged.push(def);
-          hasAdded = true;
-        }
-      }
-      if (hasAdded) {
-        localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(merged));
-      }
-      return merged;
+      return parsed;
     }
     return DEFAULT_STAFF_ACCOUNTS;
   } catch (e) {
@@ -436,9 +556,19 @@ export function getStoredStaffAccounts(): StaffAccount[] {
 
 export function saveStaffAccounts(accounts: StaffAccount[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(accounts));
+    // عدم تخزين البريد الإلكتروني للاستعادة (recoveryEmail) في localStorage لحماية خصوصية الحسابات
+    const safeForLocalStorage = (accounts || []).map(({ recoveryEmail: _omitted, ...rest }) => rest);
+    localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(safeForLocalStorage));
   } catch (e) {
     console.error('فشل حفظ حسابات الموظفين:', e);
+  }
+}
+
+export function removeStaffPasswordHash(_username: string): void {
+  try {
+    localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
+  } catch {
+    // ignore
   }
 }
 
@@ -449,8 +579,11 @@ export function deleteStaffAccountById(id: string): { success: boolean; error?: 
     return { success: false, error: 'المستخدم غير موجود', remainingAccounts: current };
   }
 
-  // منع حذف آخر حساب أدمن في المنظومة
+  // منع حذف الحساب الرئيسي أو آخر حساب أدمن في المنظومة
   if (target.role === 'admin') {
+    if (target.username.trim().toLowerCase() === 'admin') {
+      return { success: false, error: 'لا يمكن حذف حساب المدير الرئيسي للمنظومة (admin).', remainingAccounts: current };
+    }
     const adminCount = current.filter(a => a.role === 'admin').length;
     if (adminCount <= 1) {
       return { success: false, error: 'لا يمكن حذف آخر حساب مدير متبقٍ في المنظومة لضمان استمرارية الإدارة.', remainingAccounts: current };
@@ -459,6 +592,7 @@ export function deleteStaffAccountById(id: string): { success: boolean; error?: 
 
   const updated = current.filter(a => a.id !== id);
   saveStaffAccounts(updated);
+  removeStaffPasswordHash(target.username);
   return { success: true, remainingAccounts: updated };
 }
 
@@ -476,25 +610,16 @@ export function updateStaffAccountRecoveryEmail(id: string, email: string): Staf
 
 export function getStoredStaffPasswordHashes(): Record<string, string> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEYS.STAFF_PASSWORDS);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEYS.STAFF_PASSWORDS, JSON.stringify(DEFAULT_PASSWORD_HASHES));
-      return DEFAULT_PASSWORD_HASHES;
-    }
-    return JSON.parse(raw);
-  } catch (e) {
-    return DEFAULT_PASSWORD_HASHES;
-  }
+    // تنظيف أي تجزئات قديمة مخزنة في localStorage لمنع قراءتها من الكونسول
+    localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
+  } catch {}
+  return { ...DEFAULT_PASSWORD_HASHES };
 }
 
-export function saveStaffPasswordHash(username: string, newHash: string): void {
+export function saveStaffPasswordHash(_username: string, _newHash: string): void {
   try {
-    const current = getStoredStaffPasswordHashes();
-    current[username.toLowerCase()] = newHash;
-    localStorage.setItem(STORAGE_KEYS.STAFF_PASSWORDS, JSON.stringify(current));
-  } catch (e) {
-    console.error('فشل تحديث كلمة المرور:', e);
-  }
+    localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
+  } catch {}
 }
 
 interface LoginAttemptRecord {
@@ -569,17 +694,25 @@ export function resetLoginAttempts(username: string): void {
  * - يُسمح بأكثر من حجز بنفس رقم الهاتف في نفس العيادة لأسماء مرضى مختلفة (أفراد الأسرة).
  * - يُمنع تكرار حجز لنفس اسم المريض ونفس الهاتف في نفس العيادة لنفس اليوم (إذا كان الحجز نشطاً وغير ملغي).
  */
-export function checkBookingRateLimit(patientName: string, phone: string, clinicId: string, date: string): { allowed: boolean; reason?: string } {
-  const bookings = getStoredBookings();
+export function checkBookingRateLimit(
+  patientName: string,
+  phone: string,
+  clinicId: string,
+  date: string,
+  timeSlot?: string,
+  currentBookings?: Booking[]
+): { allowed: boolean; reason?: string } {
+  const bookings = currentBookings || getStoredBookings();
   const cleanPhone = phone.replace(/[\s-]/g, '');
   const normalizedNewName = patientName.trim().replace(/\s+/g, ' ').toLowerCase();
 
-  // فحص هل يوجد حجز نشط (غير ملغي) لنفس الاسم ونفس رقم الهاتف ونفس العيادة ونفس اليوم
+  // 1. فحص هل يوجد حجز نشط (غير ملغي وغير مكتمل) لنفس الاسم ونفس رقم الهاتف ونفس العيادة ونفس اليوم
   const duplicateBooking = bookings.find(
     b => b.patientPhone.replace(/[\s-]/g, '') === cleanPhone &&
          b.clinicId === clinicId &&
          b.date === date &&
          b.status !== 'cancelled' &&
+         b.status !== 'completed' &&
          b.patientName.trim().replace(/\s+/g, ' ').toLowerCase() === normalizedNewName
   );
 
@@ -590,7 +723,27 @@ export function checkBookingRateLimit(patientName: string, phone: string, clinic
     };
   }
 
-  // حد أمان عام لمنع محاولات الإغراق الآلي (بحد أقصى 6 تذاكر يومياً للأسرة الواحدة عبر نفس الهاتف)
+  // 2. منع تضارب المواعيد لنفس المريض في نفس الفترة الزمنية مع عيادة أخرى في نفس اليوم
+  if (timeSlot) {
+    const conflictBooking = bookings.find(
+      b => b.patientPhone.replace(/[\s-]/g, '') === cleanPhone &&
+           b.clinicId !== clinicId &&
+           b.date === date &&
+           b.timeSlot === timeSlot &&
+           b.status !== 'cancelled' &&
+           b.status !== 'completed' &&
+           b.patientName.trim().replace(/\s+/g, ' ').toLowerCase() === normalizedNewName
+    );
+
+    if (conflictBooking) {
+      return {
+        allowed: false,
+        reason: `يوجد تضارب في المواعيد: المريض (${patientName.trim()}) لديه حجز نشط آخر في (${conflictBooking.clinicName}) في نفس الفترة الزمنية (${timeSlot}). يرجى اختيار فترة زمنية مختلفة.`
+      };
+    }
+  }
+
+  // 3. حد أمان عام لمنع محاولات الإغراق الآلي (بحد أقصى 6 تذاكر يومياً للأسرة الواحدة عبر نفس الهاتف)
   const allBookingsTodayForPhone = bookings.filter(
     b => b.patientPhone.replace(/[\s-]/g, '') === cleanPhone && b.date === date && b.status !== 'cancelled'
   );
@@ -606,23 +759,23 @@ export function checkBookingRateLimit(patientName: string, phone: string, clinic
 }
 
 /**
- * تصدير البيانات إلى ملف Excel بصيغة xlsx
+ * تصدير البيانات إلى ملف Excel بصيغة xlsx مع الحماية ضد حقن المعادلات (CSV/Excel Formula Injection)
  */
 export function exportBookingsToExcel(bookings: Booking[], fileName = 'سجل_حجوزات_عيادات_الجمعية_الشرعية.xlsx'): void {
   const rows = bookings.map(b => ({
-    'رقم التذكرة': b.ticketNumber,
-    'اسم المريض': b.patientName,
-    'رقم الهاتف': b.patientPhone,
-    'العيادة': b.clinicName,
-    'الطبيب المعالج': b.doctorName,
-    'تاريخ الكشف': b.date,
-    'الموعد التقريبي': b.timeSlot,
-    'رقم الدور': b.queuePosition,
+    'رقم التذكرة': sanitizeSpreadsheetCell(b.ticketNumber),
+    'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
+    'رقم الهاتف': sanitizeSpreadsheetCell(b.patientPhone),
+    'العيادة': sanitizeSpreadsheetCell(b.clinicName),
+    'الطبيب المعالج': sanitizeSpreadsheetCell(b.doctorName),
+    'تاريخ الكشف': sanitizeSpreadsheetCell(b.date),
+    'الموعد التقريبي': sanitizeSpreadsheetCell(b.timeSlot),
+    'رقم الدور': Number(b.queuePosition || 0),
     'حالة الكشف': b.status === 'completed' ? 'مكتمل' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي',
     'حالة الدفع': b.paymentStatus === 'paid' ? 'تم السداد' : b.paymentStatus === 'exempt' ? 'إعفاء خيري' : 'غير مسدد',
-    'قيمة الكشف (ج.م)': b.fee,
-    'ملاحظات التشخيص': b.doctorDiagnosis || b.notes || '—',
-    'وقت الحجز': b.createdAt
+    'قيمة الكشف (ج.م)': Number(b.fee || 0),
+    'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || b.notes || '—'),
+    'وقت الحجز': sanitizeSpreadsheetCell(b.createdAt)
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(rows);
@@ -636,7 +789,8 @@ export function exportBookingsToExcel(bookings: Booking[], fileName = 'سجل_ح
 // ==================== إدارة جدول عيادات اليوم ====================
 
 export function getStoredDailySchedule(clinics: Clinic[], doctors: Doctor[]): DailyScheduleState {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.DAILY_SCHEDULE);
     if (raw) {
@@ -750,15 +904,136 @@ export function saveSupportInfoText(text: string): void {
   }
 }
 
+export function getStoredOfficialWorkingHours(): string {
+  try {
+    const val = localStorage.getItem(STORAGE_KEYS.OFFICIAL_WORKING_HOURS);
+    return val !== null && val.trim().length > 0 ? val : DEFAULT_OFFICIAL_WORKING_HOURS;
+  } catch (e) {
+    return DEFAULT_OFFICIAL_WORKING_HOURS;
+  }
+}
+
+export function saveOfficialWorkingHours(text: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.OFFICIAL_WORKING_HOURS, text);
+  } catch (e) {
+    console.error('فشل حفظ مواعيد العمل الرسمية:', e);
+  }
+}
+
+export function detectReadableDeviceInfo(): string {
+  try {
+    if (typeof navigator === 'undefined') return 'جهاز غير معروف';
+    const ua = navigator.userAgent || '';
+    let os = 'نظام غير محدد';
+    if (/Windows/i.test(ua)) os = 'Windows';
+    else if (/Android/i.test(ua)) os = 'Android';
+    else if (/iPhone|iPad|iPod/i.test(ua)) os = 'iOS';
+    else if (/Mac OS X|Macintosh/i.test(ua)) os = 'macOS';
+    else if (/Linux/i.test(ua)) os = 'Linux';
+
+    let browser = 'متصفح ويب';
+    if (/Edg\//i.test(ua)) browser = 'Edge';
+    else if (/Chrome\//i.test(ua)) browser = 'Chrome';
+    else if (/Firefox\//i.test(ua)) browser = 'Firefox';
+    else if (/Safari\//i.test(ua) && !/Chrome\//i.test(ua)) browser = 'Safari';
+
+    const screenInfo = typeof window !== 'undefined' && window.screen
+      ? `${window.screen.width}x${window.screen.height}`
+      : '';
+
+    return `${os} • ${browser}${screenInfo ? ` (${screenInfo})` : ''}`;
+  } catch {
+    return 'متصفح ويب';
+  }
+}
+
+export function getStoredErrorLogs(): SystemErrorLog[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.ERROR_LOGS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveErrorLogs(logs: SystemErrorLog[]): void {
+  try {
+    const trimmed = logs.slice(0, 100);
+    localStorage.setItem(STORAGE_KEYS.ERROR_LOGS, JSON.stringify(trimmed));
+  } catch (e) {
+    console.error('فشل حفظ سجلات الأخطاء محلياً:', e);
+  }
+}
+
+export function getPendingErrorLogs(): SystemErrorLog[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.PENDING_ERROR_LOGS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function savePendingErrorLogs(logs: SystemErrorLog[]): void {
+  try {
+    const trimmed = logs.slice(0, 50);
+    localStorage.setItem(STORAGE_KEYS.PENDING_ERROR_LOGS, JSON.stringify(trimmed));
+  } catch {}
+}
+
+export function recordLocalSystemError(input: {
+  source: SystemErrorSource;
+  message: string;
+  stack?: string;
+  componentStack?: string;
+}): SystemErrorLog {
+  const session = getStoredSession();
+  const entry: SystemErrorLog = {
+    id: `err_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    source: input.source,
+    message: input.message || 'خطأ غير معروف في النظام',
+    stack: input.stack,
+    componentStack: input.componentStack,
+    url: typeof window !== 'undefined' ? window.location.href : '',
+    userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+    deviceInfo: detectReadableDeviceInfo(),
+    userRole: session?.role || 'patient_visitor',
+    username: session?.username || 'زائر / مريض',
+    timestamp: new Date().toISOString(),
+    resolved: false,
+    syncedToDb: false,
+  };
+
+  try {
+    const existing = getStoredErrorLogs();
+    saveErrorLogs([entry, ...existing]);
+
+    const pending = getPendingErrorLogs();
+    savePendingErrorLogs([entry, ...pending]);
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('sharaya:system-error-logged', { detail: entry }));
+    }
+  } catch {}
+
+  return entry;
+}
+
 /**
  * تفريغ الذاكرة المؤقتة التالفة للتطبيق والـ Service Worker وإعادة التحميل التلقائي
  */
 export function clearAppCacheAndReload(): void {
   try {
-    // إزالة مفاتيح التخزين المؤقت للتطبيق فقط
-    Object.values(STORAGE_KEYS).forEach((key) => {
+    // إزالة مفاتيح التخزين المؤقت للتطبيق مع الاحتفاظ بسجل الأخطاء لمراجعته في لوحة التحكم
+    Object.entries(STORAGE_KEYS).forEach(([keyName, storageKey]) => {
+      if (keyName === 'ERROR_LOGS' || keyName === 'PENDING_ERROR_LOGS' || keyName === 'SESSION') return;
       try {
-        localStorage.removeItem(key);
+        localStorage.removeItem(storageKey);
       } catch (e) {}
     });
 

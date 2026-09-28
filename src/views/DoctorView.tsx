@@ -2,20 +2,14 @@ import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Stethoscope, 
-  Users, 
   Clock, 
   CheckCircle2, 
   AlertCircle, 
-  FileText, 
-  Send, 
-  Sparkles, 
-  Search, 
   X, 
   CalendarDays, 
   Check 
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { maskPhoneNumber } from '../services/storage';
 import { 
   parseDoctorShiftTimes, 
   format24To12Arabic 
@@ -40,18 +34,23 @@ export const DoctorView: React.FC = () => {
   const { 
     currentUser, 
     doctors, 
-    bookings, 
     updateDoctorStatus, 
     updateDoctorSchedule,
-    updateBookingStatus, 
-    addDoctorDiagnosis, 
+    hasPermission,
     addToast 
   } = useApp();
 
-  // تحديد الطبيب المرتبط بالجلسة الحالية
-  const currentDoctor = doctors.find(d => d.id === currentUser?.doctorId) || doctors[0];
-  const [activeNotes, setActiveNotes] = useState<{ [key: string]: string }>({});
-  const [patientSearch, setPatientSearch] = useState('');
+  const canManageSchedule = hasPermission(currentUser?.role, 'manage_doctor_attendance');
+
+  // للطبيب: عزل صارم لحسابه الشخصي فقط دون الوقوع الافتراضي على طبيب آخر
+  // لمدير النظام (admin): إمكانية اختيار الطبيب المراد معاينته
+  const [adminSelectedDocId, setAdminSelectedDocId] = useState<string>(doctors[0]?.id || '');
+
+  const currentDoctor =
+    currentUser?.role === 'admin'
+      ? (doctors.find(d => d.id === adminSelectedDocId) || doctors[0])
+      : (doctors.find(d => d.id === currentUser?.doctorId) ||
+         (currentUser?.clinicId ? doctors.find(d => d.clinicId === currentUser.clinicId) : undefined));
 
   // حالات نافذة سبب عدم الحضور (إلزامية: عذر طارئ أو ارتباط بعمليات)
   const [showReasonModal, setShowReasonModal] = useState(false);
@@ -60,33 +59,29 @@ export const DoctorView: React.FC = () => {
 
   // حالات تعديل الجدول الأسبوعي
   const [showScheduleModal, setShowScheduleModal] = useState(false);
-  const [selectedDays, setSelectedDays] = useState<string[]>(currentDoctor.scheduleDays || []);
+  const [selectedDays, setSelectedDays] = useState<string[]>(currentDoctor?.scheduleDays || []);
   
-  const initialShiftTimes = parseDoctorShiftTimes(currentDoctor);
+  const initialShiftTimes = currentDoctor ? parseDoctorShiftTimes(currentDoctor) : { startTime: '14:00', endTime: '20:00', formattedArabic: 'من 2:00 م إلى 8:00 م' };
   const [shiftStartTime, setShiftStartTime] = useState<string>(
-    currentDoctor.shiftStartTime || initialShiftTimes.startTime || '14:00'
+    currentDoctor?.shiftStartTime || initialShiftTimes.startTime || '14:00'
   );
   const [shiftEndTime, setShiftEndTime] = useState<string>(
-    currentDoctor.shiftEndTime || initialShiftTimes.endTime || '20:00'
+    currentDoctor?.shiftEndTime || initialShiftTimes.endTime || '20:00'
   );
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  if (!currentDoctor) {
+    return (
+      <div className="p-8 text-center bg-white dark:bg-slate-800 rounded-3xl border border-slate-200 dark:border-slate-700 space-y-2">
+        <p className="text-sm font-bold text-slate-700 dark:text-slate-300">
+          {currentUser?.role === 'doctor'
+            ? 'هذا الحساب غير مربوط بسجل طبيب معتمد حالياً. يرجى مراجعة مدير النظام لربط الحساب بالعيادة.'
+            : 'لا يوجد أطباء مسجلون حالياً في النظام.'}
+        </p>
+      </div>
+    );
+  }
 
-  // قائمة حجوزات عيادة هذا الطبيب لليوم (تظهر فقط الحجوزات المسددة أو المعفاة من الكاشير)
-  const todayClinicBookings = bookings.filter(
-    b => b.doctorId === currentDoctor.id && 
-         b.date === todayStr && 
-         b.status !== 'cancelled' &&
-         (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt')
-  ).sort((a, b) => new Date(a.paidAt || a.createdAt).getTime() - new Date(b.paidAt || b.createdAt).getTime());
-
-  const waitingPatients = todayClinicBookings.filter(b => b.status === 'waiting');
-  const currentPatient = todayClinicBookings.find(b => b.status === 'in-progress');
-  const completedPatients = todayClinicBookings.filter(b => b.status === 'completed');
-
-  const filteredPatients = todayClinicBookings.filter(b => 
-    b.patientName.includes(patientSearch) || b.ticketNumber.includes(patientSearch)
-  );
+  const currentShiftDisplay = parseDoctorShiftTimes(currentDoctor);
 
   const handleSetAvailable = () => {
     updateDoctorStatus(currentDoctor.id, 'available');
@@ -96,11 +91,13 @@ export const DoctorView: React.FC = () => {
     setShowReasonModal(true);
   };
 
-  const handleConfirmUnavailable = () => {
+  const handleConfirmUnavailable = async () => {
     const finalReason = customReason.trim() ? customReason.trim() : selectedReason;
-    updateDoctorStatus(currentDoctor.id, 'offline', finalReason);
-    setShowReasonModal(false);
-    setCustomReason('');
+    const ok = await updateDoctorStatus(currentDoctor.id, 'offline', finalReason);
+    if (ok) {
+      setShowReasonModal(false);
+      setCustomReason('');
+    }
   };
 
   const handleToggleDay = (day: string) => {
@@ -111,7 +108,7 @@ export const DoctorView: React.FC = () => {
     }
   };
 
-  const handleSaveSchedule = () => {
+  const handleSaveSchedule = async () => {
     if (selectedDays.length === 0) {
       addToast({
         type: 'error',
@@ -131,45 +128,18 @@ export const DoctorView: React.FC = () => {
     }
 
     const formattedHours = `من ${format24To12Arabic(shiftStartTime)} إلى ${format24To12Arabic(shiftEndTime)}`;
-    updateDoctorSchedule(currentDoctor.id, selectedDays, formattedHours, shiftStartTime, shiftEndTime);
-    setShowScheduleModal(false);
+    const ok = await updateDoctorSchedule(currentDoctor.id, selectedDays, formattedHours, shiftStartTime, shiftEndTime);
+    if (ok) {
+      setShowScheduleModal(false);
+    }
   };
 
-  // مناداة المريض التالي في الطابور
-  const handleCallNextPatient = () => {
-    if (waitingPatients.length === 0) {
-      addToast({
-        type: 'info',
-        title: 'قائمة الانتظار فارغة',
-        message: 'لا يوجد مرضى في قائمة الانتظار حالياً.'
-      });
-      return;
-    }
-
-    if (currentPatient) {
-      updateBookingStatus(currentPatient.id, 'completed');
-    }
-
-    const next = waitingPatients[0];
-    updateBookingStatus(next.id, 'in-progress');
-    addToast({
-      type: 'success',
-      title: 'مناداة المريض التالي',
-      message: `تم استدعاء المريض: ${next.patientName} (تذكرة ${next.ticketNumber}) للدخول للكشف.`
-    });
-  };
-
-  const handleFinishConsultation = (bookingId: string) => {
-    const notesText = activeNotes[bookingId];
-    if (notesText && notesText.trim()) {
-      addDoctorDiagnosis(bookingId, notesText);
-    }
-    updateBookingStatus(bookingId, 'completed');
-    addToast({
-      type: 'success',
-      title: 'اكتمل الكشف الطبي',
-      message: 'تم إنهاء الكشف وحفظ سجل الزيارة بنجاح.'
-    });
+  const openScheduleEditor = () => {
+    setSelectedDays(currentDoctor.scheduleDays || []);
+    const times = parseDoctorShiftTimes(currentDoctor);
+    setShiftStartTime(currentDoctor.shiftStartTime || times.startTime || '14:00');
+    setShiftEndTime(currentDoctor.shiftEndTime || times.endTime || '20:00');
+    setShowScheduleModal(true);
   };
 
   return (
@@ -239,231 +209,139 @@ export const DoctorView: React.FC = () => {
             </div>
           </div>
 
-          {/* زر تحديد الجدول الأسبوعي */}
-          <div className="flex flex-col gap-1 sm:pt-5">
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedDays(currentDoctor.scheduleDays || []);
-                const times = parseDoctorShiftTimes(currentDoctor);
-                setShiftStartTime(currentDoctor.shiftStartTime || times.startTime || '14:00');
-                setShiftEndTime(currentDoctor.shiftEndTime || times.endTime || '20:00');
-                setShowScheduleModal(true);
-              }}
-              className="px-4 py-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-650 text-slate-800 dark:text-slate-200 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 border border-slate-300 dark:border-slate-600 cursor-pointer shadow-2xs"
-            >
-              <CalendarDays className="w-4 h-4 text-emerald-600" />
-              <span>جدولي الأسبوعي</span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* شريط الإحصائيات السريعة للعيادة */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
-            <Users className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="text-2xl font-bold text-slate-900 dark:text-white font-mono">{todayClinicBookings.length}</div>
-            <div className="text-xs text-slate-500">حالات مؤكدة ومسددة اليوم</div>
-          </div>
-        </div>
-
-        <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
-            <Clock className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="text-2xl font-bold text-slate-900 dark:text-white font-mono">{waitingPatients.length}</div>
-            <div className="text-xs text-slate-500">في انتظار الدخول</div>
-          </div>
-        </div>
-
-        <div className="p-4 rounded-2xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-800 shadow-xs flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
-            <CheckCircle2 className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="text-2xl font-bold text-slate-900 dark:text-white font-mono">{completedPatients.length}</div>
-            <div className="text-xs text-slate-500">تم الكشف عليهم</div>
-          </div>
-        </div>
-      </div>
-
-      {/* الحالة المحورية: المريض الموجود داخل العيادة الآن */}
-      <div className="bg-gradient-to-br from-emerald-900 via-emerald-800 to-emerald-950 text-white rounded-3xl p-6 sm:p-8 shadow-xl relative overflow-hidden">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 relative z-10">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-700/60 border border-emerald-500/40 text-emerald-200 text-xs font-semibold">
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-              <span>الحالة النشطة داخل غرفة الكشف الآن</span>
+          {/* زر تحديد الجدول الأسبوعي (يظهر فقط عند امتلاك الصلاحية) */}
+          {canManageSchedule && (
+            <div className="flex flex-col gap-1 sm:pt-5">
+              <button
+                type="button"
+                onClick={openScheduleEditor}
+                className="px-4 py-2.5 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-650 text-slate-800 dark:text-slate-200 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 border border-slate-300 dark:border-slate-600 cursor-pointer shadow-2xs"
+              >
+                <CalendarDays className="w-4 h-4 text-emerald-600" />
+                <span>جدولي الأسبوعي</span>
+              </button>
             </div>
+          )}
+        </div>
+      </div>
 
-            {currentPatient ? (
-              <div>
-                <h2 className="text-2xl sm:text-3xl font-bold text-white flex items-center gap-3">
-                  <span>{currentPatient.patientName}</span>
-                  <span className="font-mono text-base bg-emerald-700/80 px-3 py-1 rounded-xl border border-emerald-600">
-                    {currentPatient.ticketNumber}
-                  </span>
-                </h2>
-                <div className="text-xs text-emerald-200/90 mt-2 flex flex-wrap gap-4">
-                  <span>رقم الهاتف: {maskPhoneNumber(currentPatient.patientPhone)}</span>
-                  <span>•</span>
-                  <span>رقم الدور: #{currentPatient.queuePosition}</span>
-                  <span>•</span>
-                  <span>الموعد: {currentPatient.timeSlot}</span>
-                </div>
+      {/* عرض تفاصيل الحضور اليومي والجدول الأسبوعي المعتمد للطبيب */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* بطاقة حالة الحضور اليومي */}
+        <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                currentDoctor.status === 'available'
+                  ? 'bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300'
+                  : 'bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300'
+              }`}>
+                {currentDoctor.status === 'available' ? (
+                  <CheckCircle2 className="w-5 h-5" />
+                ) : (
+                  <AlertCircle className="w-5 h-5" />
+                )}
               </div>
-            ) : (
-              <div className="py-3">
-                <h2 className="text-xl font-bold text-emerald-100">
-                  لا يوجد مريض داخل العيادة حالياً
+              <div>
+                <h2 className="font-bold text-sm text-slate-900 dark:text-white">
+                  حالة الحضور اليومي بالعيادة
                 </h2>
-                <p className="text-xs text-emerald-300/80 mt-1">
-                  اضغط على زر "مناداة المريض التالي" لبدء كشف جديد من قائمة الانتظار
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  تتحكم في ظهور عيادتك للمرضى في شاشة الحجز اليومي
                 </p>
               </div>
-            )}
+            </div>
+
+            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+              currentDoctor.status === 'available'
+                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300 border border-rose-200 dark:border-rose-800'
+            }`}>
+              {currentDoctor.status === 'available' ? 'متاح للعمل اليوم' : 'غير متاح اليوم'}
+            </span>
           </div>
 
-          <div className="flex flex-col sm:flex-row md:flex-col gap-3 shrink-0">
-            <motion.button
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              onClick={handleCallNextPatient}
-              className="px-6 py-3 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Users className="w-4 h-4" />
-              <span>مناداة المريض التالي ({waitingPatients.length} بالانتظار)</span>
-            </motion.button>
-
-            {currentPatient && (
-              <button
-                onClick={() => handleFinishConsultation(currentPatient.id)}
-                className="px-6 py-3 bg-white text-emerald-900 hover:bg-emerald-50 font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>إنهاء الكشف وحفظ السجل</span>
-              </button>
-            )}
-          </div>
+          {currentDoctor.status === 'offline' ? (
+            <div className="p-4 rounded-2xl bg-rose-50/70 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 text-xs text-rose-900 dark:text-rose-200 space-y-1.5">
+              <div className="font-bold">
+                سبب الاعتذار المسجل: {currentDoctor.unavailableReason || 'اعتذار رسمي'}
+              </div>
+              <p className="text-[11px] text-rose-700 dark:text-rose-300 leading-relaxed">
+                العيادة متوقفة حالياً عن استقبال حجوزات جديدة لليوم. يمكنك إعادة تفعيل الحضور في أي وقت بالضغط على زر "متاح للعمل".
+              </p>
+            </div>
+          ) : (
+            <div className="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/70 text-xs text-emerald-900 dark:text-emerald-200 space-y-1.5">
+              <div className="font-bold">
+                العيادة نشطة وتستقبل الحجوزات وفق جدولك المعتمد
+              </div>
+              <p className="text-[11px] text-emerald-700 dark:text-emerald-300 leading-relaxed">
+                في حال وجود عذر طارئ أو ارتباط بعمليات، يرجى التحويل إلى "غير متاح" لإيقاف الحجز اليومي تلقائياً.
+              </p>
+            </div>
+          )}
         </div>
 
-        {/* حقل تدوين التقرير والتشخيص الطبي المباشر */}
-        {currentPatient && (
-          <div className="mt-6 pt-6 border-t border-emerald-700/60">
-            <label className="block text-xs font-bold text-emerald-200 mb-2 flex items-center gap-2">
-              <FileText className="w-4 h-4 text-amber-300" />
-              <span>تدوين التشخيص والعلاج للمريض (يُحفظ في سجله الطبي):</span>
-            </label>
-            <div className="flex gap-2">
-              <textarea
-                rows={2}
-                value={activeNotes[currentPatient.id] ?? (currentPatient.doctorDiagnosis || '')}
-                onChange={(e) => setActiveNotes({ ...activeNotes, [currentPatient.id]: e.target.value })}
-                placeholder="اكتب التشخيص، الأدوية الموصوفة، أو التوصيات الطبية هنا..."
-                className="flex-1 p-3 rounded-xl bg-emerald-950/80 border border-emerald-700 text-white placeholder:text-emerald-400/50 text-xs focus:outline-hidden focus:ring-2 focus:ring-amber-400"
-              />
+        {/* بطاقة الجدول الأسبوعي وساعات العمل */}
+        <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
+                <CalendarDays className="w-5 h-5" />
+              </div>
+              <div>
+                <h2 className="font-bold text-sm text-slate-900 dark:text-white">
+                  الجدول الأسبوعي وساعات العمل
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  أيام التواجد ومواعيد المناوبة المعتمدة للعيادة
+                </p>
+              </div>
+            </div>
+
+            {canManageSchedule && (
               <button
-                onClick={() => {
-                  const notes = activeNotes[currentPatient.id];
-                  if (notes) addDoctorDiagnosis(currentPatient.id, notes);
-                }}
-                className="px-4 bg-emerald-700 hover:bg-emerald-600 text-white rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1 cursor-pointer"
-                title="حفظ الملاحظة فوراً"
+                type="button"
+                onClick={openScheduleEditor}
+                className="px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-xs font-bold transition-colors cursor-pointer"
               >
-                <Send className="w-3.5 h-3.5" />
-                <span>حفظ التقرير</span>
+                تعديل الجدول
               </button>
+            )}
+          </div>
+
+          <div className="space-y-3 text-xs">
+            <div>
+              <div className="text-slate-500 dark:text-slate-400 font-semibold mb-1.5">
+                أيام العمل الأسبوعية:
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {(currentDoctor.scheduleDays && currentDoctor.scheduleDays.length > 0) ? (
+                  currentDoctor.scheduleDays.map(day => (
+                    <span
+                      key={day}
+                      className="px-2.5 py-1 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold"
+                    >
+                      {day}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-slate-400">لم يتم تحديد أيام عمل</span>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2 border-t border-slate-100 dark:border-slate-700/60 flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-slate-600 dark:text-slate-300 font-semibold">
+                <Clock className="w-4 h-4 text-emerald-600" />
+                <span>ساعات المناوبة:</span>
+              </div>
+              <span className="font-bold text-slate-900 dark:text-white">
+                {currentDoctor.scheduleHours || currentShiftDisplay.formattedDisplay}
+              </span>
             </div>
           </div>
-        )}
-      </div>
-
-      {/* قائمة طابور المرضى المؤكدين لعيادة الطبيب اليوم */}
-      <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs overflow-hidden">
-        <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="font-bold text-sm text-slate-900 dark:text-white">
-            قائمة مرضى العيادة اليوم ({filteredPatients.length})
-          </div>
-          <div className="relative max-w-xs w-full">
-            <input
-              type="text"
-              value={patientSearch}
-              onChange={(e) => setPatientSearch(e.target.value)}
-              placeholder="بحث في أسماء أو تذاكر المرضى..."
-              className="w-full pl-3 pr-8 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
-            />
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute right-2.5 top-2.5" />
-          </div>
         </div>
-
-        {filteredPatients.length === 0 ? (
-          <div className="text-center py-10 text-slate-400 text-xs">
-            لا توجد حجوزات مؤكدة ومسددة في عيادتك اليوم حتى الآن
-          </div>
-        ) : (
-          <div className="divide-y divide-slate-100 dark:divide-slate-800 text-xs">
-            {filteredPatients.map(b => (
-              <div
-                key={b.id}
-                className={`p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors ${
-                  b.status === 'in-progress' ? 'bg-blue-50/60 dark:bg-blue-950/30' : 'hover:bg-slate-50/60 dark:hover:bg-slate-750'
-                }`}
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-bold bg-slate-100 dark:bg-slate-700 px-2 py-0.5 rounded">
-                      {b.ticketNumber}
-                    </span>
-                    <h4 className="font-bold text-slate-900 dark:text-white text-sm">{b.patientName}</h4>
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      b.status === 'completed'
-                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
-                        : b.status === 'in-progress'
-                        ? 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300'
-                        : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
-                    }`}>
-                      {b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : 'في الانتظار'}
-                    </span>
-                  </div>
-                  <div className="text-slate-500 flex gap-4">
-                    <span>دور رقم: #{b.queuePosition}</span>
-                    <span>الموعد: {b.timeSlot}</span>
-                    <span>الهاتف: {maskPhoneNumber(b.patientPhone)}</span>
-                  </div>
-                  {b.doctorDiagnosis && (
-                    <div className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-1 bg-emerald-50 dark:bg-emerald-950/50 p-2 rounded-lg">
-                      <strong>التشخيص المسجل:</strong> {b.doctorDiagnosis}
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex items-center gap-2 self-end sm:self-center">
-                  {b.status === 'waiting' && (
-                    <button
-                      onClick={() => updateBookingStatus(b.id, 'in-progress')}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold text-xs cursor-pointer"
-                    >
-                      إدخال الآن
-                    </button>
-                  )}
-                  {b.status === 'in-progress' && (
-                    <button
-                      onClick={() => handleFinishConsultation(b.id)}
-                      className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs cursor-pointer"
-                    >
-                      إنهاء الكشف
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
 
       {/* نافذة تحديد سبب عدم الحضور / الغياب (إلزامية: عذر طارئ أو ارتباط بعمليات) */}

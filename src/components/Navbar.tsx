@@ -1,233 +1,228 @@
-import React, { useState, useEffect } from 'react';
-import { motion } from 'motion/react';
+import React from 'react';
 import { 
-  Moon, 
-  Sun, 
-  Search, 
-  LogOut, 
-  UserCheck, 
+  Hospital, 
   CalendarPlus, 
-  LayoutDashboard, 
+  UserCheck, 
   Stethoscope, 
   Receipt, 
-  Download,
-  Hospital
+  Settings, 
+  LogIn, 
+  LogOut, 
+  Sun, 
+  Moon,
+  FileSearch
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { AppView } from '../types';
 
 export const Navbar: React.FC = () => {
   const { 
     theme, 
     toggleTheme, 
     currentUser, 
-    logout, 
+    activeView, 
     navigate, 
-    activeView,
-    setPatientHistoryModalOpen 
+    logout,
+    setPatientHistoryModalOpen
   } = useApp();
 
-  const [installPrompt, setInstallPrompt] = useState<any>(null);
-
-  useEffect(() => {
-    const handleBeforeInstall = (e: Event) => {
-      e.preventDefault();
-      setInstallPrompt(e);
-    };
-    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
-  }, []);
-
-  const handleInstallClick = async () => {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    const { outcome } = await installPrompt.userChoice;
-    if (outcome === 'accepted') {
-      setInstallPrompt(null);
+  // عناصر التنقل: للزوار لا يتم تكرار أزرار (الرئيسية / حجز موعد كشف) لأنها موجودة بالفعل في الشعار وبطل الصفحة الرئيسية
+  // وللموظفين يظهر لكل موظف تبويب القسم الخاص به فقط مع الرئيسية
+  const getNavItems = (): { id: AppView; label: string; icon: React.ReactNode }[] => {
+    if (!currentUser) {
+      return [];
     }
+
+    if (currentUser.role === 'doctor') {
+      return [
+        { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
+        { id: 'doctor', label: 'بوابة الطبيب', icon: <Stethoscope className="w-4 h-4" /> }
+      ];
+    }
+
+    if (currentUser.role === 'reception') {
+      return [
+        { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
+        { id: 'reception', label: 'مكتب الاستقبال', icon: <UserCheck className="w-4 h-4" /> }
+      ];
+    }
+
+    if (currentUser.role === 'cashier') {
+      return [
+        { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
+        { id: 'cashier', label: 'الخزينة والتحصيل', icon: <Receipt className="w-4 h-4" /> }
+      ];
+    }
+
+    // مدير النظام (admin)
+    return [
+      { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
+      { id: 'admin', label: 'الإدارة والتقارير', icon: <Settings className="w-4 h-4" /> },
+      { id: 'reception', label: 'مكتب الاستقبال', icon: <UserCheck className="w-4 h-4" /> },
+      { id: 'cashier', label: 'الخزينة والتحصيل', icon: <Receipt className="w-4 h-4" /> },
+      { id: 'doctor', label: 'بوابة الطبيب', icon: <Stethoscope className="w-4 h-4" /> }
+    ];
   };
 
-  const getRoleBadge = () => {
-    if (!currentUser) return null;
-    switch (currentUser.role) {
+  const navItems = getNavItems();
+
+  const getRoleBadge = (role: string) => {
+    switch (role) {
       case 'admin':
-        return { label: 'مدير المنظومة', color: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300' };
+        return { text: 'مدير النظام', classes: 'bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-amber-400/20 dark:text-amber-300 dark:border-amber-400/40' };
       case 'doctor':
-        return { label: 'طبيب معالج', color: 'bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300' };
+        return { text: 'طبيب استشاري', classes: 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40' };
       case 'reception':
-        return { label: 'مسؤول استقبال', color: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300' };
+        return { text: 'مسؤول استقبال', classes: 'bg-slate-100 text-slate-800 border-slate-200 dark:bg-white/10 dark:text-slate-200 dark:border-white/20' };
       case 'cashier':
-        return { label: 'أمين الخزينة', color: 'bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300' };
+        return { text: 'مسؤول خزينة', classes: 'bg-amber-50 text-amber-900 border-amber-200 dark:bg-amber-500/20 dark:text-amber-300 dark:border-amber-500/40' };
+      default:
+        return { text: 'موظف', classes: 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-white/10 dark:text-slate-300 dark:border-white/20' };
     }
   };
-
-  const roleInfo = getRoleBadge();
 
   return (
-    <header className="sticky top-0 z-40 w-full border-b border-slate-200 dark:border-slate-800 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md transition-colors duration-200">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-18 flex items-center justify-between gap-4">
-        
-        {/* الشعار واسم المؤسسة */}
-        <div 
-          onClick={() => navigate('landing')}
-          className="flex items-center gap-2.5 sm:gap-3 cursor-pointer group select-none min-w-0"
-        >
-          <motion.div 
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl bg-gradient-to-br from-emerald-800 to-emerald-950 dark:from-emerald-700 dark:to-emerald-900 flex items-center justify-center text-amber-400 shadow-md border border-emerald-700/40 relative overflow-hidden shrink-0"
+    <header className="sticky top-0 z-40 bg-white/95 dark:bg-[#050F0C]/95 backdrop-blur-xl border-b border-slate-200/80 dark:border-white/10 shadow-2xs transition-colors duration-300 no-print">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex items-center justify-between h-16 sm:h-[72px] gap-4">
+          
+          {/* الهوية البصرية للمركز الطبي */}
+          <div 
+            onClick={() => navigate('landing')}
+            className="flex items-center gap-3.5 cursor-pointer group shrink-0"
           >
-            <div className="absolute inset-0 bg-radial from-amber-400/20 to-transparent opacity-50" />
-            <Hospital className="w-5 h-5 sm:w-6 sm:h-6 text-amber-300 relative z-10" />
-          </motion.div>
-          <div className="min-w-0">
-            <div className="font-bold text-sm sm:text-lg leading-tight text-slate-900 dark:text-white flex items-center gap-1.5 sm:gap-2">
-              <span className="truncate">عيادات الجمعية الشرعية</span>
-              <span className="hidden md:inline text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 shrink-0">
-                رعاية طبية خيرية
-              </span>
+            <div className="w-11 h-11 rounded-xl bg-emerald-900 dark:bg-gradient-to-br dark:from-emerald-900 dark:via-emerald-950 dark:to-slate-950 flex items-center justify-center text-amber-300 dark:text-amber-400 shadow-xs border border-emerald-800/60 group-hover:border-amber-400/60 transition-all">
+              <Hospital className="w-5 h-5" />
             </div>
-            <div className="hidden sm:block text-[11px] sm:text-xs text-slate-700 dark:text-slate-300 font-medium truncate">
-              المنظومة الرقمية لحجوزات وإدارة أدوار العيادات
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base sm:text-lg font-extrabold text-slate-900 dark:text-white tracking-tight group-hover:text-emerald-800 dark:group-hover:text-amber-300 transition-colors">
+                  عيادات الجمعية الشرعية
+                </h1>
+                <span className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 dark:bg-white/10 text-emerald-800 dark:text-amber-300 border border-emerald-200/70 dark:border-white/15">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-emerald-400 animate-pulse" />
+                  <span>العيادات التخصصية</span>
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                منظومة الحجز الإلكتروني وإدارة العيادات
+              </p>
             </div>
           </div>
-        </div>
 
-        {/* الروابط وأزرار التحكم */}
-        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
-          
-          {/* زر تثبيت تطبيق PWA إذا كان متاحاً في المتصفح */}
-          {installPrompt && (
-            <motion.button
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={handleInstallClick}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-900 dark:text-amber-100 bg-amber-100 dark:bg-amber-950 border border-amber-300 dark:border-amber-700 rounded-lg hover:bg-amber-200 dark:hover:bg-amber-900 transition-all shadow-xs"
-            >
-              <Download className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
-              <span>تثبيت التطبيق</span>
-            </motion.button>
+          {/* شريط التنقل الرئيسي (يظهر للموظفين المسجلين للتنقل بين بواباتهم دون تكرار للزوار) */}
+          {navItems.length > 0 && (
+            <nav className="hidden md:flex items-center gap-1.5 bg-slate-100/90 dark:bg-white/[0.06] p-1.5 rounded-2xl border border-slate-200/70 dark:border-white/10">
+              {navItems.map((item) => {
+                const isActive = activeView === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => navigate(item.id)}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-extrabold transition-all duration-150 cursor-pointer ${
+                      isActive
+                        ? 'bg-emerald-900 text-white dark:bg-amber-400 dark:text-slate-950 shadow-xs'
+                        : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-white/80 dark:hover:bg-white/10'
+                    }`}
+                  >
+                    <span className={isActive ? 'text-amber-300 dark:text-slate-950' : 'text-emerald-800 dark:text-amber-400'}>
+                      {item.icon}
+                    </span>
+                    <span>{item.label}</span>
+                  </button>
+                );
+              })}
+            </nav>
           )}
 
-          {/* زر تبديل المظهر داكن / فاتح لراحة العين أثناء المناوبات */}
-          <motion.button
-            whileTap={{ rotate: 180, scale: 0.85 }}
-            onClick={toggleTheme}
-            className="w-10 h-10 flex items-center justify-center rounded-xl border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-amber-400 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-750 transition-all cursor-pointer shadow-2xs"
-            aria-label={theme === 'dark' ? 'التبديل إلى الوضع النهاري الفاتح' : 'التبديل إلى الوضع الليلي الداكن'}
-            title={theme === 'dark' ? 'تفعيل الوضع النهاري (فاتح)' : 'تفعيل الوضع الليلي للمناوبات (داكن)'}
-          >
-            {theme === 'dark' ? (
-              <Sun className="w-5 h-5 text-amber-400 drop-shadow-xs" />
-            ) : (
-              <Moon className="w-5 h-5 text-slate-700" />
-            )}
-          </motion.button>
-
-          {/* إذا كان المستخدم مسجل دخول */}
-          {currentUser ? (
-            <div className="flex items-center gap-2">
-              {/* شارة المستخدم والدور */}
-              <div 
-                onClick={() => {
-                  if (currentUser.role === 'admin') navigate('admin');
-                  if (currentUser.role === 'doctor') navigate('doctor');
-                  if (currentUser.role === 'reception') navigate('reception');
-                  if (currentUser.role === 'cashier') navigate('cashier');
-                }}
-                className="cursor-pointer flex items-center gap-2 pl-2 pr-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 hover:border-emerald-500/50 transition-all"
-              >
-                <div className="w-7 h-7 rounded-md bg-emerald-700 text-white flex items-center justify-center text-xs font-bold">
-                  {currentUser.displayName.charAt(0)}
-                </div>
-                <div className="text-right">
-                  <div className="text-xs font-bold text-slate-900 dark:text-white leading-none">
-                    {currentUser.displayName.split(' ')[0]}
-                  </div>
-                  {roleInfo && (
-                    <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
-                      {roleInfo.label}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* أزرار الانتقال السريع للموظف */}
-              {currentUser.role === 'admin' && activeView !== 'admin' && (
-                <button
-                  onClick={() => navigate('admin')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-emerald-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all"
-                  title="لوحة الإدارة"
-                >
-                  <LayoutDashboard className="w-5 h-5" />
-                </button>
-              )}
-
-              {currentUser.role === 'doctor' && activeView !== 'doctor' && (
-                <button
-                  onClick={() => navigate('doctor')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-emerald-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all"
-                  title="شاشة الطبيب"
-                >
-                  <Stethoscope className="w-5 h-5" />
-                </button>
-              )}
-
-              {currentUser.role === 'reception' && activeView !== 'reception' && (
-                <button
-                  onClick={() => navigate('reception')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-emerald-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all"
-                  title="شاشة الاستقبال"
-                >
-                  <UserCheck className="w-5 h-5" />
-                </button>
-              )}
-
-              {currentUser.role === 'cashier' && activeView !== 'cashier' && (
-                <button
-                  onClick={() => navigate('cashier')}
-                  className="p-2 text-slate-600 dark:text-slate-300 hover:text-emerald-700 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all"
-                  title="الخزينة والصندوق"
-                >
-                  <Receipt className="w-5 h-5" />
-                </button>
-              )}
-
-              {/* زر تسجيل الخروج */}
+          {/* أدوات التحكم وحساب الموظف */}
+          <div className="flex items-center gap-2">
+            
+            {currentUser && currentUser.role === 'admin' && (
               <button
-                onClick={logout}
-                className="p-2 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 rounded-lg transition-colors"
-                title="تسجيل الخروج"
+                onClick={() => setPatientHistoryModalOpen(true)}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-slate-100 dark:bg-white/10 text-slate-800 dark:text-white border border-slate-200 dark:border-white/15 hover:bg-slate-200/70 dark:hover:bg-white/15 transition-colors cursor-pointer"
+                title="البحث في سجل وتذاكر المريض برقم الهاتف"
               >
-                <LogOut className="w-5 h-5" />
+                <FileSearch className="w-4 h-4 text-emerald-800 dark:text-amber-400" />
+                <span className="hidden lg:inline">سجل المريض</span>
               </button>
-            </div>
-          ) : (
-            /* إذا كان زائراً أو مريضاً */
-            <div className="flex items-center gap-1.5 sm:gap-2">
+            )}
+
+            {/* زر التبديل بين الوضع النهاري والليلي */}
+            <button
+              onClick={toggleTheme}
+              aria-label="تبديل المظهر"
+              title={theme === 'dark' ? 'تفعيل الوضع النهاري الكلاسيكي' : 'تفعيل الوضع الليلي الفخم'}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 dark:border-white/15 bg-slate-50 dark:bg-white/[0.06] text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/10 transition-colors cursor-pointer shrink-0 text-xs font-bold"
+            >
+              {theme === 'dark' ? (
+                <>
+                  <Sun className="w-4 h-4 text-amber-400" />
+                  <span className="hidden sm:inline">نهاري</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="w-4 h-4 text-emerald-800" />
+                  <span className="hidden sm:inline">ليلي</span>
+                </>
+              )}
+            </button>
+
+            {currentUser ? (
+              <div className="flex items-center gap-2 pl-1 border-r border-slate-200 dark:border-white/15 pr-2.5">
+                <div className="hidden sm:flex flex-col items-end">
+                  <span className="text-xs font-bold text-slate-900 dark:text-white leading-tight">
+                    {currentUser.displayName}
+                  </span>
+                  <span className={`text-[10px] px-2 py-0.5 rounded-md border font-semibold mt-0.5 ${getRoleBadge(currentUser.role).classes}`}>
+                    {getRoleBadge(currentUser.role).text}
+                  </span>
+                </div>
+                <button
+                  onClick={logout}
+                  title="تسجيل الخروج"
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 dark:bg-rose-500/15 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-500/30 hover:bg-rose-100 dark:hover:bg-rose-500/25 text-xs font-bold transition-colors cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span className="hidden xl:inline">خروج</span>
+                </button>
+              </div>
+            ) : (
               <button
                 onClick={() => navigate('login')}
-                className="px-2.5 sm:px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 hover:text-emerald-700 dark:hover:text-emerald-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition-all whitespace-nowrap"
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-emerald-900 hover:bg-emerald-800 dark:bg-white/10 dark:hover:bg-white/15 text-white text-xs font-bold border border-emerald-900 dark:border-white/15 transition-colors cursor-pointer shrink-0"
               >
-                <span className="hidden sm:inline">دخول الكادر الطبي</span>
-                <span className="sm:hidden">دخول</span>
+                <LogIn className="w-3.5 h-3.5 text-amber-300 dark:text-amber-400" />
+                <span>دخول الموظفين</span>
               </button>
-
-              <motion.button
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                onClick={() => navigate('booking')}
-                className="flex items-center gap-1.5 px-3 sm:px-4 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg shadow-sm transition-all whitespace-nowrap"
-              >
-                <CalendarPlus className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                <span>حجز كشف</span>
-              </motion.button>
-            </div>
-          )}
+            )}
+          </div>
 
         </div>
 
+        {/* شريط التنقل السفلي للشاشات الصغيرة (يظهر للموظفين فقط دون تكرار للزوار) */}
+        {navItems.length > 0 && (
+          <div className="flex md:hidden items-center gap-1.5 overflow-x-auto py-2.5 border-t border-slate-100 dark:border-white/10 no-scrollbar">
+            {navItems.map((item) => {
+              const isActive = activeView === item.id;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => navigate(item.id)}
+                  className={`flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl text-xs font-extrabold whitespace-nowrap transition-colors shrink-0 cursor-pointer ${
+                    isActive
+                      ? 'bg-emerald-900 text-white dark:bg-amber-400 dark:text-slate-950'
+                      : 'text-slate-600 dark:text-slate-300 bg-slate-100/80 dark:bg-white/[0.06] border border-slate-200/60 dark:border-white/10'
+                  }`}
+                >
+                  <span className={isActive ? 'text-amber-300 dark:text-slate-950' : 'text-emerald-800 dark:text-amber-400'}>{item.icon}</span>
+                  <span>{item.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </header>
   );

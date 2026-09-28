@@ -29,6 +29,7 @@ import {
   formatArabicFullDate,
   getArabicDayName
 } from '../services/scheduleService';
+import heroHospitalImg from '../assets/images/hospital_doctor_hero_1790597353764.jpg';
 
 export const BookingView: React.FC = () => {
   const { createBooking, navigate, bookings, getActiveClinicsForBooking, checkClinicAvailabilityStatus } = useApp();
@@ -38,7 +39,16 @@ export const BookingView: React.FC = () => {
   // الاعتماد الصارم على التاريخ الفعلي الحالي للنظام وليس على تاريخ يدوي
   const actualTodayStr = getLocalDateStr(new Date());
 
-  const [selectedClinicId, setSelectedClinicId] = useState<string>(activeClinicsWithDoctors[0]?.clinic.id || '');
+  const [selectedClinicId, setSelectedClinicId] = useState<string>(() => {
+    try {
+      const preselected = sessionStorage.getItem('preselected_clinic_id');
+      if (preselected && activeClinicsWithDoctors.some(item => item.clinic.id === preselected)) {
+        sessionStorage.removeItem('preselected_clinic_id');
+        return preselected;
+      }
+    } catch {}
+    return activeClinicsWithDoctors[0]?.clinic.id || '';
+  });
   const [patientName, setPatientName] = useState('');
   const [patientPhone, setPatientPhone] = useState('');
   const [timeSlot, setTimeSlot] = useState('04:30 عصراً');
@@ -67,14 +77,14 @@ export const BookingView: React.FC = () => {
 
   const getClinicIcon = (iconName: string) => {
     switch (iconName) {
-      case 'HeartPulse': return <HeartPulse className="w-5 h-5 text-rose-500" />;
-      case 'Baby': return <Baby className="w-5 h-5 text-amber-500" />;
-      case 'Eye': return <Eye className="w-5 h-5 text-emerald-500" />;
-      case 'Bone': return <Bone className="w-5 h-5 text-indigo-500" />;
-      case 'Smile': return <Smile className="w-5 h-5 text-teal-500" />;
-      case 'Ear': return <Ear className="w-5 h-5 text-blue-500" />;
-      case 'Sparkles': return <Sparkles className="w-5 h-5 text-fuchsia-500" />;
-      default: return <Activity className="w-5 h-5 text-emerald-600" />;
+      case 'HeartPulse': return <HeartPulse className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Baby': return <Baby className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Eye': return <Eye className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Bone': return <Bone className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Smile': return <Smile className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Ear': return <Ear className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      case 'Sparkles': return <Sparkles className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
+      default: return <Activity className="w-5 h-5 text-emerald-800 dark:text-emerald-400" />;
     }
   };
 
@@ -145,28 +155,37 @@ export const BookingView: React.FC = () => {
   return (
     <div className="max-w-4xl mx-auto space-y-8 pb-16">
       
-      {/* رأس الصفحة وزر العودة */}
-      <div className="flex items-center justify-between">
-        <button
-          onClick={() => navigate('landing')}
-          className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-600 dark:text-slate-300 hover:text-emerald-700 dark:hover:text-emerald-400 bg-white dark:bg-slate-800 px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-800 transition-colors shadow-xs"
-        >
-          <ArrowRight className="w-4 h-4" />
-          <span>العودة للرئيسية</span>
-        </button>
+      {/* ترويسة الحجز الرسمية الراقية (نهاري كلاسيكي هادئ / ليلي فخم) */}
+      <div className="relative rounded-2xl overflow-hidden bg-white dark:bg-slate-950 text-slate-900 dark:text-white p-6 sm:p-8 shadow-sm dark:shadow-lg border border-slate-200/90 dark:border-slate-800 transition-colors duration-300">
+        <img
+          src={heroHospitalImg}
+          alt=""
+          referrerPolicy="no-referrer"
+          className="absolute inset-0 w-full h-full object-cover opacity-10 dark:opacity-20"
+        />
+        <div className="absolute inset-0 bg-gradient-to-l from-white/95 via-[#F5FAF7]/95 to-emerald-50/85 dark:from-slate-950/95 dark:via-emerald-950/90 dark:to-slate-950/85" />
 
-        <div className="text-left text-xs font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-100 dark:bg-emerald-950 px-3 py-1 rounded-full border border-emerald-300 dark:border-emerald-800">
-          حجز فوري مباشر بدون حساب
+        <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-50 dark:bg-emerald-900/60 border border-emerald-200 dark:border-emerald-700/50 text-emerald-900 dark:text-amber-300 text-xs font-bold">
+              <span>حجز إلكتروني فوري ومباشر</span>
+            </div>
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+              حجز موعد كشف طبي بالعيادات التخصصية
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300 max-w-xl">
+              اختر العيادة التخصصية والطبيب المعالج، ثم سجل بيانات المراجع لإصدار تذكرة الكشف الإلكترونية المزودة برمز التحقق (QR Code)
+            </p>
+          </div>
+
+          <button
+            onClick={() => navigate('landing')}
+            className="self-start sm:self-center inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 dark:text-white bg-white dark:bg-white/10 hover:bg-slate-100 dark:hover:bg-white/15 backdrop-blur-md px-4 py-2.5 rounded-xl border border-slate-200 dark:border-white/15 transition-colors cursor-pointer shrink-0 shadow-2xs"
+          >
+            <ArrowRight className="w-4 h-4" />
+            <span>العودة للرئيسية</span>
+          </button>
         </div>
-      </div>
-
-      <div className="text-center space-y-2">
-        <h1 className="text-2xl sm:text-3xl font-bold text-slate-900 dark:text-white">
-          حجز تذكرة كشف طبي بالعيادات
-        </h1>
-        <p className="text-sm text-slate-600 dark:text-slate-300 max-w-lg mx-auto">
-          اختر العيادة التخصصية والطبيب المعالج، ثم أدخل بيانات المريض للحصول على تذكرتك الفورية
-        </p>
       </div>
 
       {errors.form && (
