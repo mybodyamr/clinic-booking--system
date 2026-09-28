@@ -7,7 +7,7 @@ export const ToastContainer: React.FC = () => {
   const { toasts, removeToast } = useApp();
 
   return (
-    <div className="fixed bottom-5 left-5 z-50 flex flex-col gap-2.5 max-w-sm w-full pointer-events-none">
+    <div className="fixed bottom-4 inset-x-3 sm:inset-x-auto sm:bottom-5 sm:left-5 z-50 flex flex-col gap-2.5 sm:max-w-sm sm:w-full pointer-events-none pb-safe">
       <AnimatePresence>
         {toasts.map((toast) => {
           const isSuccess = toast.type === 'success';

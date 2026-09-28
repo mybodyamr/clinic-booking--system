@@ -519,7 +519,7 @@ export const ReceptionView: React.FC = () => {
                     </div>
 
                     {/* أزرار الإجراءات السريعة بالاستقبال */}
-                    <div className="flex items-center gap-1.5 self-end md:self-center shrink-0">
+                    <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto pt-2.5 md:pt-0 border-t md:border-t-0 border-slate-100 dark:border-slate-800/80 md:self-center shrink-0">
                       {b.status === 'waiting' && (
                         <>
                           <button

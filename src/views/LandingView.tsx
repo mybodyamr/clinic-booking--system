@@ -88,40 +88,40 @@ export const LandingView: React.FC = () => {
           <div className="absolute inset-0 bg-gradient-to-l from-white/95 via-[#F5FAF7]/95 to-emerald-50/85 dark:from-slate-950/95 dark:via-emerald-950/90 dark:to-slate-950/80" />
         </div>
 
-        <div className="relative z-10 p-7 sm:p-12 lg:p-14 grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
+        <div className="relative z-10 p-5 sm:p-10 lg:p-14 grid grid-cols-1 lg:grid-cols-12 gap-7 sm:gap-10 items-center">
           
           {/* النص الترحيبي وزر الحجز الرئيسي فقط (بدون تكرار اسم العيادات الموجود في الهيدر العلوي) */}
-          <div className="lg:col-span-7 space-y-5 text-right">
-            <div className="space-y-3">
-              <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold leading-[1.25] tracking-tight text-slate-900 dark:text-white">
+          <div className="lg:col-span-7 space-y-4 sm:space-y-5 text-right">
+            <div className="space-y-2.5 sm:space-y-3">
+              <h1 className="text-2xl sm:text-4xl lg:text-5xl font-extrabold leading-[1.3] sm:leading-[1.25] tracking-tight text-slate-900 dark:text-white">
                 رعاية طبية تخصصية راقية
                 <span className="block text-emerald-800 dark:text-amber-400 mt-1.5">
                   وحجز إلكتروني فوري بكل سهولة
                 </span>
               </h1>
-              <p className="text-slate-600 dark:text-slate-300 text-sm sm:text-base leading-relaxed max-w-xl">
+              <p className="text-slate-600 dark:text-slate-300 text-xs sm:text-base leading-relaxed max-w-xl">
                 اختر العيادة التخصصية المناسبة واحصل فوراً على تذكرة الكشف الإلكترونية المزودة برمز التحقق <strong className="text-slate-900 dark:text-white">(QR Code)</strong> دون الحاجة للانتظار.
               </p>
             </div>
 
-            <div className="flex flex-wrap items-center gap-3.5 pt-2">
+            <div className="flex flex-wrap items-center gap-3.5 pt-1 sm:pt-2">
               {currentUser?.role === 'doctor' ? (
                 <button
                   onClick={() => navigate('doctor')}
-                  className="px-8 py-4 rounded-2xl bg-emerald-900 hover:bg-emerald-800 dark:bg-amber-400 dark:hover:bg-amber-300 text-white dark:text-slate-950 font-extrabold text-sm sm:text-base flex items-center gap-2.5 shadow-md dark:shadow-lg dark:shadow-amber-500/20 transition-all cursor-pointer"
+                  className="w-full sm:w-auto justify-center min-h-[48px] px-7 sm:px-8 py-3.5 sm:py-4 rounded-2xl bg-emerald-900 hover:bg-emerald-800 dark:bg-amber-400 dark:hover:bg-amber-300 text-white dark:text-slate-950 font-extrabold text-sm sm:text-base flex items-center gap-2.5 shadow-md dark:shadow-lg dark:shadow-amber-500/20 transition-all cursor-pointer"
                 >
-                  <Stethoscope className="w-5 h-5 text-amber-300 dark:text-slate-950" />
+                  <Stethoscope className="w-5 h-5 text-amber-300 dark:text-slate-950 shrink-0" />
                   <span>الانتقال إلى شاشة الطبيب</span>
-                  <ArrowLeft className="w-4 h-4 mr-1" />
+                  <ArrowLeft className="w-4 h-4 mr-1 shrink-0" />
                 </button>
               ) : (
                 <button
                   onClick={() => navigate('booking')}
-                  className="px-8 py-4 rounded-2xl bg-emerald-900 hover:bg-emerald-800 dark:bg-amber-400 dark:hover:bg-amber-300 text-white dark:text-slate-950 font-extrabold text-sm sm:text-base flex items-center gap-2.5 shadow-md dark:shadow-lg dark:shadow-amber-500/20 transition-all cursor-pointer"
+                  className="w-full sm:w-auto justify-center min-h-[48px] px-7 sm:px-8 py-3.5 sm:py-4 rounded-2xl bg-emerald-900 hover:bg-emerald-800 dark:bg-amber-400 dark:hover:bg-amber-300 text-white dark:text-slate-950 font-extrabold text-sm sm:text-base flex items-center gap-2.5 shadow-md dark:shadow-lg dark:shadow-amber-500/20 transition-all cursor-pointer"
                 >
-                  <CalendarPlus className="w-5 h-5 text-amber-300 dark:text-slate-950" />
+                  <CalendarPlus className="w-5 h-5 text-amber-300 dark:text-slate-950 shrink-0" />
                   <span>حجز موعد كشف الآن</span>
-                  <ArrowLeft className="w-4 h-4 mr-1" />
+                  <ArrowLeft className="w-4 h-4 mr-1 shrink-0" />
                 </button>
               )}
             </div>
@@ -174,14 +174,14 @@ export const LandingView: React.FC = () => {
       </section>
 
       {/* 2. بطاقات العيادات التخصصية (كلاسيكي هادئ في النهاري وفخم داكن في الليلي) */}
-      <section className="relative rounded-3xl overflow-hidden bg-white dark:bg-gradient-to-b dark:from-slate-950 dark:via-[#071C15] dark:to-slate-950 border border-slate-200/90 dark:border-white/10 p-6 sm:p-10 shadow-sm dark:shadow-2xl space-y-8 transition-colors duration-300">
+      <section className="relative rounded-3xl overflow-hidden bg-white dark:bg-gradient-to-b dark:from-slate-950 dark:via-[#071C15] dark:to-slate-950 border border-slate-200/90 dark:border-white/10 p-4 sm:p-8 lg:p-10 shadow-sm dark:shadow-2xl space-y-6 sm:space-y-8 transition-colors duration-300">
         
         <div className="space-y-2 text-right">
           <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-50 dark:bg-white/10 border border-emerald-200/70 dark:border-white/15 text-emerald-900 dark:text-amber-300 text-xs font-bold">
             <Stethoscope className="w-3.5 h-3.5 text-emerald-800 dark:text-amber-400" />
             <span>الأقسام الطبية التخصصية</span>
           </div>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
+          <h2 className="text-xl sm:text-3xl font-extrabold text-slate-900 dark:text-white tracking-tight">
             اختر العيادة التخصصية لحجز موعدك
           </h2>
           <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-300">
@@ -190,7 +190,7 @@ export const LandingView: React.FC = () => {
         </div>
 
         {/* شبكة بطاقات العيادات */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 sm:gap-6">
           {clinics.map((clinic) => {
             const activeEntry = activeClinicsWithDoctors.find(item => item.clinic.id === clinic.id);
             const doctor = activeEntry?.assignedDoctor || doctors.find(d => d.clinicId === clinic.id);

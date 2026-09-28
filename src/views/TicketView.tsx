@@ -208,24 +208,24 @@ export const TicketView: React.FC = () => {
           />
           <div className="absolute inset-0 bg-gradient-to-l from-slate-950/95 via-emerald-950/90 to-slate-950/90" />
 
-          <div className="relative z-10 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-xl bg-emerald-900/90 border border-emerald-700/70 flex items-center justify-center text-amber-400 shrink-0">
+          <div className="relative z-10 flex flex-wrap sm:flex-nowrap items-center justify-between gap-3 sm:gap-4">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-emerald-900/90 border border-emerald-700/70 flex items-center justify-center text-amber-400 shrink-0">
                 <Hospital className="w-5 h-5" />
               </div>
-              <div>
-                <h1 className="text-base sm:text-lg font-extrabold tracking-tight text-white">
+              <div className="min-w-0">
+                <h1 className="text-sm sm:text-lg font-extrabold tracking-tight text-white truncate">
                   عيادات الجمعية الشرعية التخصصية
                 </h1>
-                <p className="text-[11px] text-slate-300">
+                <p className="text-[10px] sm:text-[11px] text-slate-300 truncate">
                   بطاقة موعد كشف طبي إلكترونية • صالحة ليوم الحجز
                 </p>
               </div>
             </div>
 
-            <div className="text-left bg-white/10 backdrop-blur-md border border-amber-400/40 px-4 py-2 rounded-xl shrink-0">
+            <div className="text-left bg-white/10 backdrop-blur-md border border-amber-400/40 px-3.5 py-1.5 sm:px-4 sm:py-2 rounded-xl shrink-0">
               <div className="text-[10px] text-amber-300 font-bold">رقم التذكرة</div>
-              <div className="font-mono font-extrabold text-xl text-white tracking-wider">
+              <div className="font-mono font-extrabold text-lg sm:text-xl text-white tracking-wider">
                 {ticket.ticketNumber}
               </div>
             </div>
@@ -382,9 +382,9 @@ export const TicketView: React.FC = () => {
         </div>
 
         {/* شريط التذييل السفلي للوثيقة */}
-        <div className="px-6 py-3 bg-slate-100 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-600 font-medium">
+        <div className="px-4 sm:px-6 py-3 bg-slate-100 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-1 text-[10px] sm:text-[11px] text-slate-600 font-medium text-center sm:text-right">
           <span>مجمع عيادات الجمعية الشرعية التخصصية — وثيقة حجز إلكترونية معتمدة</span>
-          <span className="font-mono">{ticket.id}</span>
+          <span className="font-mono break-all">{ticket.id}</span>
         </div>
 
       </div>

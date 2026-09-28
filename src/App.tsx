@@ -63,7 +63,7 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#F7FAF8] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
+    <div className="min-h-dvh w-full overflow-x-clip bg-[#F7FAF8] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
       
       {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
       <OfflineBanner />
@@ -71,8 +71,8 @@ const AppContent: React.FC = () => {
       {/* الشريط العلوي العام */}
       <Navbar />
 
-      {/* المحتوى الرئيسي للشاشة الحالية */}
-      <main className="flex-1 w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
+      {/* المحتوى الرئيسي للشاشة الحالية — متجاوب مع الهواتف، الأجهزة اللوحية، وشاشات الكمبيوتر العريضة */}
+      <main className="flex-1 w-full max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-7 lg:py-8">
         <AnimatePresence mode="wait">
           <motion.div
             key={currentView}
@@ -80,21 +80,22 @@ const AppContent: React.FC = () => {
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -8 }}
             transition={{ duration: 0.2, ease: 'easeOut' }}
+            className="w-full min-w-0"
           >
             {renderView()}
           </motion.div>
         </AnimatePresence>
       </main>
 
-      {/* التذييل الطبي المؤسسي الهادئ والكلاسيكي (يدعم الوضع النهاري والليلي بدون تكرار أزرار) */}
-      <footer className="no-print border-t border-slate-200/80 dark:border-white/10 bg-white dark:bg-[#040B09] py-6 text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs">
+      {/* التذييل الطبي المؤسسي الهادئ والكلاسيكي (يدعم الوضع النهاري والليلي وحواف آيفون الآمنة) */}
+      <footer className="no-print border-t border-slate-200/80 dark:border-white/10 bg-white dark:bg-[#040B09] py-5 sm:py-6 pb-safe text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
+        <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 text-center sm:text-right">
+          <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs shrink-0">
               <Hospital className="w-4 h-4" />
             </div>
             <div>
-              <div className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <div className="font-bold text-slate-900 dark:text-white flex flex-wrap items-center justify-center sm:justify-start gap-2">
                 <span>مجمع عيادات الجمعية الشرعية التخصصية</span>
                 <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 dark:bg-white/5 text-emerald-800 dark:text-amber-300 border border-emerald-200/70 dark:border-white/10">
                   <ShieldCheck className="w-3 h-3 text-emerald-700 dark:text-amber-400" />

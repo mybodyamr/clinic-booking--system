@@ -644,10 +644,10 @@ export const CashierView: React.FC = () => {
                 {filteredList.map(b => (
                   <div
                     key={b.id}
-                    className="p-4 hover:bg-slate-50/70 dark:hover:bg-slate-750 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4 text-xs"
+                    className="p-4 hover:bg-slate-50/70 dark:hover:bg-slate-750 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3.5 md:gap-4 text-xs"
                   >
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2">
+                    <div className="space-y-1.5 min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono font-bold text-sm bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 px-2.5 py-0.5 rounded-lg border border-emerald-300 dark:border-emerald-800">
                           {b.ticketNumber}
                         </span>
@@ -655,7 +655,7 @@ export const CashierView: React.FC = () => {
                         <span className="text-slate-500 font-mono text-[11px]">
                           ({maskPhoneNumber(b.patientPhone)})
                         </span>
-                        <span className="font-bold text-emerald-800 dark:text-emerald-300 mr-2">
+                        <span className="font-bold text-emerald-800 dark:text-emerald-300 sm:mr-2">
                           رسوم الكشف: {b.fee} ج.م
                         </span>
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
@@ -687,7 +687,7 @@ export const CashierView: React.FC = () => {
                     </div>
 
                     {/* أزرار الإجراءات: طرق الدفع المعتمدة + رابط واتساب المباشر */}
-                    <div className="flex flex-wrap items-center gap-2 self-end md:self-center shrink-0">
+                    <div className="flex flex-wrap items-center gap-2 w-full md:w-auto pt-2.5 md:pt-0 border-t md:border-t-0 border-slate-100 dark:border-slate-800/80 md:self-center shrink-0">
                       
                       {/* زر رسالة واتساب لتأكيد الحجز مع علامة (تم الإرسال ✓) */}
                       <a
@@ -1588,12 +1588,12 @@ export const CashierView: React.FC = () => {
       {/* نافذة تأكيد حذف حجز المريض نهائياً من الخزينة وقاعدة البيانات */}
       <AnimatePresence>
         {bookingPendingDeletion && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/75 backdrop-blur-xs">
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 12 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 12 }}
-              className="bg-white dark:bg-slate-900 rounded-3xl border border-rose-200 dark:border-rose-800/80 shadow-2xl max-w-md w-full overflow-hidden"
+              className="bg-white dark:bg-slate-900 rounded-3xl border border-rose-200 dark:border-rose-800/80 shadow-2xl max-w-md w-full max-h-[92dvh] overflow-y-auto my-auto"
             >
               <div className="bg-gradient-to-l from-rose-700 to-red-600 p-5 text-white flex items-center justify-between">
                 <div className="flex items-center gap-3">

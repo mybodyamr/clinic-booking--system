@@ -355,7 +355,7 @@ export const BookingView: React.FC = () => {
                       </button>
 
                       {/* نافذة التلميح المنبثقة عند التمرير (Tooltip Card) */}
-                      <div className="absolute z-40 bottom-full sm:bottom-auto sm:top-full mt-1.5 mb-1.5 left-0 sm:left-auto sm:right-0 w-72 p-3 bg-slate-900/95 backdrop-blur-md text-white text-[11px] rounded-xl shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all duration-200 leading-relaxed text-right border border-slate-700">
+                      <div className="absolute z-40 bottom-full sm:bottom-auto sm:top-full mt-1.5 mb-1.5 left-0 sm:left-auto sm:right-0 w-64 sm:w-72 max-w-[calc(100vw-2.5rem)] p-3 bg-slate-900/95 backdrop-blur-md text-white text-[11px] rounded-xl shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all duration-200 leading-relaxed text-right border border-slate-700">
                         <div className="font-bold text-emerald-400 mb-1 flex items-center gap-1.5">
                           <Info className="w-4 h-4 shrink-0" />
                           <span>توضيح هام للمرضى:</span>
@@ -598,13 +598,13 @@ export const BookingView: React.FC = () => {
         </div>
 
         {/* ملخص التأكيد وزر الحجز الفوري */}
-        <div className="bg-emerald-950 text-white rounded-2xl p-6 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-6 border border-emerald-800">
-          <div>
+        <div className="bg-emerald-950 text-white rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 sm:gap-6 border border-emerald-800">
+          <div className="min-w-0">
             <div className="text-xs text-emerald-300 font-semibold mb-1">ملخص الحجز المبدئي:</div>
-            <div className="font-bold text-lg text-white">
+            <div className="font-bold text-base sm:text-lg text-white break-words">
               {selectedClinic?.name} — {selectedDoctor?.name}
             </div>
-            <div className="text-xs text-emerald-200/80 mt-1 flex items-center gap-3">
+            <div className="text-xs text-emerald-200/80 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>التاريخ: {formatArabicFullDate(new Date())}</span>
               <span>•</span>
               <span>رسوم الكشف: {selectedClinic?.fee} ج.م</span>
@@ -618,7 +618,7 @@ export const BookingView: React.FC = () => {
             disabled={isSubmitting || Boolean(availabilityStatus && !availabilityStatus.allowed)}
             whileHover={!(availabilityStatus && !availabilityStatus.allowed) ? { scale: 1.02 } : {}}
             whileTap={!(availabilityStatus && !availabilityStatus.allowed) ? { scale: 0.98 } : {}}
-            className="px-8 py-3.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold text-base rounded-xl shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full sm:w-auto min-h-[48px] px-6 sm:px-8 py-3.5 bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white font-bold text-sm sm:text-base rounded-xl shadow-lg transition-all shrink-0 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-center"
           >
             <CheckCircle2 className="w-5 h-5 text-amber-300" />
             <span>
