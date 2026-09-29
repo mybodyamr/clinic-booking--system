@@ -108,34 +108,53 @@ export function mapDbStaff(row: any): StaffAccount {
   };
 }
 
-export async function ensureAdminSupabaseSession(): Promise<boolean> {
+const SAFE_ENTITY_ID_REGEX = /^[a-zA-Z0-9_.-]{2,80}$/;
+
+function isValidEntityId(id: unknown): id is string {
+  return (
+    typeof id === 'string' &&
+    SAFE_ENTITY_ID_REGEX.test(id.trim()) &&
+    !id.includes('..')
+  );
+}
+
+function getCurrentStoredSession(): UserSession | null {
+  try {
+    const raw =
+      (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('sharaya_session_v2')) ||
+      (typeof localStorage !== 'undefined' && localStorage.getItem('sharaya_session_v2'));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function ensureActiveSupabaseSession(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
-    // لا يتم تفعيل أو تحديث الجلسة إذا كان المستخدم الحالي مسجلاً بدور آخر غير admin
-    try {
-      const storedSessionRaw =
-        (typeof sessionStorage !== 'undefined' && sessionStorage.getItem('sharaya_session_v2')) ||
-        (typeof localStorage !== 'undefined' && localStorage.getItem('sharaya_session_v2'));
-      if (storedSessionRaw) {
-        const parsedSession = JSON.parse(storedSessionRaw);
-        if (parsedSession?.role && parsedSession.role !== 'admin') {
-          return false;
-        }
-      }
-    } catch {}
-
     const { data } = await supabase.auth.getSession();
     if (data?.session?.access_token) {
       return true;
     }
-
-    // محاولة تجديد الجلسة الحالية فقط إن وُجدت دون استخدام أي كلمات مرور افتراضية أو تسجيل دخول تلقائي بحساب آخر
     const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-    if (!refreshErr && refreshed?.session?.access_token) {
-      return true;
+    return Boolean(!refreshErr && refreshed?.session?.access_token);
+  } catch {
+    return false;
+  }
+}
+
+export async function ensureAdminSupabaseSession(): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  try {
+    // لا يتم تفعيل أو تحديث الجلسة الإدارية إذا كان المستخدم الحالي مسجلاً بدور آخر غير admin
+    const parsedSession = getCurrentStoredSession();
+    if (parsedSession?.role && parsedSession.role !== 'admin') {
+      return false;
     }
 
-    return false;
+    return await ensureActiveSupabaseSession();
   } catch {
     return false;
   }
@@ -225,9 +244,11 @@ export async function fetchBookingsFromDb(): Promise<Booking[] | null> {
       return null;
     }
 
-    // إذا كانت الجلسة المحلية لمدير النظام فقط، نضمن جلسة الأدمن السحابية
+    // إذا كانت الجلسة المحلية لمدير النظام فقط، نضمن جلسة الأدمن السحابية، وللموظفين الآخرين نضمن تحديث جلستهم النشطة
     if (storedRole === 'admin') {
       await ensureAdminSupabaseSession();
+    } else if (storedRole === 'reception' || storedRole === 'cashier') {
+      await ensureActiveSupabaseSession();
     }
 
     const deletedBookingIds = getDeletedBookingIds();
@@ -370,12 +391,38 @@ export async function fetchDailyScheduleFromDb(dateStr: string): Promise<DailySc
 export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
+    const token = await getAdminBearerToken();
+    if (token) {
+      try {
+        const res = await fetch('/api/admin/staff', {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload?.ok && Array.isArray(payload.staff)) {
+            return payload.staff.map(mapDbStaff);
+          }
+        }
+      } catch {
+        // fallback below
+      }
+    }
+
     const { data, error } = await supabase
       .from('staff_accounts')
       .select('*')
       .order('id', { ascending: true });
-    if (error) throw error;
-    return (data || []).map(mapDbStaff);
+
+    if (!error && data) {
+      return data.map(mapDbStaff);
+    }
+
+    const { data: safeData, error: safeErr } = await supabase
+      .from('staff_accounts')
+      .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at')
+      .order('id', { ascending: true });
+    if (safeErr) throw safeErr;
+    return (safeData || []).map(mapDbStaff);
   } catch (err) {
     console.warn('Could not fetch staff accounts from Supabase, using local data fallback:', err);
     return null;
@@ -397,10 +444,13 @@ export async function createPublicBookingRpc(params: {
   if (!isSupabaseConfigured) {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
+  if (!isValidEntityId(params.clinicId) || !isValidEntityId(params.doctorId)) {
+    return { success: false, error: 'معرف العيادة أو الطبيب غير صالح' };
+  }
   try {
     const { data, error } = await supabase.rpc('create_public_booking', {
-      p_clinic_id: params.clinicId,
-      p_doctor_id: params.doctorId,
+      p_clinic_id: params.clinicId.trim(),
+      p_doctor_id: params.doctorId.trim(),
       p_patient_name: params.patientName,
       p_patient_phone: params.patientPhone,
       p_time_slot: params.timeSlot || '10:00 ص - 10:30 ص',
@@ -424,9 +474,13 @@ export async function confirmPaymentRpc(
   if (!isSupabaseConfigured) {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
+  if (!isValidEntityId(bookingId)) {
+    return { success: false, error: 'معرف الحجز غير صالح' };
+  }
   try {
+    await ensureActiveSupabaseSession();
     const { data, error } = await supabase.rpc('confirm_payment', {
-      p_booking_id: bookingId,
+      p_booking_id: bookingId.trim(),
       p_payment_type: paymentType
     });
 
@@ -445,6 +499,7 @@ export async function fetchPatientHistoryByPhoneRpc(
 ): Promise<Booking[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
+    await ensureActiveSupabaseSession();
     const { data, error } = await supabase.rpc('get_patient_history_by_phone', {
       p_patient_phone: patientPhone
     });
@@ -462,11 +517,13 @@ export async function fetchPatientTicketSecureRpc(
   patientPhone: string
 ): Promise<Booking | null> {
   if (!isSupabaseConfigured || !ticketNumberOrId || !patientPhone) return null;
+  const cleanTicketOrId = ticketNumberOrId.trim();
+  if (!isValidEntityId(cleanTicketOrId)) return null;
   try {
     const cleanPhoneDigits = patientPhone.replace(/\D/g, '');
     const phoneLast4 = cleanPhoneDigits.slice(-4);
     const { data, error } = await supabase.rpc('get_patient_ticket_secure', {
-      p_ticket_number: ticketNumberOrId,
+      p_ticket_number: cleanTicketOrId,
       p_phone_last_4: phoneLast4
     });
     if (error || !data || typeof data !== 'object') return null;
@@ -490,6 +547,7 @@ export async function verifyTicketForStaffRpc(
 ): Promise<Booking | null> {
   if (!isSupabaseConfigured || !lookup) return null;
   try {
+    await ensureActiveSupabaseSession();
     const { data, error } = await supabase.rpc('verify_ticket_for_staff', {
       p_lookup: lookup.trim()
     });
@@ -507,10 +565,17 @@ export async function markPatientLateAndCallNextRpc(
   if (!isSupabaseConfigured) {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
+  if (
+    (currentBookingId && !isValidEntityId(currentBookingId)) ||
+    (nextBookingId && !isValidEntityId(nextBookingId))
+  ) {
+    return { success: false, error: 'معرف الحجز غير صالح' };
+  }
   try {
-    const { data, error } = await supabase.rpc('mark_patient_late_and_call_next', {
-      p_current_booking_id: currentBookingId || null,
-      p_next_booking_id: nextBookingId || null
+    await ensureActiveSupabaseSession();
+    const { error } = await supabase.rpc('mark_patient_late_and_call_next', {
+      p_current_booking_id: currentBookingId ? currentBookingId.trim() : null,
+      p_next_booking_id: nextBookingId ? nextBookingId.trim() : null
     });
 
     if (error) {
@@ -531,21 +596,24 @@ export async function updateBookingStatusInDb(
     calledAt: string;
     completedAt: string;
     paidAt: string;
+    queuePosition: number;
   }>
 ): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  if (!isSupabaseConfigured || !isValidEntityId(bookingId)) return false;
   try {
+    await ensureActiveSupabaseSession();
     const dbUpdates: any = {};
     if (updates.status) dbUpdates.status = updates.status;
     if (updates.doctorDiagnosis !== undefined) dbUpdates.doctor_diagnosis = updates.doctorDiagnosis;
     if (updates.calledAt) dbUpdates.called_at = updates.calledAt;
     if (updates.completedAt) dbUpdates.completed_at = updates.completedAt;
     if (updates.paidAt) dbUpdates.paid_at = updates.paidAt;
+    if (typeof updates.queuePosition === 'number') dbUpdates.queue_position = updates.queuePosition;
 
     const { error } = await supabase
       .from('bookings')
       .update(dbUpdates)
-      .eq('id', bookingId);
+      .eq('id', bookingId.trim());
 
     return !error;
   } catch (err) {
@@ -557,18 +625,23 @@ export async function updateBookingStatusInDb(
 export async function deleteBookingFromDb(
   bookingId: string
 ): Promise<{ success: boolean; error?: string }> {
-  markBookingDeletedLocally(bookingId);
+  if (!isValidEntityId(bookingId)) {
+    return { success: false, error: 'معرف الحجز غير صالح' };
+  }
+  const cleanBookingId = bookingId.trim();
+  markBookingDeletedLocally(cleanBookingId);
 
   if (!isSupabaseConfigured) {
     return { success: true };
   }
 
+  await ensureActiveSupabaseSession();
   let deletedInCloud = false;
 
   // 1. استدعاء دالة RPC المعتمدة لحذف الحجز بواسطة الموظف (الخزينة / الاستقبال / الإدارة)
   try {
     const { data, error } = await supabase.rpc('delete_booking_by_staff', {
-      p_booking_id: bookingId
+      p_booking_id: cleanBookingId
     });
     if (!error && data) {
       deletedInCloud = true;
@@ -583,7 +656,7 @@ export async function deleteBookingFromDb(
       const { error: delErr } = await supabase
         .from('bookings')
         .delete()
-        .eq('id', bookingId);
+        .eq('id', cleanBookingId);
       if (!delErr) {
         deletedInCloud = true;
       }
@@ -599,7 +672,7 @@ export async function deleteBookingFromDb(
           notes: '__PURGED_PAST_BOOKING__',
           status: 'cancelled'
         })
-        .eq('id', bookingId);
+        .eq('id', cleanBookingId);
       if (!updErr) {
         deletedInCloud = true;
       }
@@ -612,7 +685,7 @@ export async function deleteBookingFromDb(
     channel.send({
       type: 'broadcast',
       event: 'booking_deleted',
-      payload: { bookingId }
+      payload: { bookingId: cleanBookingId }
     });
   } catch {}
 
@@ -683,8 +756,22 @@ export async function updateDoctorStatusInDb(
   status: DoctorStatus,
   unavailableReason?: string
 ): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  if (!isSupabaseConfigured || !isValidEntityId(doctorId)) return false;
+  const cleanDoctorId = doctorId.trim();
+
+  // التحقق من عدم تجاوز الطبيب لمعرفه الشخصي
+  const currentSession = getCurrentStoredSession();
+  if (
+    currentSession?.role === 'doctor' &&
+    currentSession.doctorId &&
+    currentSession.doctorId !== cleanDoctorId
+  ) {
+    console.warn('Blocked cross-doctor status modification attempt');
+    return false;
+  }
+
   try {
+    await ensureActiveSupabaseSession();
     const { data, error } = await supabase
       .from('doctors')
       .update({
@@ -692,7 +779,7 @@ export async function updateDoctorStatusInDb(
         unavailable_reason: unavailableReason || null,
         is_present_today: status !== 'offline'
       })
-      .eq('id', doctorId)
+      .eq('id', cleanDoctorId)
       .select('id')
       .maybeSingle();
 
@@ -706,13 +793,15 @@ export async function updateDoctorStatusInDb(
 export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
-    await ensureAdminSupabaseSession();
-    const rows = scheduleState.items.map(item => ({
-      date: scheduleState.date,
-      clinic_id: item.clinicId,
-      doctor_id: item.doctorId || null,
-      is_open: item.isOpen
-    }));
+    await ensureActiveSupabaseSession();
+    const rows = scheduleState.items
+      .filter(item => isValidEntityId(item.clinicId))
+      .map(item => ({
+        date: scheduleState.date,
+        clinic_id: item.clinicId.trim(),
+        doctor_id: item.doctorId && isValidEntityId(item.doctorId) ? item.doctorId.trim() : null,
+        is_open: item.isOpen
+      }));
 
     const { error } = await supabase
       .from('daily_schedule')
@@ -720,12 +809,14 @@ export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): 
 
     // مزامنة حالة الفتح اليومي مع جدول clinics.is_open_today لضمان توافق دالة create_public_booking في قاعدة البيانات
     await Promise.all(
-      scheduleState.items.map(item =>
-        supabase
-          .from('clinics')
-          .update({ is_open_today: item.isOpen })
-          .eq('id', item.clinicId)
-      )
+      scheduleState.items
+        .filter(item => isValidEntityId(item.clinicId))
+        .map(item =>
+          supabase
+            .from('clinics')
+            .update({ is_open_today: item.isOpen })
+            .eq('id', item.clinicId.trim())
+        )
     ).catch(() => {});
 
     return !error;
@@ -736,9 +827,11 @@ export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): 
 }
 
 export async function updateClinicInDb(clinicId: string, data: Partial<Clinic>): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  if (!isSupabaseConfigured || !isValidEntityId(clinicId) || clinicId.trim().startsWith('_system')) {
+    return false;
+  }
   try {
-    await ensureAdminSupabaseSession();
+    await ensureActiveSupabaseSession();
     const updates: any = {};
     if (data.name !== undefined) updates.name = data.name;
     if (data.fee !== undefined) updates.price = data.fee;
@@ -771,14 +864,18 @@ export async function updateClinicInDb(clinicId: string, data: Partial<Clinic>):
 }
 
 export async function addClinicToDb(clinic: Clinic): Promise<boolean> {
-  unmarkClinicDeletedLocally(clinic.id);
+  if (!isValidEntityId(clinic.id) || clinic.id.trim().startsWith('_system')) {
+    return false;
+  }
+  const cleanClinicId = clinic.id.trim();
+  unmarkClinicDeletedLocally(cleanClinicId);
   if (!isSupabaseConfigured) return false;
   try {
     await ensureAdminSupabaseSession();
     const { error } = await supabase
       .from('clinics')
       .upsert({
-        id: clinic.id,
+        id: cleanClinicId,
         name: clinic.name,
         price: clinic.fee,
         room_number: clinic.room,
@@ -801,8 +898,12 @@ export async function addClinicToDb(clinic: Clinic): Promise<boolean> {
 export async function deleteClinicFromDb(
   clinicId: string
 ): Promise<{ success: boolean; action?: 'deleted' | 'archived'; message?: string; error?: string }> {
+  if (!isValidEntityId(clinicId) || clinicId.trim().startsWith('_system')) {
+    return { success: false, error: 'معرف العيادة غير صالح' };
+  }
+  const cleanClinicId = clinicId.trim();
   if (!isSupabaseConfigured) {
-    markClinicDeletedLocally(clinicId);
+    markClinicDeletedLocally(cleanClinicId);
     return { success: true, action: 'deleted', message: 'تم حذف العيادة محلياً' };
   }
 
@@ -813,7 +914,7 @@ export async function deleteClinicFromDb(
     const { count: activeCount } = await supabase
       .from('bookings')
       .select('*', { count: 'exact', head: true })
-      .eq('clinic_id', clinicId)
+      .eq('clinic_id', cleanClinicId)
       .in('status', ['waiting', 'in-progress', 'late']);
 
     if (activeCount && activeCount > 0) {
@@ -824,13 +925,13 @@ export async function deleteClinicFromDb(
     }
 
     // 2. فك ارتباط جدول اليوم والأطباء وحذف العيادة نهائياً
-    await supabase.from('daily_schedule').delete().eq('clinic_id', clinicId);
-    await supabase.from('doctors').update({ clinic_id: null, clinic_name: null }).eq('clinic_id', clinicId);
+    await supabase.from('daily_schedule').delete().eq('clinic_id', cleanClinicId);
+    await supabase.from('doctors').update({ clinic_id: null, clinic_name: null }).eq('clinic_id', cleanClinicId);
 
     const { data: delData, error: delErr } = await supabase
       .from('clinics')
       .delete()
-      .eq('id', clinicId)
+      .eq('id', cleanClinicId)
       .select('id');
 
     if (delErr || !delData || delData.length === 0) {
@@ -838,10 +939,10 @@ export async function deleteClinicFromDb(
       await supabase
         .from('clinics')
         .update({ is_open_today: false, description: '__DELETED_CLINIC__' })
-        .eq('id', clinicId);
+        .eq('id', cleanClinicId);
     }
 
-    markClinicDeletedLocally(clinicId);
+    markClinicDeletedLocally(cleanClinicId);
 
     return {
       success: true,
@@ -849,7 +950,7 @@ export async function deleteClinicFromDb(
       message: 'تم حذف العيادة نهائياً من قاعدة البيانات.'
     };
   } catch (err: any) {
-    markClinicDeletedLocally(clinicId);
+    markClinicDeletedLocally(cleanClinicId);
     return { success: true, action: 'deleted', message: 'تم حذف العيادة نهائياً.' };
   }
 }
@@ -859,9 +960,22 @@ export async function updateClinicFeeInDb(clinicId: string, newFee: number): Pro
 }
 
 export async function updateDoctorInDb(doctorId: string, updates: Partial<Doctor>): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  if (!isSupabaseConfigured || !isValidEntityId(doctorId)) return false;
+  const cleanDoctorId = doctorId.trim();
+
+  // منع الطبيب من تمرير معرف طبيب آخر عند تعديل الجدول الزمني أو الحالة
+  const currentSession = getCurrentStoredSession();
+  if (
+    currentSession?.role === 'doctor' &&
+    currentSession.doctorId &&
+    currentSession.doctorId !== cleanDoctorId
+  ) {
+    console.warn('Blocked cross-doctor profile modification attempt');
+    return false;
+  }
+
   try {
-    await ensureAdminSupabaseSession();
+    await ensureActiveSupabaseSession();
     const dbUpdates: any = {};
     if (updates.name !== undefined) dbUpdates.name = updates.name;
     if (updates.title !== undefined) {
@@ -885,7 +999,7 @@ export async function updateDoctorInDb(doctorId: string, updates: Partial<Doctor
     const { data, error } = await supabase
       .from('doctors')
       .update(dbUpdates)
-      .eq('id', doctorId)
+      .eq('id', cleanDoctorId)
       .select('id')
       .maybeSingle();
 
@@ -897,14 +1011,16 @@ export async function updateDoctorInDb(doctorId: string, updates: Partial<Doctor
 }
 
 export async function addDoctorToDb(doctor: Doctor): Promise<boolean> {
-  unmarkDoctorDeletedLocally(doctor.id);
+  if (!isValidEntityId(doctor.id)) return false;
+  const cleanDoctorId = doctor.id.trim();
+  unmarkDoctorDeletedLocally(cleanDoctorId);
   if (!isSupabaseConfigured) return false;
   try {
     await ensureAdminSupabaseSession();
     const { error } = await supabase
       .from('doctors')
       .upsert({
-        id: doctor.id,
+        id: cleanDoctorId,
         name: doctor.name,
         specialty: (doctor as any).specialty || doctor.title || 'عام',
         title: doctor.title || 'أخصائي',
@@ -930,8 +1046,12 @@ export async function addDoctorToDb(doctor: Doctor): Promise<boolean> {
 export async function deleteDoctorFromDb(
   doctorId: string
 ): Promise<{ success: boolean; message?: string; error?: string }> {
+  if (!isValidEntityId(doctorId)) {
+    return { success: false, error: 'معرف الطبيب غير صالح' };
+  }
+  const cleanDoctorId = doctorId.trim();
   if (!isSupabaseConfigured) {
-    markDoctorDeletedLocally(doctorId);
+    markDoctorDeletedLocally(cleanDoctorId);
     return { success: true, message: 'تم حذف الطبيب محلياً' };
   }
 
@@ -941,51 +1061,51 @@ export async function deleteDoctorFromDb(
     const { count: activeCount } = await supabase
       .from('bookings')
       .select('*', { count: 'exact', head: true })
-      .eq('doctor_id', doctorId)
+      .eq('doctor_id', cleanDoctorId)
       .in('status', ['waiting', 'in-progress', 'late']);
 
     if (activeCount && activeCount > 0) {
       return {
         success: false,
-        error: `لا يمكن حذف الطبيب لوجود ${activeCount} حجز نشط جارٍ له حالياً. يرجى استكمال الحالات أو إلغاؤها أولاً.`
+        error: `لا يمكن حذف الطبيب لوجود ${activeCount} حجز نشط جارٍ له حالياً. يرجى استكمال الحالات أو إلغاؤها أولياً.`
       };
     }
 
-    await supabase.from('daily_schedule').update({ doctor_id: null }).eq('doctor_id', doctorId);
-    await supabase.from('staff_accounts').update({ doctor_id: null }).eq('doctor_id', doctorId);
+    await supabase.from('daily_schedule').update({ doctor_id: null }).eq('doctor_id', cleanDoctorId);
+    await supabase.from('staff_accounts').update({ doctor_id: null }).eq('doctor_id', cleanDoctorId);
 
     const { data: delData, error: delErr } = await supabase
       .from('doctors')
       .delete()
-      .eq('id', doctorId)
+      .eq('id', cleanDoctorId)
       .select('id');
 
     if (delErr || !delData || delData.length === 0) {
       await supabase
         .from('doctors')
         .update({ is_present_today: false, status: 'offline', bio: '__DELETED_DOCTOR__' })
-        .eq('id', doctorId);
+        .eq('id', cleanDoctorId);
     }
 
-    markDoctorDeletedLocally(doctorId);
+    markDoctorDeletedLocally(cleanDoctorId);
     return {
       success: true,
       message: 'تم حذف الطبيب نهائياً من النظام.'
     };
   } catch (err: any) {
-    markDoctorDeletedLocally(doctorId);
+    markDoctorDeletedLocally(cleanDoctorId);
     return { success: true, message: 'تم حذف الطبيب نهائياً.' };
   }
 }
 
 export async function updateDoctorMaxPatientsInDb(doctorId: string, maxPatients: number): Promise<boolean> {
-  if (!isSupabaseConfigured) return false;
+  if (!isSupabaseConfigured || !isValidEntityId(doctorId)) return false;
   try {
     await ensureAdminSupabaseSession();
     const { error } = await supabase
       .from('doctors')
       .update({ max_daily_patients: maxPatients })
-      .eq('id', doctorId);
+      .eq('id', doctorId.trim());
     return !error;
   } catch (err) {
     console.warn('Error updating doctor max patients in Supabase:', err);
@@ -1027,10 +1147,12 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
 }
 
 export async function markWhatsAppSentInDb(bookingId: string): Promise<Record<string, boolean> | null> {
-  if (!isSupabaseConfigured || !bookingId) return null;
+  if (!isSupabaseConfigured || !isValidEntityId(bookingId)) return null;
+  const cleanBookingId = bookingId.trim();
   try {
+    await ensureActiveSupabaseSession();
     const { data, error } = await supabase.rpc('mark_whatsapp_sent', {
-      p_booking_id: bookingId
+      p_booking_id: cleanBookingId
     });
     if (error || !data || typeof data !== 'object') return null;
 
@@ -1039,7 +1161,7 @@ export async function markWhatsAppSentInDb(bookingId: string): Promise<Record<st
       channel.send({
         type: 'broadcast',
         event: 'whatsapp_sent_updated',
-        payload: { bookingId, sentIds: data }
+        payload: { bookingId: cleanBookingId, sentIds: data }
       });
     } catch {}
 
@@ -1339,6 +1461,10 @@ export async function updateStaffAccountInDb(
   }
 ): Promise<{ success: boolean; staff?: StaffAccount; error?: string }> {
   if (!isSupabaseConfigured) return { success: false, error: 'Supabase غير مهيأ' };
+  if (!isValidEntityId(staffId)) {
+    return { success: false, error: 'معرف حساب الموظف غير صالح' };
+  }
+  const cleanStaffId = staffId.trim();
 
   try {
     const token = await getAdminBearerToken();
@@ -1349,7 +1475,7 @@ export async function updateStaffAccountInDb(
       };
     }
 
-    const response = await fetch(`/api/admin/staff/${encodeURIComponent(staffId)}`, {
+    const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
@@ -1373,7 +1499,7 @@ export async function updateStaffAccountInDb(
       channel.send({
         type: 'broadcast',
         event: 'staff_updated',
-        payload: { staffId, username: updatedStaff.username }
+        payload: { staffId: cleanStaffId, username: updatedStaff.username }
       });
     } catch {}
 
@@ -1390,6 +1516,10 @@ export async function deleteStaffAccountRpc(staffId: string): Promise<{ success:
   if (!isSupabaseConfigured) {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
+  if (!isValidEntityId(staffId)) {
+    return { success: false, error: 'معرف حساب الموظف غير صالح' };
+  }
+  const cleanStaffId = staffId.trim();
   try {
     const token = await getAdminBearerToken();
     if (!token) {
@@ -1399,7 +1529,7 @@ export async function deleteStaffAccountRpc(staffId: string): Promise<{ success:
       };
     }
 
-    const response = await fetch(`/api/admin/staff/${encodeURIComponent(staffId)}`, {
+    const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${token}`
@@ -1419,7 +1549,7 @@ export async function deleteStaffAccountRpc(staffId: string): Promise<{ success:
       channel.send({
         type: 'broadcast',
         event: 'staff_updated',
-        payload: { staffId, deleted: true }
+        payload: { staffId: cleanStaffId, deleted: true }
       });
     } catch {}
 
@@ -1480,25 +1610,55 @@ export async function loginWithSupabaseAuth(
       return { success: false, error: 'اسم المستخدم أو كلمة المرور غير صحيحة' };
     }
 
-    // جلب بيانات الموظف المعتمدة حصراً من جدول public.staff_accounts عبر auth_user_id
-    let { data: staffData, error: staffError } = await supabase
+    // التحقق الصارم من هوية الموظف ودوره الوظيفي عبر الخادم (Server Service Role) بمطابقة auth_user_id = auth.uid() حصراً
+    const accessToken = data.session?.access_token;
+    if (accessToken) {
+      try {
+        const verifyRes = await fetch('/api/auth/staff-session', {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
+        });
+        const verifyPayload = await verifyRes.json().catch(() => null);
+        if (verifyRes.ok && verifyPayload?.ok && verifyPayload?.caller) {
+          const caller = verifyPayload.caller;
+          return {
+            success: true,
+            session: {
+              id: caller.staffId,
+              username: caller.username,
+              displayName: caller.displayName,
+              role: caller.role as UserRole,
+              doctorId: caller.doctorId || undefined,
+              clinicId: caller.clinicId || undefined
+            }
+          };
+        }
+        if (verifyRes.status === 403) {
+          try {
+            await supabase.auth.signOut();
+          } catch {}
+          return {
+            success: false,
+            authoritativeReject: true,
+            error: verifyPayload?.error || 'هذا الحساب غير مسجل أو تم إيقافه من منظومة الموظفين'
+          };
+        }
+      } catch {
+        // fallback to bridge query below
+      }
+    }
+
+    // استعلام احتياطي عبر جسر الخادم بشرط تطابق auth_user_id حصرياً (بدون أي مطابقة عمياء بالاسم)
+    const { data: staffData, error: staffError } = await supabase
       .from('staff_accounts')
-      .select('*')
+      .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at')
       .eq('auth_user_id', data.user.id)
       .maybeSingle();
 
-    if (!staffData && !staffError) {
-      const fallbackLookup = await supabase
-        .from('staff_accounts')
-        .select('*')
-        .ilike('username', cleanUsername)
-        .maybeSingle();
-      staffData = fallbackLookup.data;
-      staffError = fallbackLookup.error;
-    }
-
-    // إذا لم يكن الحساب مسجلاً في staff_accounts (أو تم حذفه)، نمنع الدخول ولا نثق في user_metadata
-    if (staffError || !staffData) {
+    // إذا لم يكن الحساب مسجلاً في staff_accounts ومربوطاً بـ auth_user_id، نمنع الدخول ولا نثق في user_metadata
+    if (staffError || !staffData || staffData.id === undefined) {
       try {
         await supabase.auth.signOut();
       } catch {}

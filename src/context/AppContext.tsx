@@ -1714,7 +1714,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateBookingStatus = (bookingId: string, status: BookingStatus) => {
-    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'reception' &&
+        currentUser.role !== 'admin' &&
+        !hasPermission(currentUser.role, 'call_queue_patients'))
+    ) {
       addToast({
         type: 'error',
         title: 'غير مصرح',
@@ -1952,7 +1957,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     shiftStartTime?: string,
     shiftEndTime?: string
   ): Promise<boolean> => {
-    if (!hasPermission(currentUser?.role, 'manage_doctor_attendance')) {
+    const isOwnDoctorSession =
+      currentUser?.role === 'doctor' &&
+      (!currentUser.doctorId || currentUser.doctorId === doctorId);
+    if (!isOwnDoctorSession && !hasPermission(currentUser?.role, 'manage_doctor_attendance')) {
       addToast({
         type: 'error',
         title: 'غير مصرح بالتعديل',
@@ -2613,6 +2621,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (isSupabaseConfigured) {
       saveDailyScheduleToDb(newSchedule);
+      for (const item of sanitized) {
+        updateClinicInDb(item.clinicId, {
+          active: item.isOpen,
+          isActive: item.isOpen,
+          isOpenToday: item.isOpen
+        });
+      }
       try {
         const channel = supabase.channel('system_updates');
         channel.send({

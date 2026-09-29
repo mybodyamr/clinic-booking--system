@@ -16,7 +16,7 @@
    * **النتيجة**: تغيير البريد الإلكتروني للاستعادة (`recovery_email`) لأي موظف **لا يمسّ ولا يغيّر** حساب المصادقة في `auth.users` ولا يؤثر على قدرة الموظف على تسجيل الدخول باسم المستخدم وكلمة المرور.
 3. **استقلالية بريد الاستعادة (`recovery_email`)**:
    * يُخزّن `recovery_email` كحقل مستقل لكل صف (حساب) على حدة داخل جدول `public.staff_accounts`.
-   * عند تعديل بريد الاستعادة لحساب معين من لوحة الإدارة (`PATCH /api/admin/staff-accounts/:id`)، يتم التحديث حصرياً بشرط `.eq('id', staffId)`، فلا يتأثر أي حساب آخر في المنظومة.
+   * عند تعديل بريد الاستعادة لحساب معين من لوحة الإدارة (`PUT/PATCH /api/admin/staff/:id` أو `/api/admin/staff-accounts/:id`)، يتم التحديث حصرياً بشرط `.eq('id', staffId)`، فلا يتأثر أي حساب آخر في المنظومة.
    * عند طلب استعادة كلمة المرور (`Forgot Password`)، يتحقق الخادم من **تطابق الزوج (اسم المستخدم + بريد الاستعادة المسجل لهذا الحساب تحديداً)**، مما يمنع أي تداخل حتى لو اشترك أكثر من حساب في نفس البريد أو تم تخصيص بريد منفصل لكل موظف.
 
 ---
@@ -24,12 +24,13 @@
 ## 2. حماية الصلاحيات والأدوار عند التحديث (RBAC & Permission Isolation)
 
 1. **التحقق المزدوج من الصلاحيات (Server-Side & RLS)**:
-   * تُقرأ صلاحية المستخدم (`role`: `admin` | `reception` | `cashier` | `doctor`) من جلسة `Supabase Auth` الموثقة ومن جدول `public.staff_accounts` مباشرة عبر دالة `get_my_staff_role()`.
+   * تُقرأ صلاحية المستخدم (`role`: `admin` | `reception` | `cashier` | `doctor`) من جلسة `Supabase Auth` الموثقة ومن جدول `public.staff_accounts` مباشرة عبر دالة `public.get_auth_role()`.
    * لا يُسمح لأي واجهة أمامية بتجاوز صلاحيات الخادم؛ فمسارات الإدارة (`/api/admin/*`) تتحقق من رمز الجلسة (`Bearer Token`) وتتأكد من أن الدور الفعلي في قاعدة البيانات هو `admin`.
 2. **عزل بيانات الأطباء والعيادات**:
    * يرتبط كل حساب طبيب بـ `doctor_id` و`clinic_id` محددين، ولا يؤدي تحديث واجهة عيادة أو صلاحية طبيب إلى تغيير ارتباطات الأطباء الآخرين.
-3. **حجب البيانات الحساسة**:
-   * يقوم الخادم تلقائياً بحذف حقل `recovery_email` من أي استجابة تُرسل لغير مدير النظام (`Admin`)، ولا يتم تخزين `recoveryEmail` في `localStorage` بالمتصفح نهائياً.
+3. **حجب البيانات الحساسة (Defense-in-Depth لعمود `recovery_email`)**:
+   * **على مستوى قاعدة البيانات (RLS & Column Privileges)**: تم سحب صلاحية قراءة عمود `recovery_email` عن الأدوار العامة (`anon`, `authenticated`) عبر `REVOKE ALL` ومنح `SELECT` للأعمدة الوظيفية غير الحساسة فقط (`id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at`) لدور `authenticated` ضمن سياسة `"Authenticated read staff"`، مع توفير دالة `public.get_all_staff_accounts_for_admin()` (`SECURITY DEFINER`) المحصورة بمدير النظام (`admin`) و`service_role`.
+   * **على مستوى الخادم (`server.ts`)**: يقوم جسر الخادم تلقائياً بحذف حقل `recovery_email` من أي استجابة تُرسل لغير مدير النظام (`Admin`)، ولا يتم تخزين `recoveryEmail` في `localStorage` بالمتصفح نهائياً.
 
 ---
 

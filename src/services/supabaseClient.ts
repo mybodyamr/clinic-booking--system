@@ -14,8 +14,9 @@ const rawKey = BRIDGE_PROXY_KEY_MARKER;
 
 export const isSupabaseConfigured = true;
 
-const supabaseSmartFetch: typeof fetch = async (input, init) => {
-  return fetch(input, init);
+// جميع الاستعلامات تمر حصرياً عبر جسر الخادم (/api/supabase-bridge) المحمي بـ Server Service Role دون أي اتصال مباشر من المتصفح
+const supabaseBridgeFetch: typeof fetch = async (input, init) => {
+  return await fetch(input, init);
 };
 
 // قناة تزامن محلية آمنة بين التبويبات بدون كشف أي مفاتيح في عناوين WebSocket
@@ -39,7 +40,7 @@ const getOrCreateBroadcastChannel = (name: string): BroadcastChannel | null => {
 
 const baseClient: SupabaseClient = createClient(rawUrl, rawKey, {
   global: {
-    fetch: supabaseSmartFetch,
+    fetch: supabaseBridgeFetch,
   },
   auth: {
     persistSession: true,
@@ -100,4 +101,3 @@ if (typeof window !== 'undefined') {
 }
 
 export const supabase: SupabaseClient = baseClient;
-

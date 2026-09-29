@@ -285,20 +285,54 @@ CREATE POLICY "Admin modify daily_schedule" ON public.daily_schedule FOR ALL USI
   public.get_auth_role() IN ('admin', 'reception', 'cashier') OR auth.role() = 'service_role'
 );
 
--- سياسات حسابات الموظفين (staff_accounts)
+-- سياسات حسابات الموظفين (staff_accounts) وحماية عمود recovery_email على مستوى قاعدة البيانات (RLS + Column-Level Privileges)
+REVOKE ALL ON TABLE public.staff_accounts FROM PUBLIC, anon, authenticated;
+GRANT SELECT (id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at)
+  ON TABLE public.staff_accounts TO authenticated;
+GRANT ALL ON TABLE public.staff_accounts TO service_role;
+
+DROP POLICY IF EXISTS "Public read staff" ON public.staff_accounts;
+DROP POLICY IF EXISTS "staff_accounts_select_public" ON public.staff_accounts;
+DROP POLICY IF EXISTS "staff_accounts_select_authenticated" ON public.staff_accounts;
 DROP POLICY IF EXISTS "Authenticated read staff" ON public.staff_accounts;
-CREATE POLICY "Authenticated read staff" ON public.staff_accounts FOR SELECT USING (
+CREATE POLICY "Authenticated read staff" ON public.staff_accounts
+FOR SELECT TO authenticated
+USING (
   (auth.uid() IS NOT NULL AND auth_user_id = auth.uid())
   OR public.get_auth_role() = 'admin'
   OR auth.role() = 'service_role'
 );
 
 DROP POLICY IF EXISTS "Admin modify staff" ON public.staff_accounts;
-CREATE POLICY "Admin modify staff" ON public.staff_accounts FOR ALL USING (
+CREATE POLICY "Admin modify staff" ON public.staff_accounts
+FOR ALL TO authenticated
+USING (
   public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
 ) WITH CHECK (
   public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
 );
+
+-- دالة آمنة لمدير النظام (Admin) فقط لجلب حسابات الموظفين شاملة بريد الاستعادة (recovery_email)
+CREATE OR REPLACE FUNCTION public.get_all_staff_accounts_for_admin()
+RETURNS SETOF public.staff_accounts
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+  IF COALESCE(public.get_auth_role(), '') <> 'admin' AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'غير مصرح: عرض بيانات حسابات الموظفين وبريد الاستعادة مخصص لمدير النظام (Admin) فقط';
+  END IF;
+
+  RETURN QUERY
+  SELECT *
+  FROM public.staff_accounts
+  ORDER BY created_at ASC, id ASC;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.get_all_staff_accounts_for_admin() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.get_all_staff_accounts_for_admin() TO authenticated, service_role;
 
 -- سياسات وصلاحيات رموز التحقق لاستعادة كلمة المرور (password_reset_codes) - حصر الوصول الصارم بالـ Backend / service_role
 REVOKE ALL ON TABLE public.password_reset_codes FROM PUBLIC;
@@ -710,7 +744,7 @@ BEGIN
        NEW.fee IS DISTINCT FROM OLD.fee OR
        NEW.payment_status IS DISTINCT FROM OLD.payment_status OR
        NEW.payment_method IS DISTINCT FROM OLD.payment_method OR
-       NEW.paid_at IS DISTINCT FROM OLD.paid_at OR
+       (NEW.paid_at IS DISTINCT FROM OLD.paid_at AND NOT (OLD.status = 'late' AND NEW.status = 'waiting')) OR
        NEW.payment_confirmed_at IS DISTINCT FROM OLD.payment_confirmed_at OR
        NEW.doctor_diagnosis IS DISTINCT FROM OLD.doctor_diagnosis OR
        NEW.clinic_id IS DISTINCT FROM OLD.clinic_id OR
@@ -720,7 +754,7 @@ BEGIN
        NEW.patient_name IS DISTINCT FROM OLD.patient_name OR
        NEW.patient_phone IS DISTINCT FROM OLD.patient_phone OR
        NEW.ticket_number IS DISTINCT FROM OLD.ticket_number OR
-       NEW.queue_position IS DISTINCT FROM OLD.queue_position OR
+       (NEW.queue_position IS DISTINCT FROM OLD.queue_position AND NOT (OLD.status = 'late' AND NEW.status = 'waiting')) OR
        NEW.date IS DISTINCT FROM OLD.date OR
        NEW.time_slot IS DISTINCT FROM OLD.time_slot OR
        NEW.created_at IS DISTINCT FROM OLD.created_at THEN
@@ -1437,43 +1471,35 @@ GRANT EXECUTE ON FUNCTION public.delete_staff_account_secure(TEXT) TO authentica
 -- البيانات الأولية (Seed Data)
 -- ==============================================================================
 
--- إدراج العيادات
+-- إدراج العيادات (مع الحفاظ على الأسعار وحالة التشغيل المعدلة في حال وجود السجل مسبقاً)
 INSERT INTO public.clinics (id, name, specialty, room_number, floor, price, is_open_today, icon_name, department, description)
 VALUES 
   ('clinic-internal', 'عيادة الباطنة العامة والسكري', 'باطنة عامة وسكري', '101', 'الأول', 50, true, 'HeartPulse', 'قسم الباطنة', 'كشف ومتابعة أمراض الضغط، السكر، والجهاز الهضمي بأحدث الأجهزة'),
   ('clinic-pediatrics', 'عيادة طب وجراحة الأطفال', 'طب الأطفال وحديثي الولادة', '102', 'الأول', 45, true, 'Baby', 'قسم الأطفال', 'رعاية المواليد، متابعة النمو، والتطعيمات الإرشادية للأطفال'),
   ('clinic-orthopedics', 'عيادة جراحة العظام والمفاصل', 'جراحة العظام والمفاصل', '201', 'الثاني', 60, true, 'Bone', 'قسم الجراحة', 'تشخيص وعلاج آلام المفاصل، العمود الفقري، والكسور والإصابات'),
   ('clinic-dental', 'عيادة طب وجراحة الفم والأسنان', 'طب الأسنان', '202', 'الثاني', 55, true, 'Smile', 'قسم الأسنان', 'تنظيف، حشو، وعلاج جذور الأسنان بأعلى معايير التعقيم الطبي')
-ON CONFLICT (id) DO UPDATE SET
-  name = EXCLUDED.name,
-  price = EXCLUDED.price,
-  is_open_today = EXCLUDED.is_open_today;
+ON CONFLICT (id) DO NOTHING;
 
--- إدراج الأطباء
+-- إدراج الأطباء (مع الحفاظ على حالة الحضور والجدول الزمني المعدل في حال وجود السجل مسبقاً)
 INSERT INTO public.doctors (id, name, specialty, title, clinic_id, clinic_name, is_present_today, status, schedule_days, schedule_hours, max_daily_patients, current_queue_number)
 VALUES
   ('doc-1', 'د. علي عبد الرحمن السقا', 'باطنة عامة وسكري', 'استشاري أمراض الباطنة والسكري', 'clinic-internal', 'عيادة الباطنة العامة والسكري', true, 'available', ARRAY['السبت', 'الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس'], '9:00 ص - 3:00 م', 30, 0),
   ('doc-2', 'د. فاطمة الزهراء كمال', 'طب الأطفال وحديثي الولادة', 'أخصائية طب الأطفال وحديثي الولادة', 'clinic-pediatrics', 'عيادة طب وجراحة الأطفال', true, 'available', ARRAY['السبت', 'الأحد', 'الثلاثاء', 'الخميس'], '10:00 ص - 2:00 م', 25, 0),
   ('doc-3', 'د. حسام الدين عبد الله', 'جراحة العظام والمفاصل', 'استشاري جراحة العظام وإصابات الملاعب', 'clinic-orthopedics', 'عيادة جراحة العظام والمفاصل', true, 'available', ARRAY['الأحد', 'الثلاثاء', 'الأربعاء'], '12:00 م - 6:00 م', 20, 0),
   ('doc-4', 'د. منى الشاذلي', 'طب وجراحة الفم والأسنان', 'أخصائية تجميل وجراحة الأسنان', 'clinic-dental', 'عيادة طب وجراحة الفم والأسنان', true, 'available', ARRAY['السبت', 'الاثنين', 'الأربعاء'], '9:00 ص - 3:00 م', 20, 0)
-ON CONFLICT (id) DO UPDATE SET
-  name = EXCLUDED.name,
-  is_present_today = EXCLUDED.is_present_today,
-  status = EXCLUDED.status;
+ON CONFLICT (id) DO NOTHING;
 
--- إدراج جدول التشغيل اليومي الافتراضي
+-- إدراج جدول التشغيل اليومي الافتراضي (دون الكتابة فوق جدول اليوم إذا كان مهيأً مسبقاً)
 INSERT INTO public.daily_schedule (date, clinic_id, doctor_id, is_open)
 VALUES 
   (public.get_cairo_today(), 'clinic-internal', 'doc-1', true),
   (public.get_cairo_today(), 'clinic-pediatrics', 'doc-2', true),
   (public.get_cairo_today(), 'clinic-orthopedics', 'doc-3', true),
   (public.get_cairo_today(), 'clinic-dental', 'doc-4', true)
-ON CONFLICT (date, clinic_id) DO UPDATE SET
-  is_open = EXCLUDED.is_open,
-  doctor_id = EXCLUDED.doctor_id;
+ON CONFLICT (date, clinic_id) DO NOTHING;
 
 -- إدراج حسابات الكادر السبعة (مدير، استقبال، خزينة، و4 أطباء للعيادات التخصصية)
--- ملاحظة هامة: عند التحديث لا يتم استبدال البريد الإلكتروني أو اسم العرض أو اسم المستخدم إذا كان معدلاً مسبقاً
+-- ملاحظة هامة: عند التحديث لا يتم استبدال البريد الإلكتروني أو اسم العرض أو اسم المستخدم أو الارتباطات إذا كانت موجودة مسبقاً
 INSERT INTO public.staff_accounts (id, username, display_name, role, doctor_id, clinic_id, recovery_email)
 VALUES
   ('staff-admin', 'admin', 'د. أحمد الشناوي (مدير المنظومة)', 'admin', NULL, NULL, 'amrrmybody@gmail.com'),
@@ -1487,13 +1513,15 @@ ON CONFLICT (id) DO UPDATE SET
   username = COALESCE(NULLIF(public.staff_accounts.username, ''), EXCLUDED.username),
   display_name = COALESCE(NULLIF(public.staff_accounts.display_name, ''), EXCLUDED.display_name),
   role = COALESCE(NULLIF(public.staff_accounts.role, ''), EXCLUDED.role),
+  doctor_id = COALESCE(public.staff_accounts.doctor_id, EXCLUDED.doctor_id),
+  clinic_id = COALESCE(public.staff_accounts.clinic_id, EXCLUDED.clinic_id),
   recovery_email = COALESCE(NULLIF(public.staff_accounts.recovery_email, ''), EXCLUDED.recovery_email);
 
--- إدراج سجلات النظام المخصصة للإعدادات وكلمات المرور المشفرة
+-- إدراج سجل النظام المخصص لمعلومات الدعم فقط وإزالة أي سجل كلمات مرور قديم من جدول clinics
+DELETE FROM public.clinics WHERE id = '_system_staff_passwords';
 INSERT INTO public.clinics (id, name, specialty, room_number, floor, price, is_open_today, description)
 VALUES 
-  ('_system_support_info', 'System Support Info', 'System', '0', 'الأول', 0, false, 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.\nللتواصل: 01014615606'),
-  ('_system_staff_passwords', 'System Staff Passwords', 'System', '0', 'الأول', 0, false, '{"admin":"68d70815dc7156f32ec82ebfc78e252452f001f445c44ab8f1c7eb8282914bb6","reception":"40153eddc2966e9bc5c95e82fb5932fb442fa03a1e9bb631a4923ddfa606b7f3","cashier":"129a977973c6f333a907da7f0f302387965184145f64e629cfbb8dc83de5689b","doctor":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.pediatrics":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.ortho":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.dental":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6"}')
+  ('_system_support_info', 'System Support Info', 'System', '0', 'الأول', 0, false, 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.\nللتواصل: 01014615606')
 ON CONFLICT (id) DO NOTHING;
 
 -- ==============================================================================

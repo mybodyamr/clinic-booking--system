@@ -40,7 +40,10 @@ export const DoctorView: React.FC = () => {
     addToast 
   } = useApp();
 
-  const canManageSchedule = hasPermission(currentUser?.role, 'manage_doctor_attendance');
+  const canManageSchedule =
+    currentUser?.role === 'admin' ||
+    currentUser?.role === 'doctor' ||
+    hasPermission(currentUser?.role, 'manage_doctor_attendance');
 
   // للطبيب: عزل صارم لحسابه الشخصي فقط دون الوقوع الافتراضي على طبيب آخر
   // لمدير النظام (admin): إمكانية اختيار الطبيب المراد معاينته

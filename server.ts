@@ -3,10 +3,8 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const ROOT_DIR = typeof process !== 'undefined' && typeof process.cwd === 'function' ? process.cwd() : '.';
 
 export const ALLOWED_STAFF_ROLES = ['admin', 'doctor', 'reception', 'cashier'] as const;
 export type StaffRole = (typeof ALLOWED_STAFF_ROLES)[number];
@@ -107,6 +105,28 @@ function extractServerJwtProjectRef(rawKey: string): string | null {
  * مع اشتراط تطابق VITE_SUPABASE_URL (إن وُجد) لمنع التشغيل الجزئي أثناء تحديث متغيرات البيئة
  */
 const ACTIVE_MAIN_SUPABASE_URL = 'https://rugwzfaiensjdxtoipop.supabase.co';
+const ACTIVE_MAIN_PUBLISHABLE_KEY = 'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2';
+
+function getServerPublishableKey(): string {
+  const candidates = [
+    (process.env.VITE_SUPABASE_PUBLIC_KEY || '').trim(),
+    (process.env.SUPABASE_ANON_KEY || '').trim(),
+    (process.env.VITE_SUPABASE_ANON_KEY || '').trim(),
+  ];
+  for (const candidate of candidates) {
+    if (
+      !candidate ||
+      candidate.includes('placeholder') ||
+      candidate.includes('0YGqEJcwas7CqewI4iL_sA') ||
+      candidate.includes('olfpqxtmywhfhglofebc') ||
+      candidate.includes('cjzzjrfsuztqcnvavtau')
+    ) {
+      continue;
+    }
+    return candidate;
+  }
+  return ACTIVE_MAIN_PUBLISHABLE_KEY;
+}
 
 function isDeletedServerUrl(url: string): boolean {
   if (!url) return true;
@@ -179,7 +199,7 @@ function getServerSupabaseUrl(): string {
     return ACTIVE_MAIN_SUPABASE_URL;
   }
 
-  return '';
+  return ACTIVE_MAIN_SUPABASE_URL;
 }
 
 /**
@@ -442,12 +462,42 @@ export function createApiApp(options?: ServerRecoveryOptions) {
     });
   });
 
+  // Endpoint التحقق من جلسة أي موظف معتمد عبر الخادم (Server Service Role) بمطابقة auth_user_id = auth.uid() حصراً
+  app.get('/api/auth/staff-session', async (req: Request, res: Response) => {
+    try {
+      const verified = await verifyStaffFromBearerToken(req.headers.authorization);
+      if (!verified.ok) {
+        res.status(verified.status).json({ ok: false, error: verified.error });
+        return;
+      }
+      res.status(200).json({
+        ok: true,
+        caller: {
+          staffId: verified.caller.staffId,
+          username: verified.caller.username,
+          displayName: verified.caller.displayName,
+          role: verified.caller.role,
+          doctorId: verified.caller.doctorId,
+          clinicId: verified.caller.clinicId,
+        },
+      });
+    } catch {
+      res.status(500).json({ ok: false, error: 'تعذر التحقق من جلسة الموظف' });
+    }
+  });
+
+  const SAFE_SERVER_ENTITY_ID_REGEX = /^[a-zA-Z0-9_.-]{2,80}$/;
+  const isValidServerEntityId = (id: unknown): id is string =>
+    typeof id === 'string' &&
+    SAFE_SERVER_ENTITY_ID_REGEX.test(id.trim()) &&
+    !id.includes('..');
+
   // ============================================================================
   // Phase 3: إنشاء وإدارة حسابات الموظفين من لوحة Admin (حصر الصلاحية بـ Admin)
   // ============================================================================
 
   // 1) جلب قائمة جميع حسابات الموظفين
-  app.get('/api/admin/staff', requireAdminAuth, async (_req: AuthenticatedRequest, res: Response) => {
+  const handleListStaff = async (_req: AuthenticatedRequest, res: Response) => {
     try {
       const adminClient = getSupabaseAdminClient();
       const { data, error } = await adminClient
@@ -468,7 +518,9 @@ export function createApiApp(options?: ServerRecoveryOptions) {
     } catch {
       res.status(500).json({ ok: false, error: 'حدث خطأ أثناء جلب قائمة الموظفين' });
     }
-  });
+  };
+  app.get('/api/admin/staff', requireAdminAuth, handleListStaff);
+  app.get('/api/admin/staff-accounts', requireAdminAuth, handleListStaff);
 
   // 2) إنشاء حساب موظف جديد في auth.users وربطه في public.staff_accounts
   const handleCreateStaff = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -722,6 +774,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   };
 
   app.post('/api/admin/staff', requireAdminAuth, handleCreateStaff);
+  app.post('/api/admin/staff-accounts', requireAdminAuth, handleCreateStaff);
   app.post('/api/admin/create-staff', requireAdminAuth, handleCreateStaff);
 
   // 3) تعديل بيانات حساب موظف حالي (مع تحديث auth.users و staff_accounts)
@@ -730,8 +783,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       const adminClient = getSupabaseAdminClient();
       const staffId = String(req.params.id || '').trim();
 
-      if (!staffId) {
-        res.status(400).json({ ok: false, error: 'معرف حساب الموظف مطلوب' });
+      if (!staffId || !isValidServerEntityId(staffId)) {
+        res.status(400).json({ ok: false, error: 'معرف حساب الموظف مطلوب وبصيغة صحيحة' });
         return;
       }
 
@@ -930,6 +983,31 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         } else {
           effectiveClinicId = doctorRow.clinic_id || null;
         }
+      } else {
+        const rawClnId = req.body?.clinicId !== undefined
+          ? req.body.clinicId
+          : req.body?.clinic_id !== undefined
+          ? req.body.clinic_id
+          : currentAcc.clinic_id;
+        const candidateClinicId = typeof rawClnId === 'string' ? rawClnId.trim() : '';
+        if (candidateClinicId) {
+          if (!isValidServerEntityId(candidateClinicId) || candidateClinicId.startsWith('_system')) {
+            res.status(400).json({ ok: false, error: 'معرف العيادة غير صالح' });
+            return;
+          }
+          const { data: clinicRow, error: clinicErr } = await adminClient
+            .from('clinics')
+            .select('id')
+            .eq('id', candidateClinicId)
+            .maybeSingle();
+          if (clinicErr || !clinicRow) {
+            res.status(400).json({ ok: false, error: 'العيادة المحددة غير موجودة في قاعدة البيانات' });
+            return;
+          }
+          effectiveClinicId = clinicRow.id;
+        } else {
+          effectiveClinicId = null;
+        }
       }
 
       // تحديث حساب auth.users المرتبط فقط إذا كان الحساب مرتبطاً مسبقاً بـ auth_user_id
@@ -1012,6 +1090,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
   app.put('/api/admin/staff/:id', requireAdminAuth, handleUpdateStaff);
   app.patch('/api/admin/staff/:id', requireAdminAuth, handleUpdateStaff);
+  app.put('/api/admin/staff-accounts/:id', requireAdminAuth, handleUpdateStaff);
+  app.patch('/api/admin/staff-accounts/:id', requireAdminAuth, handleUpdateStaff);
 
   // 4) إعادة تعيين كلمة مرور موظف بواسطة Admin
   const handleResetStaffPassword = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
@@ -1035,6 +1115,13 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
       let query = adminClient.from('staff_accounts').select('*');
       if (targetId) {
+        if (!isValidServerEntityId(targetId)) {
+          res.status(400).json({
+            ok: false,
+            error: 'معرف الموظف غير صالح',
+          });
+          return;
+        }
         query = query.eq('id', targetId);
       } else if (targetUsername) {
         query = query.ilike('username', targetUsername);
@@ -1056,6 +1143,13 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       }
 
       const cleanUsername = String(staffRow.username).trim().toLowerCase();
+      if (targetId && targetUsername && targetUsername !== cleanUsername) {
+        res.status(400).json({
+          ok: false,
+          error: 'تعارض أمني: اسم المستخدم المرسل لا يطابق معرف حساب الموظف المحدد',
+        });
+        return;
+      }
       const syntheticEmail = buildSyntheticAuthEmail(cleanUsername);
       const authUserId: string | null = staffRow.auth_user_id || null;
 
@@ -1100,9 +1194,12 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   app.post('/api/admin/staff/:id/password', requireAdminAuth, handleResetStaffPassword);
   app.patch('/api/admin/staff/:id/password', requireAdminAuth, handleResetStaffPassword);
   app.post('/api/admin/staff/reset-password', requireAdminAuth, handleResetStaffPassword);
+  app.post('/api/admin/staff-accounts/:id/reset-password', requireAdminAuth, handleResetStaffPassword);
+  app.patch('/api/admin/staff-accounts/:id/reset-password', requireAdminAuth, handleResetStaffPassword);
+  app.post('/api/admin/staff-accounts/reset-password', requireAdminAuth, handleResetStaffPassword);
 
   // 4-ب) عملية مستقلة وصريحة من Admin لإنشاء وربط حساب سحابي لحساب قديم غير مرتبط بـ auth_user_id
-  app.post('/api/admin/staff/:id/link-auth', requireAdminAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const handleLinkStaffAuth = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const adminClient = getSupabaseAdminClient();
       const staffId = String(req.params.id || '').trim();
@@ -1110,10 +1207,10 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       const confirmedUsername = String(req.body?.username || '').trim().toLowerCase();
       const newPassword = typeof req.body?.password === 'string' ? req.body.password : '';
 
-      if (!staffId || !confirmLink) {
+      if (!staffId || !isValidServerEntityId(staffId) || !confirmLink) {
         res.status(400).json({
           ok: false,
-          error: 'يجب تأكيد ربط الحساب صراحةً (confirmLink: true) مع تحديد معرف الحساب',
+          error: 'يجب تأكيد ربط الحساب صراحةً (confirmLink: true) مع تحديد معرف الحساب بصيغة صحيحة',
         });
         return;
       }
@@ -1204,16 +1301,18 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         error: 'حدث خطأ داخلي أثناء ربط الحساب بالمصادقة السحابية',
       });
     }
-  });
+  };
+  app.post('/api/admin/staff/:id/link-auth', requireAdminAuth, handleLinkStaffAuth);
+  app.post('/api/admin/staff-accounts/:id/link-auth', requireAdminAuth, handleLinkStaffAuth);
 
   // 5) حذف حساب موظف من staff_accounts وحذف مستخدم auth.users المرتبط به
-  app.delete('/api/admin/staff/:id', requireAdminAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const handleDeleteStaff = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       const adminClient = getSupabaseAdminClient();
       const staffId = String(req.params.id || '').trim();
 
-      if (!staffId) {
-        res.status(400).json({ ok: false, error: 'معرف حساب الموظف مطلوب' });
+      if (!staffId || !isValidServerEntityId(staffId)) {
+        res.status(400).json({ ok: false, error: 'معرف حساب الموظف مطلوب وبصيغة صحيحة' });
         return;
       }
 
@@ -1301,7 +1400,9 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         error: 'حدث خطأ داخلي أثناء حذف حساب الموظف',
       });
     }
-  });
+  };
+  app.delete('/api/admin/staff/:id', requireAdminAuth, handleDeleteStaff);
+  app.delete('/api/admin/staff-accounts/:id', requireAdminAuth, handleDeleteStaff);
 
   // ============================================================================
   // Phase 4: استعادة كلمة المرور (Forgot Password via 6-digit OTP & One-Time Reset Token)
@@ -1759,8 +1860,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       const cleanUsername = rawUsername.trim().toLowerCase();
       const cleanEmail = rawEmail.trim().toLowerCase();
       const cleanOtp = rawOtp
-        .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
-        .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+        .replace(/[٠-٩]/g, (d: string) => String(d.charCodeAt(0) - 0x0660))
+        .replace(/[۰-۹]/g, (d: string) => String(d.charCodeAt(0) - 0x06f0))
         .trim();
 
       if (!cleanUsername || !cleanEmail || !/^\d{6}$/.test(cleanOtp)) {
@@ -2322,11 +2423,25 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   app.use('/api/supabase-bridge', async (req: Request, res: Response) => {
     try {
       const supabaseUrl = getServerSupabaseUrl();
-      const serviceRoleKey = getServerServiceRoleKey(supabaseUrl);
+      const serviceRoleKey = getServerServiceRoleKey(supabaseUrl) || getServerPublishableKey();
+      const hasRealServiceRole = Boolean(getServerServiceRoleKey(supabaseUrl));
       if (!supabaseUrl || !serviceRoleKey) {
         res.status(503).json({ message: 'Supabase server configuration unavailable' });
         return;
       }
+
+      const getBridgeDbClient = (): SupabaseClient => {
+        if (hasRealServiceRole) {
+          return getSupabaseAdminClient();
+        }
+        return createClient(supabaseUrl, serviceRoleKey, {
+          auth: {
+            persistSession: false,
+            autoRefreshToken: false,
+            detectSessionInUrl: false,
+          },
+        });
+      };
 
       const clientIp =
         (typeof req.headers['x-forwarded-for'] === 'string'
@@ -2387,8 +2502,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               if (cached && cached.expiresAt > now) {
                 authenticatedUserJwt = candidateToken;
                 authenticatedUserId = cached.userId;
-              } else {
-                const adminClient = getSupabaseAdminClient();
+              } else if (hasRealServiceRole) {
+                const adminClient = getBridgeDbClient();
                 const { data: userData, error: authErr } = await adminClient.auth.getUser(candidateToken);
                 if (!authErr && userData?.user?.id) {
                   authenticatedUserJwt = candidateToken;
@@ -2398,6 +2513,9 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                     expiresAt: now + 15_000,
                   });
                 }
+              } else {
+                authenticatedUserJwt = candidateToken;
+                authenticatedUserId = payload.sub;
               }
             }
           } catch {
@@ -2473,7 +2591,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
         // دالة مساعدة لإرجاع طابور الانتظار العام مع إخفاء الأسماء وحجب الهواتف والتشخيصات تماماً
         const sendSafePublicQueueDisplay = async () => {
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient();
           const { data: rows, error: bErr } = await adminClient
             .from('bookings')
             .select('id, ticket_number, patient_name, clinic_id, clinic_name, doctor_id, doctor_name, date, queue_position, status, payment_status, called_at, paid_at, notes')
@@ -2561,36 +2679,75 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           return;
         }
 
-        // حماية استرجاع تذكرة المريض العامة عبر اشتراط تطابق معرف التذكرة مع آخر 10 أرقام من هاتف المريض
+        // حماية استرجاع تذكرة المريض العامة عبر اشتراط تطابق معرف التذكرة أو رقمها مع آخر أرقام هاتف المريض
         if (req.method === 'POST' && cleanPathOnly === '/rest/v1/rpc/get_patient_ticket_secure') {
-          const bookingId = typeof req.body?.p_booking_id === 'string' ? req.body.p_booking_id.trim() : '';
-          const rawPhone = String(req.body?.p_patient_phone || '').replace(/\D/g, '');
-          const normPhone = rawPhone.length >= 10 ? rawPhone.slice(-10) : '';
+          const bookingIdOrTicket =
+            typeof req.body?.p_ticket_number === 'string' && req.body.p_ticket_number.trim()
+              ? req.body.p_ticket_number.trim()
+              : typeof req.body?.p_booking_id === 'string'
+              ? req.body.p_booking_id.trim()
+              : '';
+          const rawLast4 = String(req.body?.p_phone_last_4 || '').replace(/\D/g, '');
+          const rawFullPhone = String(req.body?.p_patient_phone || '').replace(/\D/g, '');
+          const normLast4 =
+            rawLast4.length >= 4
+              ? rawLast4.slice(-4)
+              : rawFullPhone.length >= 4
+              ? rawFullPhone.slice(-4)
+              : '';
 
-          if (!bookingId || normPhone.length < 10) {
+          if (!bookingIdOrTicket || normLast4.length < 4) {
             res.status(200).json(null);
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
-          const { data: ticketRow, error: ticketErr } = await adminClient
+          if (!hasRealServiceRole) {
+            const rpcRes = await fetch(targetUrlObj.toString(), {
+              method: 'POST',
+              headers: {
+                apikey: serviceRoleKey,
+                Authorization: `Bearer ${serviceRoleKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                p_ticket_number: bookingIdOrTicket,
+                p_phone_last_4: normLast4,
+              }),
+            });
+            const text = await rpcRes.text();
+            res.status(rpcRes.status).send(text);
+            return;
+          }
+
+          const adminClient = getBridgeDbClient();
+          const { data: candidateRows, error: ticketErr } = await adminClient
             .from('bookings')
             .select('id, ticket_number, patient_name, patient_phone, clinic_id, clinic_name, doctor_id, doctor_name, date, time_slot, queue_position, status, payment_status, payment_method, fee, notes, created_at, called_at, completed_at, paid_at')
-            .eq('id', bookingId)
-            .maybeSingle();
+            .or(`id.eq.${bookingIdOrTicket},ticket_number.ilike.${bookingIdOrTicket}`)
+            .order('created_at', { ascending: false })
+            .limit(10);
 
-          if (ticketErr || !ticketRow || ticketRow.notes === '__PURGED_PAST_BOOKING__') {
+          if (ticketErr || !candidateRows || candidateRows.length === 0) {
             res.status(200).json(null);
             return;
           }
 
-          const rowPhoneDigits = String(ticketRow.patient_phone || '').replace(/\D/g, '');
-          if (rowPhoneDigits.length < 10 || rowPhoneDigits.slice(-10) !== normPhone) {
+          const matchedRow = candidateRows.find((r: any) => {
+            if (r.notes === '__PURGED_PAST_BOOKING__') return false;
+            const rDigits = String(r.patient_phone || '').replace(/\D/g, '');
+            return rDigits.length >= 4 && rDigits.slice(-4) === normLast4;
+          });
+
+          if (!matchedRow) {
             res.status(200).json(null);
             return;
           }
 
-          res.status(200).json(ticketRow);
+          res.status(200).json({
+            ...matchedRow,
+            success: true,
+            ticket: matchedRow,
+          });
           return;
         }
 
@@ -2643,12 +2800,12 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
         // معالجة إنشاء حجز جديد (create_public_booking) مع مزامنة جدول اليوم وتوحيد تاريخ اليوم بتوقيت القاهرة
         if (req.method === 'POST' && cleanPathOnly === '/rest/v1/rpc/create_public_booking') {
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient();
           const cairoToday = getCairoTodayDateStr();
           const targetClinicId = typeof req.body?.p_clinic_id === 'string' ? req.body.p_clinic_id.trim() : '';
 
           // 1. التأكد من تطابق clinics.is_open_today مع جدول تشغيل اليوم (daily_schedule) إن وُجد
-          if (targetClinicId && !targetClinicId.startsWith('_system')) {
+          if (hasRealServiceRole && targetClinicId && !targetClinicId.startsWith('_system')) {
             try {
               const { data: schedRow } = await adminClient
                 .from('daily_schedule')
@@ -2692,7 +2849,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             const createdRow = JSON.parse(rawText);
             if (createdRow && typeof createdRow === 'object' && createdRow.id) {
               // إذا كان تاريخ الحجز المُنشأ بتوقيت UTC مختلفاً عن تاريخ اليوم في القاهرة (بين 12 ص و 3 ص بتوقيت مصر)
-              if (createdRow.date !== cairoToday) {
+              if (hasRealServiceRole && createdRow.date !== cairoToday) {
                 const { data: sameDayRows } = await adminClient
                   .from('bookings')
                   .select('id, queue_position')
@@ -2965,11 +3122,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             const parsed = JSON.parse(rawText);
             const dateParam = targetUrlObj.searchParams.get('date');
             const eqDate = dateParam && dateParam.startsWith('eq.') ? dateParam.slice(3).trim() : '';
-            if (Array.isArray(parsed) && parsed.length === 0 && /^\d{4}-\d{2}-\d{2}$/.test(eqDate)) {
-              const adminClient = getSupabaseAdminClient();
+            if (hasRealServiceRole && Array.isArray(parsed) && parsed.length === 0 && /^\d{4}-\d{2}-\d{2}$/.test(eqDate)) {
+              const adminClient = getBridgeDbClient();
               const [{ data: allClinics }, { data: allDoctors }] = await Promise.all([
                 adminClient.from('clinics').select('id, is_open_today, description').order('id', { ascending: true }),
-                adminClient.from('doctors').select('id, clinic_id, bio').order('id', { ascending: true }),
+                adminClient.from('doctors').select('id, clinic_id, bio, status, is_present_today, schedule_days').order('id', { ascending: true }),
               ]);
 
               const validClinics = (allClinics || []).filter(
@@ -2977,14 +3134,25 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               );
               const validDoctors = (allDoctors || []).filter((d: any) => d.bio !== '__DELETED_DOCTOR__');
 
+              const arabicDays = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+              const parsedDateObj = new Date(`${eqDate}T12:00:00Z`);
+              const dayNameAr = !Number.isNaN(parsedDateObj.getTime())
+                ? arabicDays[parsedDateObj.getUTCDay()]
+                : '';
+
               if (validClinics.length > 0) {
                 const seedRows = validClinics.map((c: any) => {
                   const doc = validDoctors.find((d: any) => d.clinic_id === c.id);
+                  const hasScheduleDays = Array.isArray(doc?.schedule_days) && doc.schedule_days.length > 0;
+                  const isDocScheduledOnDay =
+                    !doc || !hasScheduleDays || !dayNameAr || doc.schedule_days.includes(dayNameAr);
+                  const isDocAvailable =
+                    !doc || (doc.status !== 'offline' && doc.is_present_today !== false);
                   return {
                     date: eqDate,
                     clinic_id: c.id,
                     doctor_id: doc?.id || null,
-                    is_open: c.is_open_today !== false,
+                    is_open: c.is_open_today !== false && isDocAvailable && isDocScheduledOnDay,
                   };
                 });
 
@@ -3056,73 +3224,187 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           return;
         }
 
-        // معالجة قراءة staff_accounts مع حجب البريد الإلكتروني للاستعادة (recovery_email) عن غير المدير (Admin)
-        if (isReadMethod && cleanPathOnly === '/rest/v1/staff_accounts') {
-          let isCallerAdmin = false;
-          if (authenticatedUserJwt && authenticatedUserId) {
-            const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
-            if (verified.ok && verified.caller.role === 'admin') {
-              isCallerAdmin = true;
+        // معالجة استدعاء المريض التالي وتسجيل المتأخر (mark_patient_late_and_call_next) عبر Server Service Role مع فحص ملكية الطبيب
+        if (req.method === 'POST' && cleanPathOnly === '/rest/v1/rpc/mark_patient_late_and_call_next') {
+          if (!authenticatedUserJwt) {
+            res.status(401).json({ message: 'غير مصرح: يجب تسجيل الدخول لتحديث حالة الطابور' });
+            return;
+          }
+
+          const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
+          if (!verified.ok || !['admin', 'reception', 'doctor'].includes(verified.caller.role)) {
+            res.status(403).json({ message: 'غير مصرح بتحديث الطابور' });
+            return;
+          }
+
+          const currentBookingId =
+            typeof req.body?.p_current_booking_id === 'string' && req.body.p_current_booking_id.trim()
+              ? req.body.p_current_booking_id.trim()
+              : null;
+          const nextBookingId =
+            typeof req.body?.p_next_booking_id === 'string' && req.body.p_next_booking_id.trim()
+              ? req.body.p_next_booking_id.trim()
+              : null;
+
+          if (
+            (currentBookingId && !isValidServerEntityId(currentBookingId)) ||
+            (nextBookingId && !isValidServerEntityId(nextBookingId))
+          ) {
+            res.status(400).json({ message: 'معرف الحجز غير صالح' });
+            return;
+          }
+
+          const adminClient = getSupabaseAdminClient();
+
+          // إذا كان المستدعي طبيباً، نتحقق من أن الحجوزات المستهدفة تخص هذا الطبيب أو عيادته حصراً
+          if (verified.caller.role === 'doctor') {
+            const targetIds = [currentBookingId, nextBookingId].filter(Boolean) as string[];
+            if (targetIds.length > 0) {
+              const { data: targetRows } = await adminClient
+                .from('bookings')
+                .select('id, doctor_id, clinic_id')
+                .in('id', targetIds);
+
+              const allOwnedByDoctor =
+                Array.isArray(targetRows) &&
+                targetRows.length === targetIds.length &&
+                targetRows.every(
+                  (r: any) =>
+                    (verified.caller.doctorId && r.doctor_id === verified.caller.doctorId) ||
+                    (verified.caller.clinicId && r.clinic_id === verified.caller.clinicId)
+                );
+
+              if (!allOwnedByDoctor) {
+                res.status(403).json({ message: 'غير مصرح للطبيب بتعديل حجوزات عيادة أو طبيب آخر' });
+                return;
+              }
             }
           }
 
-          const staffRes = await fetch(targetUrlObj.toString(), {
-            method: req.method,
-            headers: {
-              apikey: serviceRoleKey,
-              Authorization: `Bearer ${serviceRoleKey}`,
-              Accept: String(req.headers['accept'] || 'application/json'),
-            },
-          });
-
-          const ct = staffRes.headers.get('content-type') || 'application/json';
-          const rawText = await staffRes.text();
-          if (!staffRes.ok) {
-            res.setHeader('Content-Type', ct);
-            res.status(staffRes.status).send(rawText);
-            return;
+          if (currentBookingId) {
+            await adminClient
+              .from('bookings')
+              .update({ status: 'late' })
+              .eq('id', currentBookingId)
+              .neq('status', 'cancelled');
           }
 
-          try {
-            const parsed = JSON.parse(rawText);
-            const sanitizeStaffRow = (row: any) => {
-              if (!row || typeof row !== 'object') return row;
-              if (isCallerAdmin) return row;
-              // إخفاء البريد الإلكتروني للاستعادة ومعرف المصادقة الداخلي عن الزوار وغير المديرين
-              const safeCopy = { ...row };
-              delete safeCopy.recovery_email;
-              delete safeCopy.recoveryEmail;
-              return safeCopy;
-            };
-            const sanitizedPayload = Array.isArray(parsed)
-              ? parsed.map(sanitizeStaffRow)
-              : sanitizeStaffRow(parsed);
-            res.setHeader('Content-Type', 'application/json; charset=utf-8');
-            res.status(200).json(sanitizedPayload);
-            return;
-          } catch {
-            res.setHeader('Content-Type', ct);
-            res.status(staffRes.status).send(rawText);
-            return;
+          if (nextBookingId) {
+            await adminClient
+              .from('bookings')
+              .update({ status: 'in-progress', called_at: new Date().toISOString() })
+              .eq('id', nextBookingId)
+              .neq('status', 'cancelled');
+          }
+
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.status(200).json({ ok: true });
+          return;
+        }
+
+        // معالجة قراءة staff_accounts مع حجب البريد الإلكتروني للاستعادة (recovery_email) عن غير المدير (Admin)
+        if (cleanPathOnly === '/rest/v1/staff_accounts') {
+          let verifiedCaller: VerifiedStaffCaller | null = null;
+          if (authenticatedUserJwt && authenticatedUserId) {
+            const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
+            if (verified.ok) {
+              verifiedCaller = verified.caller;
+            }
+          }
+          const isCallerAdmin = verifiedCaller?.role === 'admin';
+
+          // منع أي عملية تعديل أو حذف مباشرة على جدول staff_accounts عبر الجسر لغير المدير
+          if (!isReadMethod) {
+            const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
+            const bodyKeys = Object.keys(bodyObj);
+            const isDoctorUnlinkByAdmin =
+              isCallerAdmin &&
+              (req.method === 'PATCH' || req.method === 'PUT') &&
+              bodyKeys.length === 1 &&
+              bodyObj.doctor_id === null &&
+              Boolean(targetUrlObj.searchParams.get('doctor_id')?.startsWith('eq.'));
+
+            if (!isDoctorUnlinkByAdmin) {
+              res.status(403).json({
+                message: 'تعديل حسابات الموظفين يتم حصراً عبر مسارات الخادم الإدارية الموثقة (/api/admin/staff)',
+              });
+              return;
+            }
+          }
+
+          if (isReadMethod) {
+            const staffRes = await fetch(targetUrlObj.toString(), {
+              method: req.method,
+              headers: {
+                apikey: serviceRoleKey,
+                Authorization: `Bearer ${serviceRoleKey}`,
+                Accept: String(req.headers['accept'] || 'application/json'),
+              },
+            });
+
+            const ct = staffRes.headers.get('content-type') || 'application/json';
+            const rawText = await staffRes.text();
+            if (!staffRes.ok) {
+              res.setHeader('Content-Type', ct);
+              res.status(staffRes.status).send(rawText);
+              return;
+            }
+
+            try {
+              const parsed = JSON.parse(rawText);
+              const sanitizeStaffRow = (row: any) => {
+                if (!row || typeof row !== 'object') return row;
+                if (isCallerAdmin) return row;
+                // إخفاء البريد الإلكتروني للاستعادة ومعرف المصادقة الداخلي عن الزوار وغير المديرين
+                const safeCopy = { ...row };
+                delete safeCopy.recovery_email;
+                delete safeCopy.recoveryEmail;
+                if (!verifiedCaller || safeCopy.auth_user_id !== verifiedCaller.authUserId) {
+                  delete safeCopy.auth_user_id;
+                  delete safeCopy.authUserId;
+                }
+                return safeCopy;
+              };
+              const sanitizedPayload = Array.isArray(parsed)
+                ? parsed.map(sanitizeStaffRow)
+                : sanitizeStaffRow(parsed);
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.status(200).json(sanitizedPayload);
+              return;
+            } catch {
+              res.setHeader('Content-Type', ct);
+              res.status(staffRes.status).send(rawText);
+              return;
+            }
           }
         }
 
-        // تصفية جدول العيادات عند القراءة لمنع تسريب أي سجل كلمات مرور قديم (_system_staff_passwords)
+        // تصفية جدول العيادات عند القراءة عبر Server Service Role لمنع تسريب أي سجلات نظام داخلية
         if (isReadMethod && cleanPathOnly === '/rest/v1/clinics') {
-          if (subPath.includes('_system_staff_passwords')) {
+          if (
+            subPath.includes('_system_staff_passwords') ||
+            subPath.includes('_system_otp_challenge_store') ||
+            subPath.includes('_system_audit_logs')
+          ) {
             res.status(200).json(
               String(req.headers['accept'] || '').includes('vnd.pgrst.object') ? null : []
             );
             return;
           }
 
+          let verifiedCallerRole: string | null = null;
+          if (authenticatedUserJwt) {
+            const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
+            if (verified.ok) {
+              verifiedCallerRole = verified.caller.role;
+            }
+          }
+
           const clinicsRes = await fetch(targetUrlObj.toString(), {
             method: req.method,
             headers: {
               apikey: serviceRoleKey,
-              Authorization: authenticatedUserJwt
-                ? `Bearer ${authenticatedUserJwt}`
-                : `Bearer ${serviceRoleKey}`,
+              Authorization: `Bearer ${serviceRoleKey}`,
               Accept: String(req.headers['accept'] || 'application/json'),
             },
           });
@@ -3135,15 +3417,35 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
+          const isForbiddenSystemRow = (rowId: string): boolean => {
+            if (
+              rowId === '_system_staff_passwords' ||
+              rowId === '_system_otp_challenge_store' ||
+              rowId === '_system_audit_logs'
+            ) {
+              return true;
+            }
+            if (rowId === '_system_error_logs' && verifiedCallerRole !== 'admin') {
+              return true;
+            }
+            if (
+              rowId === '_system_whatsapp_sent' &&
+              (!verifiedCallerRole || !['admin', 'reception', 'cashier'].includes(verifiedCallerRole))
+            ) {
+              return true;
+            }
+            return false;
+          };
+
           try {
             const parsed = JSON.parse(rawText);
             if (Array.isArray(parsed)) {
-              const filtered = parsed.filter((row: any) => row?.id !== '_system_staff_passwords');
+              const filtered = parsed.filter((row: any) => !isForbiddenSystemRow(String(row?.id || '')));
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
               res.status(200).json(filtered);
               return;
             }
-            if (parsed && typeof parsed === 'object' && parsed.id === '_system_staff_passwords') {
+            if (parsed && typeof parsed === 'object' && isForbiddenSystemRow(String(parsed.id || ''))) {
               res.status(200).json(null);
               return;
             }
@@ -3165,11 +3467,79 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           }
         }
 
-        // معالجة تحديثات الموظفين الموثقين (الأطباء، الاستقبال، الخزينة، الإدارة) لضمان الحفظ الفعلي في قاعدة البيانات دون تعارض مع سياسات RLS القديمة
+        // معالجة استعلامات وتحديثات الموظفين الموثقين عبر Server Service Role حصراً
         if (authenticatedUserJwt) {
           const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
-          if (verified.ok) {
+          if (!verified.ok) {
+            if (!isReadMethod) {
+              res.status(verified.status).json({ message: verified.error });
+              return;
+            }
+          } else {
             const callerRole = verified.caller.role;
+
+            // (أ-0) قراءة جدول الحجوزات (GET/HEAD /rest/v1/bookings) للموظفين الموثقين عبر Server Service Role مع تطبيق عزل البيانات حسب الدور
+            if (isReadMethod && cleanPathOnly === '/rest/v1/bookings') {
+              const srvHeaders: Record<string, string> = {
+                apikey: serviceRoleKey,
+                Authorization: `Bearer ${serviceRoleKey}`,
+              };
+              for (const hName of ['accept', 'prefer', 'range']) {
+                const val = req.headers[hName];
+                if (typeof val === 'string' && val.length > 0) {
+                  srvHeaders[hName] = val;
+                }
+              }
+
+              const bReadRes = await fetch(targetUrlObj.toString(), {
+                method: req.method,
+                headers: srvHeaders,
+              });
+
+              for (const copyHeader of ['content-type', 'content-range', 'preference-applied']) {
+                const hVal = bReadRes.headers.get(copyHeader);
+                if (hVal) res.setHeader(copyHeader, hVal);
+              }
+
+              if (req.method === 'HEAD' || !bReadRes.ok) {
+                res.status(bReadRes.status).send(await bReadRes.text());
+                return;
+              }
+
+              const rawBookingsText = await bReadRes.text();
+              try {
+                const parsedBookings = JSON.parse(rawBookingsText);
+                if (Array.isArray(parsedBookings)) {
+                  const filteredBookings = parsedBookings
+                    .filter((row: any) => {
+                      if (!row || row.notes === '__PURGED_PAST_BOOKING__') return false;
+                      if (callerRole === 'doctor') {
+                        return (
+                          (verified.caller.doctorId && row.doctor_id === verified.caller.doctorId) ||
+                          (verified.caller.clinicId && row.clinic_id === verified.caller.clinicId)
+                        );
+                      }
+                      return true;
+                    })
+                    .map((row: any) => {
+                      if (callerRole === 'admin') return row;
+                      if (callerRole === 'doctor') {
+                        return { ...row, patient_phone: '' };
+                      }
+                      // الاستقبال والخزينة لا يطلعان على التشخيص الطبي السري
+                      return { ...row, doctor_diagnosis: null };
+                    });
+                  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                  res.status(200).json(filteredBookings);
+                  return;
+                }
+              } catch {
+                // fallback
+              }
+
+              res.status(bReadRes.status).send(rawBookingsText);
+              return;
+            }
 
             // (أ) تحديث بيانات الحضور والجدول الأسبوعي في جدول doctors
             if (
@@ -3186,9 +3556,18 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                 'schedule_days',
                 'schedule_hours',
               ]);
+              const idFilter = targetUrlObj.searchParams.get('id') || '';
+              const targetDoctorId = idFilter.startsWith('eq.') ? idFilter.slice(3).trim() : '';
+              const hasValidTargetDoctorId = isValidServerEntityId(targetDoctorId);
+
+              if (callerRole === 'doctor' && (!verified.caller.doctorId || targetDoctorId !== verified.caller.doctorId)) {
+                res.status(403).json({ message: 'غير مصرح للطبيب بتعديل بيانات حضور أو جدول طبيب آخر' });
+                return;
+              }
+
               const isAllowedForRole =
-                callerRole === 'admin' ||
-                (bodyKeys.length > 0 && bodyKeys.every((k) => allowedKeys.has(k)));
+                (callerRole === 'admin' && (hasValidTargetDoctorId || Boolean(targetUrlObj.searchParams.get('clinic_id')?.startsWith('eq.')))) ||
+                (hasValidTargetDoctorId && bodyKeys.length > 0 && bodyKeys.every((k) => allowedKeys.has(k)));
 
               if (isAllowedForRole) {
                 const srvHeaders: Record<string, string> = {
@@ -3253,10 +3632,14 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               const allowedDelegatedClinicKeys = new Set(['is_open_today', 'price']);
               const isErrorOrWhatsappLog =
                 bodyObj.id === '_system_error_logs' || bodyObj.id === '_system_whatsapp_sent';
+              const idFilter = targetUrlObj.searchParams.get('id') || '';
+              const targetClinicId = idFilter.startsWith('eq.') ? idFilter.slice(3).trim() : '';
+              const hasValidTargetClinicId = isValidServerEntityId(targetClinicId) && !targetClinicId.startsWith('_system');
+
               const isAllowedClinicWrite =
                 callerRole === 'admin' ||
                 isErrorOrWhatsappLog ||
-                (bodyKeys.length > 0 && bodyKeys.every((k) => allowedDelegatedClinicKeys.has(k)));
+                (hasValidTargetClinicId && bodyKeys.length > 0 && bodyKeys.every((k) => allowedDelegatedClinicKeys.has(k)));
 
               if (isAllowedClinicWrite) {
                 const srvHeaders: Record<string, string> = {
@@ -3282,26 +3665,75 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               }
             }
 
-            // (د) تحديث وحذف الحجوزات (bookings) للموظفين المعتمدين (admin, cashier, reception) وفق الصلاحيات المسموحة
+            // (د) تحديث وحذف الحجوزات (bookings) للموظفين المعتمدين (admin, cashier, reception, doctor) وفق الصلاحيات المسموحة
             if (
               !isReadMethod &&
               cleanPathOnly === '/rest/v1/bookings' &&
-              ['admin', 'cashier', 'reception'].includes(callerRole)
+              ['admin', 'cashier', 'reception', 'doctor'].includes(callerRole)
             ) {
               const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
               const bodyKeys = Object.keys(bodyObj);
-              const allowedReceptionBookingKeys = new Set(['status', 'called_at', 'completed_at', 'notes']);
+              const allowedReceptionBookingKeys = new Set([
+                'status',
+                'called_at',
+                'completed_at',
+                'notes',
+                'paid_at',
+                'queue_position',
+              ]);
+              const allowedDoctorBookingKeys = new Set([
+                'status',
+                'called_at',
+                'completed_at',
+                'doctor_diagnosis',
+                'notes',
+              ]);
               const isPurgeFallback =
                 bodyObj.notes === '__PURGED_PAST_BOOKING__' && bodyObj.status === 'cancelled' && bodyKeys.length === 2;
 
+              const rawBookingIdFilter = targetUrlObj.searchParams.get('id') || '';
+              const targetBookingId = rawBookingIdFilter.startsWith('eq.')
+                ? rawBookingIdFilter.slice(3).trim()
+                : '';
+              const hasExplicitBookingIdFilter = isValidServerEntityId(targetBookingId);
+
+              // التحقق الصارم من ملكية الطبيب للحجز قبل السماح بأي تعديل
+              if (callerRole === 'doctor') {
+                if (!hasExplicitBookingIdFilter) {
+                  res.status(403).json({ message: 'يجب تحديد معرف حجز صالح' });
+                  return;
+                }
+                const adminClient = getSupabaseAdminClient();
+                const { data: targetBookingRow } = await adminClient
+                  .from('bookings')
+                  .select('id, doctor_id, clinic_id')
+                  .eq('id', targetBookingId)
+                  .maybeSingle();
+
+                const isOwnedByDoctor =
+                  targetBookingRow &&
+                  ((verified.caller.doctorId && targetBookingRow.doctor_id === verified.caller.doctorId) ||
+                    (verified.caller.clinicId && targetBookingRow.clinic_id === verified.caller.clinicId));
+
+                if (!isOwnedByDoctor) {
+                  res.status(403).json({ message: 'غير مصرح للطبيب بتعديل حجز يخص طبيباً آخر أو عيادة أخرى' });
+                  return;
+                }
+              }
+
               const isAllowedBookingMutation =
                 callerRole === 'admin' ||
-                req.method === 'DELETE' ||
-                isPurgeFallback ||
+                (callerRole !== 'doctor' && (req.method === 'DELETE' || isPurgeFallback) && hasExplicitBookingIdFilter) ||
                 (callerRole === 'reception' &&
+                  hasExplicitBookingIdFilter &&
                   (req.method === 'PATCH' || req.method === 'PUT') &&
                   bodyKeys.length > 0 &&
-                  bodyKeys.every((k) => allowedReceptionBookingKeys.has(k)));
+                  bodyKeys.every((k) => allowedReceptionBookingKeys.has(k))) ||
+                (callerRole === 'doctor' &&
+                  (req.method === 'PATCH' || req.method === 'PUT') &&
+                  hasExplicitBookingIdFilter &&
+                  bodyKeys.length > 0 &&
+                  bodyKeys.every((k) => allowedDoctorBookingKeys.has(k)));
 
               if (isAllowedBookingMutation) {
                 const srvHeaders: Record<string, string> = {
@@ -3333,14 +3765,19 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                 return;
               }
             }
+
+            // منع أي عملية كتابة أو حذف غير مصرح بها لغير مدير النظام (Admin)
+            if (!isReadMethod && callerRole !== 'admin') {
+              res.status(403).json({ message: 'غير مصرح بتنفيذ هذه العملية لهذا الدور الوظيفي' });
+              return;
+            }
           }
         }
 
+        // جميع الاستعلامات المعتمدة المتبقية تمر حصرياً عبر Server Service Role
         const forwardHeaders: Record<string, string> = {
           apikey: serviceRoleKey,
-          Authorization: authenticatedUserJwt
-            ? `Bearer ${authenticatedUserJwt}`
-            : `Bearer ${serviceRoleKey}`,
+          Authorization: `Bearer ${serviceRoleKey}`,
         };
 
         for (const hName of ['accept', 'prefer', 'range', 'content-type', 'accept-profile', 'content-profile']) {
@@ -3392,14 +3829,15 @@ async function startServer() {
 
   // ربط الواجهة الأمامية (Vite في بيئة التطوير أو الملفات المبنية في بيئة الإنتاج على Cloud Run)
   if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
+    const vitePkgName = ['vi', 'te'].join('');
+    const { createServer: createViteServer } = await import(/* @vite-ignore */ vitePkgName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
+    const distPath = path.join(ROOT_DIR, 'dist');
     app.use(express.static(distPath));
     app.use((_req: Request, res: Response) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -3421,6 +3859,13 @@ async function startServer() {
   });
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
+const isMainServerEntry =
+  typeof process !== 'undefined' &&
+  !process.env.VERCEL &&
+  Array.isArray(process.argv) &&
+  Boolean(process.argv[1]) &&
+  /(?:^|[\\/])server\.(?:ts|js|mjs|cjs)$/i.test(process.argv[1]);
+
+if (isMainServerEntry) {
   startServer();
 }
