@@ -288,7 +288,9 @@ CREATE POLICY "Admin modify daily_schedule" ON public.daily_schedule FOR ALL USI
 -- سياسات حسابات الموظفين (staff_accounts)
 DROP POLICY IF EXISTS "Authenticated read staff" ON public.staff_accounts;
 CREATE POLICY "Authenticated read staff" ON public.staff_accounts FOR SELECT USING (
-  auth.uid() IS NOT NULL OR auth.role() = 'anon'
+  (auth.uid() IS NOT NULL AND auth_user_id = auth.uid())
+  OR public.get_auth_role() = 'admin'
+  OR auth.role() = 'service_role'
 );
 
 DROP POLICY IF EXISTS "Admin modify staff" ON public.staff_accounts;
@@ -1471,30 +1473,32 @@ ON CONFLICT (date, clinic_id) DO UPDATE SET
   doctor_id = EXCLUDED.doctor_id;
 
 -- إدراج حسابات الكادر السبعة (مدير، استقبال، خزينة، و4 أطباء للعيادات التخصصية)
+-- ملاحظة هامة: عند التحديث لا يتم استبدال البريد الإلكتروني أو اسم العرض أو اسم المستخدم إذا كان معدلاً مسبقاً
 INSERT INTO public.staff_accounts (id, username, display_name, role, doctor_id, clinic_id, recovery_email)
 VALUES
-  ('staff-admin', 'admin', 'د. أحمد الشناوي (مدير المنظومة)', 'admin', NULL, NULL, 'admin@sharia-clinics.eg'),
-  ('staff-reception', 'reception', 'أ. سارة مصطفى (مسؤولة الاستقبال)', 'reception', NULL, NULL, 'reception@sharia-clinics.eg'),
-  ('staff-cashier', 'cashier', 'أ. محمود إبراهيم (أمين الصندوق والخزينة)', 'cashier', NULL, NULL, 'cashier@sharia-clinics.eg'),
-  ('staff-doctor', 'doctor', 'د. علي عبد الرحمن السقا (طبيب باطنة)', 'doctor', 'doc-1', 'clinic-internal', 'doctor.internal@sharia-clinics.eg'),
-  ('staff-doctor-pediatrics', 'doctor.pediatrics', 'د. فاطمة الزهراء كمال (طبيبة أطفال)', 'doctor', 'doc-2', 'clinic-pediatrics', 'doctor.pediatrics@sharia-clinics.eg'),
-  ('staff-doctor-ortho', 'doctor.ortho', 'د. حسام الدين عبد الله (طبيب عظام)', 'doctor', 'doc-3', 'clinic-orthopedics', 'doctor.ortho@sharia-clinics.eg'),
-  ('staff-doctor-dental', 'doctor.dental', 'د. منى الشاذلي (طبيبة أسنان)', 'doctor', 'doc-4', 'clinic-dental', 'doctor.dental@sharia-clinics.eg')
+  ('staff-admin', 'admin', 'د. أحمد الشناوي (مدير المنظومة)', 'admin', NULL, NULL, 'amrrmybody@gmail.com'),
+  ('staff-reception', 'reception', 'أ. سارة مصطفى (مسؤولة الاستقبال)', 'reception', NULL, NULL, 'amrrmybody@gmail.com'),
+  ('staff-cashier', 'cashier', 'أ. محمود إبراهيم (أمين الصندوق والخزينة)', 'cashier', NULL, NULL, 'amrrmybody@gmail.com'),
+  ('staff-doctor', 'doctor', 'د. علي عبد الرحمن السقا (طبيب باطنة)', 'doctor', 'doc-1', 'clinic-internal', 'amrrmybody@gmail.com'),
+  ('staff-doctor-pediatrics', 'doctor.pediatrics', 'د. فاطمة الزهراء كمال (طبيبة أطفال)', 'doctor', 'doc-2', 'clinic-pediatrics', 'amrrmybody@gmail.com'),
+  ('staff-doctor-ortho', 'doctor.ortho', 'د. حسام الدين عبد الله (طبيب عظام)', 'doctor', 'doc-3', 'clinic-orthopedics', 'amrrmybody@gmail.com'),
+  ('staff-doctor-dental', 'doctor.dental', 'د. منى الشاذلي (طبيبة أسنان)', 'doctor', 'doc-4', 'clinic-dental', 'amrrmybody@gmail.com')
 ON CONFLICT (id) DO UPDATE SET
-  username = EXCLUDED.username,
-  display_name = EXCLUDED.display_name,
-  role = EXCLUDED.role,
-  recovery_email = EXCLUDED.recovery_email;
+  username = COALESCE(NULLIF(public.staff_accounts.username, ''), EXCLUDED.username),
+  display_name = COALESCE(NULLIF(public.staff_accounts.display_name, ''), EXCLUDED.display_name),
+  role = COALESCE(NULLIF(public.staff_accounts.role, ''), EXCLUDED.role),
+  recovery_email = COALESCE(NULLIF(public.staff_accounts.recovery_email, ''), EXCLUDED.recovery_email);
 
 -- إدراج سجلات النظام المخصصة للإعدادات وكلمات المرور المشفرة
 INSERT INTO public.clinics (id, name, specialty, room_number, floor, price, is_open_today, description)
 VALUES 
   ('_system_support_info', 'System Support Info', 'System', '0', 'الأول', 0, false, 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.\nللتواصل: 01014615606'),
-  ('_system_staff_passwords', 'System Staff Passwords', 'System', '0', 'الأول', 0, false, '{"admin":"2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558","reception":"8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804","cashier":"3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6","doctor":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.pediatrics":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.ortho":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.dental":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6"}')
+  ('_system_staff_passwords', 'System Staff Passwords', 'System', '0', 'الأول', 0, false, '{"admin":"68d70815dc7156f32ec82ebfc78e252452f001f445c44ab8f1c7eb8282914bb6","reception":"40153eddc2966e9bc5c95e82fb5932fb442fa03a1e9bb631a4923ddfa606b7f3","cashier":"129a977973c6f333a907da7f0f302387965184145f64e629cfbb8dc83de5689b","doctor":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.pediatrics":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.ortho":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6","doctor.dental":"733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6"}')
 ON CONFLICT (id) DO NOTHING;
 
 -- ==============================================================================
 -- إنشاء مستخدمي Supabase Auth السبعة بكلمات المرور الرسمية وربطهم بـ staff_accounts
+-- (مع الحفاظ على كلمة المرور الحالية في حال تم تغييرها مسبقاً من قِبل المستخدم)
 -- ==============================================================================
 DO $$
 DECLARE
@@ -1521,8 +1525,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Adm@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Reception: Rcp@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1539,8 +1543,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Rcp@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Cashier: Csh@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1557,8 +1561,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Csh@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Doctor (Internal): Doc@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1575,8 +1579,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Doc@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Doctor (Pediatrics): Doc@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1593,8 +1597,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Doc@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Doctor (Orthopedics): Doc@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1611,8 +1615,8 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Doc@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
   -- Doctor (Dental): Doc@Sharia2026!
   INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
@@ -1629,17 +1633,17 @@ BEGIN
     now(),
     now()
   ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = crypt('Doc@Sharia2026!', gen_salt('bf')),
-    email_confirmed_at = now();
+    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
+    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
 
-  -- ربط مع staff_accounts
-  UPDATE public.staff_accounts SET auth_user_id = v_admin_id WHERE username = 'admin';
-  UPDATE public.staff_accounts SET auth_user_id = v_rec_id WHERE username = 'reception';
-  UPDATE public.staff_accounts SET auth_user_id = v_cash_id WHERE username = 'cashier';
-  UPDATE public.staff_accounts SET auth_user_id = v_doc_id WHERE username = 'doctor';
-  UPDATE public.staff_accounts SET auth_user_id = v_doc_ped_id WHERE username = 'doctor.pediatrics';
-  UPDATE public.staff_accounts SET auth_user_id = v_doc_orth_id WHERE username = 'doctor.ortho';
-  UPDATE public.staff_accounts SET auth_user_id = v_doc_dent_id WHERE username = 'doctor.dental';
+  -- ربط مع staff_accounts فقط في حال لم يكن مرتبطاً مسبقاً
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_admin_id) WHERE id = 'staff-admin';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_rec_id) WHERE id = 'staff-reception';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_cash_id) WHERE id = 'staff-cashier';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_id) WHERE id = 'staff-doctor';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_ped_id) WHERE id = 'staff-doctor-pediatrics';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_orth_id) WHERE id = 'staff-doctor-ortho';
+  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_dent_id) WHERE id = 'staff-doctor-dental';
 
 EXCEPTION
   WHEN OTHERS THEN

@@ -1448,10 +1448,19 @@ export async function loginWithSupabaseAuth(
     const cleanUsername = username.trim().toLowerCase();
     const syntheticEmail = `${cleanUsername}@accounts.sharaya-clinics.internal`;
 
-    const { data, error } = await supabase.auth.signInWithPassword({
+    let { data, error } = await supabase.auth.signInWithPassword({
       email: syntheticEmail,
       password: password
     });
+
+    if ((error || !data.user) && password !== password.trim() && password.trim().length > 0) {
+      const retryRes = await supabase.auth.signInWithPassword({
+        email: syntheticEmail,
+        password: password.trim()
+      });
+      data = retryRes.data;
+      error = retryRes.error;
+    }
 
     if (error || !data.user) {
       const errMsg = (error?.message || '').toLowerCase();

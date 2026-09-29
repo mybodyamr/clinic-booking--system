@@ -1543,7 +1543,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       }
 
       // فحص Cooldown لأسماء المستخدمين غير الموجودة لمنع كشف وجود الحساب عبر تكرار الطلبات
-      const cooldownKey = `user:${cleanUsername}`;
+      const cooldownKey = `user:${cleanUsername}:${cleanEmail}`;
       const lastNonExistentAt = nonExistentUserCooldownByKey.get(cooldownKey) || 0;
       const elapsedMemMs = now - lastNonExistentAt;
       if (lastNonExistentAt > 0 && elapsedMemMs < OTP_REQUEST_COOLDOWN_MS) {
@@ -1714,8 +1714,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             const authUid = String(staffRow.auth_user_id);
             const { data: authUserRes } = await adminClient.auth.admin.getUserById(authUid);
             if (authUserRes?.user) {
-              const currentMeta = { ...(authUserRes.user.app_metadata || {}) };
-              delete currentMeta.password_reset_state;
+              const currentMeta = { ...(authUserRes.user.app_metadata || {}), password_reset_state: null };
               await adminClient.auth.admin.updateUserById(authUid, { app_metadata: currentMeta });
             }
           } else {
@@ -1759,7 +1758,10 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
       const cleanUsername = rawUsername.trim().toLowerCase();
       const cleanEmail = rawEmail.trim().toLowerCase();
-      const cleanOtp = rawOtp.trim();
+      const cleanOtp = rawOtp
+        .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+        .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+        .trim();
 
       if (!cleanUsername || !cleanEmail || !/^\d{6}$/.test(cleanOtp)) {
         res.status(400).json({

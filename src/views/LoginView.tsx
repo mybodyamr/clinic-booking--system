@@ -28,6 +28,13 @@ import {
   resetLoginAttempts
 } from '../services/storage';
 
+const normalizeOtpDigits = (value: string): string =>
+  value
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .replace(/\D/g, '')
+    .slice(0, 6);
+
 export const LoginView: React.FC = () => {
   const { login, navigate } = useApp();
   const [username, setUsername] = useState('');
@@ -136,7 +143,7 @@ export const LoginView: React.FC = () => {
     setForgotError('');
     setForgotErrorCode(undefined);
 
-    const cleanOtp = forgotOtp.trim();
+    const cleanOtp = normalizeOtpDigits(forgotOtp);
     if (!/^\d{6}$/.test(cleanOtp)) {
       setForgotError('يرجى إدخال رمز التحقق المكون من 6 أرقام بشكل صحيح.');
       return;
@@ -278,9 +285,12 @@ export const LoginView: React.FC = () => {
             <input
               type="text"
               required
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="مثال: admin أو reception أو doctor"
+              placeholder="مثال: admin أو reception أو cashier أو doctor"
               dir="ltr"
               className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-emerald-500 font-medium"
             />
@@ -308,6 +318,9 @@ export const LoginView: React.FC = () => {
               <input
                 type={showPassword ? 'text' : 'password'}
                 required
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
@@ -449,9 +462,12 @@ export const LoginView: React.FC = () => {
                   <input
                     type="text"
                     required
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
                     value={forgotUsername}
                     onChange={(e) => setForgotUsername(e.target.value)}
-                    placeholder="مثال: reception أو doctor أو admin"
+                    placeholder="مثال: admin أو reception أو cashier أو doctor"
                     dir="ltr"
                     className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white text-xs font-medium focus:ring-2 focus:ring-emerald-500"
                   />
@@ -465,9 +481,12 @@ export const LoginView: React.FC = () => {
                     <input
                       type="email"
                       required
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
                       value={forgotEmail}
                       onChange={(e) => setForgotEmail(e.target.value)}
-                      placeholder="name@sharia-clinics.eg"
+                      placeholder="amrrmybody@gmail.com"
                       dir="ltr"
                       className="w-full pl-9 pr-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white text-xs font-medium focus:ring-2 focus:ring-emerald-500"
                     />
@@ -517,7 +536,7 @@ export const LoginView: React.FC = () => {
                     maxLength={6}
                     required
                     value={forgotOtp}
-                    onChange={(e) => setForgotOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    onChange={(e) => setForgotOtp(normalizeOtpDigits(e.target.value))}
                     placeholder="123456"
                     dir="ltr"
                     className="w-full px-4 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-white text-center tracking-[0.4em] text-base font-bold focus:ring-2 focus:ring-emerald-500"
@@ -546,6 +565,7 @@ export const LoginView: React.FC = () => {
                     onClick={() => {
                       setForgotError('');
                       setForgotErrorCode(undefined);
+                      setResendCooldown(0);
                       setForgotStep('request');
                     }}
                     className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"

@@ -14,7 +14,7 @@ const STORAGE_KEYS = {
   SUPPORT_INFO_TEXT: 'sharaya_support_info_text_v2',
   OFFICIAL_WORKING_HOURS: 'sharaya_official_working_hours_v2',
   STAFF_PASSWORDS: 'sharaya_staff_passwords_v2',
-  LOGIN_ATTEMPTS: 'sharaya_login_attempts_v2',
+  LOGIN_ATTEMPTS: 'sharaya_login_attempts_v3',
   STAFF_ACCOUNTS: 'sharaya_staff_accounts_v2',
   DELETED_CLINICS: 'sharaya_deleted_clinics_v2',
   DELETED_DOCTORS: 'sharaya_deleted_doctors_v2',
@@ -633,6 +633,7 @@ interface LoginAttemptRecord {
  */
 export function checkLoginRateLimit(username: string): { allowed: boolean; remainingSeconds?: number } {
   try {
+    localStorage.removeItem('sharaya_login_attempts_v2');
     const cleanUser = username.trim().toLowerCase();
     const raw = localStorage.getItem(STORAGE_KEYS.LOGIN_ATTEMPTS);
     if (!raw) return { allowed: true };
