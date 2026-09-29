@@ -148,6 +148,27 @@ export const DoctorView: React.FC = () => {
   return (
     <div className="space-y-6 pb-16">
       
+      {/* شريط اختيار الطبيب لمدير النظام عند معاينة شاشة الأطباء */}
+      {currentUser?.role === 'admin' && doctors.length > 1 && (
+        <div className="bg-emerald-50/80 dark:bg-slate-800/80 p-4 rounded-2xl border border-emerald-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-xs font-bold text-emerald-900 dark:text-emerald-300 flex items-center gap-2">
+            <Stethoscope className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
+            <span>معاينة بوابة الطبيب (صلاحية مدير النظام):</span>
+          </div>
+          <select
+            value={currentDoctor.id}
+            onChange={(e) => setAdminSelectedDocId(e.target.value)}
+            className="px-3.5 py-2 rounded-xl border border-emerald-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs font-bold text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+          >
+            {doctors.map((doc) => (
+              <option key={doc.id} value={doc.id}>
+                {doc.name} — {doc.clinicName}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* رأس شاشة الطبيب وحالة التواجد وجدول العمل */}
       <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-6">
         <div className="flex items-center gap-4">
