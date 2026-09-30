@@ -259,11 +259,27 @@ export async function verifyStaffFromBearerToken(
   try {
     adminClient = getSupabaseAdminClient();
   } catch {
-    return {
-      ok: false,
-      status: 503,
-      error: 'إعدادات خادم المصادقة السحابي غير مكتملة حالياً',
-    };
+    const supabaseUrl = getServerSupabaseUrl();
+    const publishableKey = getServerPublishableKey();
+    if (!supabaseUrl || !publishableKey) {
+      return {
+        ok: false,
+        status: 503,
+        error: 'إعدادات خادم المصادقة السحابي غير مكتملة حالياً',
+      };
+    }
+    adminClient = createClient(supabaseUrl, publishableKey, {
+      auth: {
+        persistSession: false,
+        autoRefreshToken: false,
+        detectSessionInUrl: false,
+      },
+      global: {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      },
+    });
   }
 
   const { data: userData, error: authError } = await adminClient.auth.getUser(accessToken);
@@ -496,10 +512,36 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   // Phase 3: إنشاء وإدارة حسابات الموظفين من لوحة Admin (حصر الصلاحية بـ Admin)
   // ============================================================================
 
-  // 1) جلب قائمة جميع حسابات الموظفين
-  const handleListStaff = async (_req: AuthenticatedRequest, res: Response) => {
+  const getAdminOrRequestClient = (req: Request): SupabaseClient => {
     try {
-      const adminClient = getSupabaseAdminClient();
+      return getSupabaseAdminClient();
+    } catch {
+      const supabaseUrl = getServerSupabaseUrl();
+      const publishableKey = getServerPublishableKey();
+      const authHeader = req.headers.authorization;
+      return createClient(supabaseUrl, publishableKey, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+        ...(authHeader
+          ? {
+              global: {
+                headers: {
+                  Authorization: authHeader,
+                },
+              },
+            }
+          : {}),
+      });
+    }
+  };
+
+  // 1) جلب قائمة جميع حسابات الموظفين
+  const handleListStaff = async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const adminClient = getAdminOrRequestClient(req);
       const { data, error } = await adminClient
         .from('staff_accounts')
         .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
@@ -780,7 +822,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   // 3) تعديل بيانات حساب موظف حالي (مع تحديث auth.users و staff_accounts)
   const handleUpdateStaff = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const adminClient = getSupabaseAdminClient();
+      const adminClient = getAdminOrRequestClient(req);
+      const hasServiceRole = Boolean(getServerServiceRoleKey(getServerSupabaseUrl()));
       const staffId = String(req.params.id || '').trim();
 
       if (!staffId || !isValidServerEntityId(staffId)) {
@@ -1015,7 +1058,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       const effectiveAuthUserId: string | null = currentAcc.auth_user_id || null;
       const syntheticEmail = buildSyntheticAuthEmail(effectiveUsername);
 
-      if (effectiveAuthUserId) {
+      if (effectiveAuthUserId && hasServiceRole) {
         const authUpdates: Record<string, any> = {
           email: syntheticEmail,
           email_confirm: true,
@@ -1041,7 +1084,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           });
           return;
         }
-      } else if (rawPassword) {
+      } else if (!effectiveAuthUserId && rawPassword) {
         res.status(400).json({
           ok: false,
           error: `الحساب (${oldUsername}) هو حساب محلي قديم غير مرتبط بـ Supabase Auth؛ لا يتم إنشاء أو ربط حساب سحابي له تلقائياً أثناء التعديل.`,
@@ -1308,7 +1351,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   // 5) حذف حساب موظف من staff_accounts وحذف مستخدم auth.users المرتبط به
   const handleDeleteStaff = async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const adminClient = getSupabaseAdminClient();
+      const adminClient = getAdminOrRequestClient(req);
       const staffId = String(req.params.id || '').trim();
 
       if (!staffId || !isValidServerEntityId(staffId)) {
@@ -2430,16 +2473,29 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         return;
       }
 
-      const getBridgeDbClient = (): SupabaseClient => {
+      let authenticatedUserJwt: string | null = null;
+      let authenticatedUserId: string | null = null;
+
+      const getBridgeDbClient = (overrideJwt?: string | null): SupabaseClient => {
         if (hasRealServiceRole) {
           return getSupabaseAdminClient();
         }
+        const activeJwt = overrideJwt !== undefined ? overrideJwt : authenticatedUserJwt;
         return createClient(supabaseUrl, serviceRoleKey, {
           auth: {
             persistSession: false,
             autoRefreshToken: false,
             detectSessionInUrl: false,
           },
+          ...(activeJwt
+            ? {
+                global: {
+                  headers: {
+                    Authorization: `Bearer ${activeJwt}`,
+                  },
+                },
+              }
+            : {}),
         });
       };
 
@@ -2455,7 +2511,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         return;
       }
 
-      const subPath = req.originalUrl.replace(/^\/api\/supabase-bridge/, '') || '/';
+      const rawCandidatePath =
+        req.url && req.url !== '/' && !req.url.startsWith('/api/index')
+          ? req.url
+          : req.originalUrl;
+      const subPath = rawCandidatePath.replace(/^\/api\/supabase-bridge/, '') || '/';
       const cleanPathOnly = subPath.split('?')[0];
 
       // حماية ضد Path Traversal أو محاولات التلاعب بالمسارات (SSRF / Injection)
@@ -2486,8 +2546,6 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       }
 
       // التحقق التشفيري الحقيقي من رمز المستخدم الموثق (JWT) عبر Supabase Auth لمنع تزوير الرموز من الكونسول
-      let authenticatedUserJwt: string | null = null;
-      let authenticatedUserId: string | null = null;
       const authHeader = req.headers.authorization;
       if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
         const candidateToken = authHeader.slice('Bearer '.length).trim();
@@ -2591,7 +2649,16 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
         // دالة مساعدة لإرجاع طابور الانتظار العام مع إخفاء الأسماء وحجب الهواتف والتشخيصات تماماً
         const sendSafePublicQueueDisplay = async () => {
-          const adminClient = getBridgeDbClient();
+          const adminClient = getBridgeDbClient(null);
+          if (!hasRealServiceRole) {
+            const { data: pubRows, error: pubErr } = await adminClient
+              .from('public_queue_display')
+              .select('*');
+            if (!pubErr && Array.isArray(pubRows)) {
+              res.status(200).json(pubRows);
+              return;
+            }
+          }
           const { data: rows, error: bErr } = await adminClient
             .from('bookings')
             .select('id, ticket_number, patient_name, clinic_id, clinic_name, doctor_id, doctor_name, date, queue_position, status, payment_status, called_at, paid_at, notes')
@@ -2600,7 +2667,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             .order('queue_position', { ascending: true });
 
           if (bErr) {
-            res.status(500).json({ message: 'Failed to load public queue' });
+            res.status(200).json([]);
             return;
           }
 
@@ -2775,7 +2842,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           const cairoToday = getCairoTodayDateStr();
           const utcToday = new Date().toISOString().split('T')[0];
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
           const { data: todayRows } = await adminClient
             .from('bookings')
             .select('id, ticket_number, patient_name, patient_phone, clinic_id, clinic_name, doctor_id, doctor_name, date, time_slot, queue_position, status, payment_status, payment_method, fee, notes, created_at, called_at, completed_at, paid_at')
@@ -3069,7 +3136,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
 
           // 1. الحذف الفعلي من جدول bookings باستخدام صلاحية الخادم
           await adminClient
@@ -3198,7 +3265,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
           const { data: allBookings } = await adminClient
             .from('bookings')
             .select('*')
@@ -3254,7 +3321,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
 
           // إذا كان المستدعي طبيباً، نتحقق من أن الحجوزات المستهدفة تخص هذا الطبيب أو عيادته حصراً
           if (verified.caller.role === 'doctor') {
@@ -3356,11 +3423,14 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           }
 
           if (isReadMethod) {
+            const effectiveStaffBearer = hasRealServiceRole
+              ? serviceRoleKey
+              : (authenticatedUserJwt || serviceRoleKey);
             const staffRes = await fetch(targetUrlObj.toString(), {
               method: req.method,
               headers: {
                 apikey: serviceRoleKey,
-                Authorization: `Bearer ${serviceRoleKey}`,
+                Authorization: `Bearer ${effectiveStaffBearer}`,
                 Accept: String(req.headers['accept'] || 'application/json'),
               },
             });
@@ -3378,14 +3448,10 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               const sanitizeStaffRow = (row: any) => {
                 if (!row || typeof row !== 'object') return row;
                 if (isCallerAdmin) return row;
-                // إخفاء البريد الإلكتروني للاستعادة ومعرف المصادقة الداخلي عن الزوار وغير المديرين
+                // إخفاء البريد الإلكتروني للاستعادة عن الزوار وغير المديرين مع الإبقاء على ارتباط المصادقة لمنع الجلسات الوهمية
                 const safeCopy = { ...row };
                 delete safeCopy.recovery_email;
                 delete safeCopy.recoveryEmail;
-                if (!verifiedCaller || safeCopy.auth_user_id !== verifiedCaller.authUserId) {
-                  delete safeCopy.auth_user_id;
-                  delete safeCopy.authUserId;
-                }
                 return safeCopy;
               };
               const sanitizedPayload = Array.isArray(parsed)
@@ -3490,7 +3556,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           }
         }
 
-        // معالجة استعلامات وتحديثات الموظفين الموثقين عبر Server Service Role حصراً
+        // معالجة استعلامات وتحديثات الموظفين الموثقين عبر Server Service Role أو رمز JWT الموثق
+        const effectiveAuthBearer = hasRealServiceRole
+          ? serviceRoleKey
+          : (authenticatedUserJwt || serviceRoleKey);
+
         if (authenticatedUserJwt) {
           const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
           if (!verified.ok) {
@@ -3501,11 +3571,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           } else {
             const callerRole = verified.caller.role;
 
-            // (أ-0) قراءة جدول الحجوزات (GET/HEAD /rest/v1/bookings) للموظفين الموثقين عبر Server Service Role مع تطبيق عزل البيانات حسب الدور
+            // (أ-0) قراءة جدول الحجوزات (GET/HEAD /rest/v1/bookings) للموظفين الموثقين مع تطبيق عزل البيانات حسب الدور
             if (isReadMethod && cleanPathOnly === '/rest/v1/bookings') {
               const srvHeaders: Record<string, string> = {
                 apikey: serviceRoleKey,
-                Authorization: `Bearer ${serviceRoleKey}`,
+                Authorization: `Bearer ${effectiveAuthBearer}`,
               };
               for (const hName of ['accept', 'prefer', 'range']) {
                 const val = req.headers[hName];
@@ -3601,7 +3671,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               if (isAllowedForRole) {
                 const srvHeaders: Record<string, string> = {
                   apikey: serviceRoleKey,
-                  Authorization: `Bearer ${serviceRoleKey}`,
+                  Authorization: `Bearer ${effectiveAuthBearer}`,
                   'Content-Type': 'application/json',
                 };
                 for (const hName of ['accept', 'prefer']) {
@@ -3630,7 +3700,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             ) {
               const srvHeaders: Record<string, string> = {
                 apikey: serviceRoleKey,
-                Authorization: `Bearer ${serviceRoleKey}`,
+                Authorization: `Bearer ${effectiveAuthBearer}`,
                 'Content-Type': 'application/json',
               };
               for (const hName of ['accept', 'prefer']) {
@@ -3673,7 +3743,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               if (isAllowedClinicWrite) {
                 const srvHeaders: Record<string, string> = {
                   apikey: serviceRoleKey,
-                  Authorization: `Bearer ${serviceRoleKey}`,
+                  Authorization: `Bearer ${effectiveAuthBearer}`,
                   'Content-Type': 'application/json',
                 };
                 for (const hName of ['accept', 'prefer']) {
@@ -3732,7 +3802,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                   res.status(403).json({ message: 'يجب تحديد معرف حجز صالح' });
                   return;
                 }
-                const adminClient = getSupabaseAdminClient();
+                const adminClient = getBridgeDbClient(authenticatedUserJwt);
                 const { data: targetBookingRow } = await adminClient
                   .from('bookings')
                   .select('id, doctor_id, clinic_id')
@@ -3767,7 +3837,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               if (isAllowedBookingMutation) {
                 const srvHeaders: Record<string, string> = {
                   apikey: serviceRoleKey,
-                  Authorization: `Bearer ${serviceRoleKey}`,
+                  Authorization: `Bearer ${effectiveAuthBearer}`,
                 };
                 for (const hName of ['accept', 'prefer', 'range', 'content-type']) {
                   const val = req.headers[hName];
@@ -3803,10 +3873,10 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           }
         }
 
-        // جميع الاستعلامات المعتمدة المتبقية تمر حصرياً عبر Server Service Role
+        // جميع الاستعلامات المعتمدة المتبقية تمر عبر Server Service Role أو رمز المستخدم الموثق
         const forwardHeaders: Record<string, string> = {
           apikey: serviceRoleKey,
-          Authorization: `Bearer ${serviceRoleKey}`,
+          Authorization: `Bearer ${effectiveAuthBearer}`,
         };
 
         for (const hName of ['accept', 'prefer', 'range', 'content-type', 'accept-profile', 'content-profile']) {

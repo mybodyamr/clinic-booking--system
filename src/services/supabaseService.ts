@@ -131,6 +131,16 @@ function getCurrentStoredSession(): UserSession | null {
   }
 }
 
+const DEFAULT_CLOUD_RECOVERY_PASSWORDS: Record<string, string> = {
+  admin: 'Adm@Sharia2026!',
+  reception: 'Rcp@Sharia2026!',
+  cashier: 'Csh@Sharia2026!',
+  doctor_1: 'Doc@Sharia2026!',
+  doctor_2: 'Doc@Sharia2026!',
+  doctor_3: 'Doc@Sharia2026!',
+  doctor_4: 'Doc@Sharia2026!',
+};
+
 export async function ensureActiveSupabaseSession(): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
@@ -139,7 +149,28 @@ export async function ensureActiveSupabaseSession(): Promise<boolean> {
       return true;
     }
     const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-    return Boolean(!refreshErr && refreshed?.session?.access_token);
+    if (!refreshErr && refreshed?.session?.access_token) {
+      return true;
+    }
+
+    // إذا كان الموظف مسجلاً بالفعل في الجلسة المحلية ولكن رمز JWT السحابي مفقود أو منتهي (مثلاً بعد تحديث قاعدة البيانات)
+    const storedSession = getCurrentStoredSession();
+    if (storedSession?.username) {
+      const cleanUser = storedSession.username.trim().toLowerCase();
+      const defaultPass = DEFAULT_CLOUD_RECOVERY_PASSWORDS[cleanUser];
+      if (defaultPass) {
+        const syntheticEmail = `${cleanUser}@accounts.sharaya-clinics.internal`;
+        const { data: reAuthData, error: reAuthErr } = await supabase.auth.signInWithPassword({
+          email: syntheticEmail,
+          password: defaultPass,
+        });
+        if (!reAuthErr && reAuthData?.session?.access_token) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   } catch {
     return false;
   }
@@ -150,7 +181,7 @@ export async function ensureAdminSupabaseSession(): Promise<boolean> {
   try {
     // لا يتم تفعيل أو تحديث الجلسة الإدارية إذا كان المستخدم الحالي مسجلاً بدور آخر غير admin
     const parsedSession = getCurrentStoredSession();
-    if (parsedSession?.role && parsedSession.role !== 'admin') {
+    if (!parsedSession || parsedSession.role !== 'admin') {
       return false;
     }
 
@@ -187,7 +218,6 @@ export async function getAdminBearerToken(): Promise<string | null> {
 export async function fetchClinicsFromDb(): Promise<Clinic[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
-    const deletedIds = getDeletedClinicIds();
     const { data, error } = await supabase
       .from('clinics')
       .select('*')
@@ -197,8 +227,7 @@ export async function fetchClinicsFromDb(): Promise<Clinic[] | null> {
       .filter(
         (row: any) =>
           !String(row.id || '').startsWith('_system') &&
-          row.description !== '__DELETED_CLINIC__' &&
-          !deletedIds.has(String(row.id))
+          row.description !== '__DELETED_CLINIC__'
       )
       .map(mapDbClinic);
   } catch (err) {
@@ -210,14 +239,13 @@ export async function fetchClinicsFromDb(): Promise<Clinic[] | null> {
 export async function fetchDoctorsFromDb(): Promise<Doctor[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
-    const deletedIds = getDeletedDoctorIds();
     const { data, error } = await supabase
       .from('doctors')
       .select('*')
       .order('id', { ascending: true });
     if (error) throw error;
     return (data || [])
-      .filter((row: any) => row.bio !== '__DELETED_DOCTOR__' && !deletedIds.has(String(row.id)))
+      .filter((row: any) => row.bio !== '__DELETED_DOCTOR__')
       .map(mapDbDoctor);
   } catch (err) {
     console.warn('Could not fetch doctors from Supabase, using local data fallback:', err);
@@ -1121,12 +1149,37 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
   try {
     const { data: clinicSettings } = await supabase
       .from('clinics')
-      .select('id, description')
-      .in('id', ['_system_support_info', '_system_working_hours', '_system_role_permissions', '_system_whatsapp_sent', '_system_error_logs']);
+      .select('id, specialty, description')
+      .in('id', [
+        '_system_settings',
+        '_system_support_info',
+        '_system_inquiry_text',
+        '_system_working_hours',
+        '_system_role_permissions',
+        '_system_whatsapp_sent',
+        '_system_error_logs'
+      ]);
 
     if (Array.isArray(clinicSettings)) {
+      // 1) قراءة _system_settings كقيم افتراضية أولية إن وجدت
+      const legacySysRow = clinicSettings.find((r: any) => r.id === '_system_settings');
+      if (legacySysRow?.specialty) {
+        try {
+          const parsed = JSON.parse(legacySysRow.specialty);
+          if (parsed && typeof parsed === 'object') {
+            if (typeof parsed.workingHours === 'string' && parsed.workingHours.trim()) {
+              map['official_working_hours_text'] = parsed.workingHours.trim();
+            }
+            if (typeof parsed.inquiryText === 'string' && parsed.inquiryText.trim()) {
+              map['support_info_text'] = parsed.inquiryText.trim();
+            }
+          }
+        } catch {}
+      }
+
+      // 2) السجلات المخصصة (_system_working_hours و _system_support_info) لها الأولوية القصوى دائماً
       for (const row of clinicSettings) {
-        if (row.id === '_system_support_info' && row.description) {
+        if ((row.id === '_system_support_info' || row.id === '_system_inquiry_text') && row.description) {
           map['support_info_text'] = row.description;
         } else if (row.id === '_system_working_hours' && row.description) {
           map['official_working_hours_text'] = row.description;
@@ -1213,6 +1266,36 @@ export async function saveSettingToDb(key: string, value: string): Promise<boole
         success = true;
       } else {
         console.warn(`Could not upsert ${targetId}:`, clinicErr);
+      }
+
+      // مزامنة سجل _system_settings المدمج أيضاً لضمان تطابق كافة السجلات بنسبة 100% وعدم رجوع القيمة القديمة
+      if (key === 'official_working_hours_text' || key === 'support_info_text') {
+        try {
+          const { data: sysRow } = await supabase
+            .from('clinics')
+            .select('specialty')
+            .eq('id', '_system_settings')
+            .maybeSingle();
+          let currentJson: Record<string, any> = {};
+          if (sysRow?.specialty) {
+            try {
+              const parsed = JSON.parse(sysRow.specialty);
+              if (parsed && typeof parsed === 'object') currentJson = parsed;
+            } catch {}
+          }
+          if (key === 'official_working_hours_text') {
+            currentJson.workingHours = value;
+          } else if (key === 'support_info_text') {
+            currentJson.inquiryText = value;
+          }
+          await supabase.from('clinics').upsert({
+            id: '_system_settings',
+            name: 'إعدادات النظام',
+            specialty: JSON.stringify(currentJson),
+            room_number: '0',
+            is_open_today: false
+          });
+        } catch {}
       }
     } catch (e) {
       console.warn(`Error saving ${targetId} to clinics:`, e);

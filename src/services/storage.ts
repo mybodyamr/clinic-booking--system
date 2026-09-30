@@ -23,6 +23,36 @@ const STORAGE_KEYS = {
   PENDING_ERROR_LOGS: 'sharaya_pending_error_logs_v1',
 };
 
+const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
+const CURRENT_CLOUD_CACHE_VERSION = 'v5_supabase_live_sync';
+
+if (typeof window !== 'undefined') {
+  try {
+    const installedVersion = localStorage.getItem(CLOUD_CACHE_VERSION_KEY);
+    if (installedVersion !== CURRENT_CLOUD_CACHE_VERSION) {
+      const keysToReset = [
+        STORAGE_KEYS.CLINICS,
+        STORAGE_KEYS.DOCTORS,
+        STORAGE_KEYS.BOOKINGS,
+        STORAGE_KEYS.DAILY_SCHEDULE,
+        STORAGE_KEYS.SUPPORT_INFO_TEXT,
+        STORAGE_KEYS.OFFICIAL_WORKING_HOURS,
+        STORAGE_KEYS.STAFF_PASSWORDS,
+        STORAGE_KEYS.STAFF_ACCOUNTS,
+        STORAGE_KEYS.DELETED_CLINICS,
+        STORAGE_KEYS.DELETED_DOCTORS,
+        STORAGE_KEYS.DELETED_BOOKINGS,
+      ];
+      for (const k of keysToReset) {
+        localStorage.removeItem(k);
+      }
+      localStorage.setItem(CLOUD_CACHE_VERSION_KEY, CURRENT_CLOUD_CACHE_VERSION);
+    }
+  } catch {
+    // ignore storage access errors
+  }
+}
+
 export const DEFAULT_SUPPORT_INFO_TEXT = 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.';
 export const DEFAULT_OFFICIAL_WORKING_HOURS = 'يومياً من 9:00 ص حتى 10:00 م';
 

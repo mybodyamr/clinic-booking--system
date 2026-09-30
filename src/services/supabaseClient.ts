@@ -49,11 +49,42 @@ const baseClient: SupabaseClient = createClient(rawUrl, rawKey, {
   },
 });
 
-// تغليف آمن لقنوات Realtime في المتصفح لمنع تسريب أي مفتاح في روابط WebSocket أو ظهور أخطاء بالكونسول
+const CLOUD_REALTIME_URL =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta.env?.VITE_SUPABASE_PROJECT_URL || import.meta.env?.VITE_SUPABASE_URL)) ||
+  'https://rugwzfaiensjdxtoipop.supabase.co';
+
+const CLOUD_REALTIME_PUB_KEY =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta.env?.VITE_SUPABASE_PUBLIC_KEY || import.meta.env?.VITE_SUPABASE_ANON_KEY)) ||
+  'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2';
+
+const cloudRealtimeClient: SupabaseClient | null =
+  typeof window !== 'undefined'
+    ? createClient(CLOUD_REALTIME_URL, CLOUD_REALTIME_PUB_KEY, {
+        auth: {
+          persistSession: false,
+          autoRefreshToken: false,
+          detectSessionInUrl: false,
+        },
+        realtime: {
+          params: {
+            eventsPerSecond: 10,
+          },
+        },
+      })
+    : null;
+
+// تغليف مزدوج لقنوات Realtime يجمع بين Supabase Cloud Realtime عبر الأجهزة المختلفة و BroadcastChannel للتبويبات المحلية
 if (typeof window !== 'undefined') {
   const createSafeChannel = (channelName: string) => {
     const bc = getOrCreateBroadcastChannel(channelName);
-    const listeners: Array<{ event: string; callback: (payload: any) => void }> = [];
+    const listeners: Array<{ type: string; event: string; callback: (payload: any) => void }> = [];
+    const cloudCh = cloudRealtimeClient
+      ? cloudRealtimeClient.channel(channelName, {
+          config: { broadcast: { self: false } },
+        })
+      : null;
 
     if (bc) {
       bc.onmessage = (ev) => {
@@ -72,12 +103,38 @@ if (typeof window !== 'undefined') {
     }
 
     const safeChannelObj: any = {
-      on: (_type: string, filter: { event?: string }, callback: (payload: any) => void) => {
-        listeners.push({ event: filter?.event || '*', callback });
+      on: (type: string, filter: any, callback: (payload: any) => void) => {
+        const evtName = filter?.event || '*';
+        listeners.push({ type, event: evtName, callback });
+        if (cloudCh) {
+          try {
+            (cloudCh as any).on(type, filter, (payload: any) => {
+              try {
+                callback(payload);
+              } catch {
+                // ignore callback error
+              }
+            });
+          } catch {
+            // ignore cloud listener registration error
+          }
+        }
         return safeChannelObj;
       },
       subscribe: (callback?: (status: string, err?: any) => void) => {
-        if (typeof callback === 'function') {
+        if (cloudCh) {
+          try {
+            cloudCh.subscribe((status: string, err?: any) => {
+              if (typeof callback === 'function') {
+                callback(status, err);
+              }
+            });
+          } catch {
+            if (typeof callback === 'function') {
+              setTimeout(() => callback('SUBSCRIBED'), 0);
+            }
+          }
+        } else if (typeof callback === 'function') {
           setTimeout(() => callback('SUBSCRIBED'), 0);
         }
         return safeChannelObj;
@@ -88,16 +145,42 @@ if (typeof window !== 'undefined') {
         } catch {
           // ignore
         }
+        if (cloudCh) {
+          try {
+            await cloudCh.send(payload);
+          } catch {
+            // ignore cloud send error
+          }
+        }
         return 'ok';
       },
-      unsubscribe: async () => 'ok',
+      unsubscribe: async () => {
+        if (cloudCh) {
+          try {
+            await cloudCh.unsubscribe();
+          } catch {
+            // ignore
+          }
+        }
+        return 'ok';
+      },
+      _cloudCh: cloudCh,
     };
 
     return safeChannelObj;
   };
 
   (baseClient as any).channel = (name: string) => createSafeChannel(name);
-  (baseClient as any).removeChannel = async () => 'ok';
+  (baseClient as any).removeChannel = async (ch: any) => {
+    if (ch?._cloudCh && cloudRealtimeClient) {
+      try {
+        await cloudRealtimeClient.removeChannel(ch._cloudCh);
+      } catch {
+        // ignore
+      }
+    }
+    return 'ok';
+  };
 }
 
 export const supabase: SupabaseClient = baseClient;

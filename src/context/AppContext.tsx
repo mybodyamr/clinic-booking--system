@@ -105,6 +105,7 @@ import {
   loginWithSupabaseAuth, 
   logoutFromSupabase, 
   subscribeToBookingsRealtime,
+  ensureActiveSupabaseSession,
   ensureAdminSupabaseSession,
   adminChangeStaffPassword,
   deleteBookingsBeforeDateFromDb,
@@ -301,6 +302,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveTheme(theme);
   }, [theme]);
 
+  const lastSettingsSaveAtRef = React.useRef<number>(0);
+
   // مزامنة البيانات مع Supabase عند بدء التشغيل وتفعيل التحديث اللحظي Realtime
   useEffect(() => {
     if (!isSupabaseConfigured) return;
@@ -333,6 +336,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     async function loadSupabaseData() {
       try {
+        if (getStoredSession()) {
+          await ensureActiveSupabaseSession();
+        }
+
         const [dbClinics, dbDoctors, dbBookings, dbSchedule, dbStaff, dbSettings] = await Promise.all([
           fetchClinicsFromDb(),
           fetchDoctorsFromDb(),
@@ -605,6 +612,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } catch {}
         }
       })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'doctors' }, async () => {
+        if (!isMounted) return;
+        try {
+          const freshDoctors = await fetchDoctorsFromDb();
+          if (freshDoctors && freshDoctors.length > 0 && isMounted) {
+            setDoctors(freshDoctors);
+            saveDoctors(freshDoctors);
+          }
+        } catch {}
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_schedule' }, async () => {
+        if (!isMounted) return;
+        try {
+          const currentToday = getLocalDateStr(new Date());
+          const freshSched = await fetchDailyScheduleFromDb(currentToday);
+          if (freshSched && freshSched.items.length > 0 && isMounted) {
+            setDailySchedule(freshSched);
+            saveDailySchedule(freshSched);
+          }
+        } catch {}
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clinics' }, async () => {
+        if (!isMounted) return;
+        try {
+          const [freshClinics, freshSettings] = await Promise.all([
+            fetchClinicsFromDb(),
+            fetchSettingsFromDb()
+          ]);
+          if (freshClinics && freshClinics.length > 0 && isMounted) {
+            setClinics(freshClinics);
+            saveClinics(freshClinics);
+          }
+          if (freshSettings && isMounted && Date.now() - lastSettingsSaveAtRef.current > 5000) {
+            if (freshSettings['support_info_text']) {
+              setSupportInfoText(freshSettings['support_info_text']);
+              saveSupportInfoText(freshSettings['support_info_text']);
+            }
+            if (freshSettings['official_working_hours_text']) {
+              setOfficialWorkingHours(freshSettings['official_working_hours_text']);
+              saveOfficialWorkingHours(freshSettings['official_working_hours_text']);
+            }
+          }
+        } catch {}
+      })
       .subscribe();
 
     const handleLocalErrorLogged = (event: Event) => {
@@ -696,7 +747,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
 
-        if (freshSettings?.['support_info_text'] && isMounted) {
+        if (freshSettings?.['support_info_text'] && isMounted && Date.now() - lastSettingsSaveAtRef.current > 5000) {
           setSupportInfoText(prev => {
             if (prev !== freshSettings['support_info_text']) {
               saveSupportInfoText(freshSettings['support_info_text']);
@@ -706,7 +757,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           });
         }
 
-        if (freshSettings?.['official_working_hours_text'] && isMounted) {
+        if (freshSettings?.['official_working_hours_text'] && isMounted && Date.now() - lastSettingsSaveAtRef.current > 5000) {
           setOfficialWorkingHours(prev => {
             if (prev !== freshSettings['official_working_hours_text']) {
               saveOfficialWorkingHours(freshSettings['official_working_hours_text']);
@@ -749,7 +800,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } catch {
         // silent fallback
       }
-    }, 7000);
+    }, 4000);
 
     return () => {
       isMounted = false;
@@ -948,12 +999,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let authSuccess = false;
     let matchedUser: UserSession | null = null;
 
-    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline أو للحسابات المحلية غير المرتبطة بـ authUserId
+    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline فقط
     const matchedAccount = staffAccounts.find(
       acc => acc.username.toLowerCase() === cleanUser
     );
 
-    if (matchedAccount && (!rejectedByCloudAuth || !matchedAccount.authUserId)) {
+    if (matchedAccount && !rejectedByCloudAuth && !isSupabaseConfigured) {
       const storedHashes = getStoredStaffPasswordHashes();
       const providedHash = await hashPassword(pass);
       const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
@@ -1960,7 +2011,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isOwnDoctorSession =
       currentUser?.role === 'doctor' &&
       (!currentUser.doctorId || currentUser.doctorId === doctorId);
-    if (!isOwnDoctorSession && !hasPermission(currentUser?.role, 'manage_doctor_attendance')) {
+    const canModifySchedule =
+      currentUser?.role === 'admin' ||
+      isOwnDoctorSession ||
+      hasPermission(currentUser?.role, 'manage_doctor_attendance');
+
+    if (!currentUser || !canModifySchedule) {
       addToast({
         type: 'error',
         title: 'غير مصرح بالتعديل',
@@ -2008,6 +2064,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setDoctors(updated);
     saveDoctors(updated);
 
+    // مزامنة جدول تشغيل عيادات اليوم تلقائياً إذا كان الطبيب مسؤولاً عن عيادة اليوم
+    const targetDoc = updated.find(d => d.id === doctorId);
+    if (targetDoc && targetDoc.clinicId) {
+      const todayStr = getLocalDateStr(new Date());
+      const isScheduledToday = isDoctorScheduledOnDate(targetDoc, todayStr);
+      const isDocPresent = targetDoc.status !== 'offline';
+      const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
+
+      const existingItem = dailySchedule.items.find(i => i.clinicId === targetDoc.clinicId);
+      if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
+        const nextItems = existingItem
+          ? dailySchedule.items.map(i =>
+              i.clinicId === targetDoc.clinicId
+                ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
+                : i
+            )
+          : [
+              ...dailySchedule.items,
+              { clinicId: targetDoc.clinicId, doctorId, isOpen: shouldClinicBeOpenToday }
+            ];
+        const nextSchedule: DailyScheduleState = {
+          date: dailySchedule.date || todayStr,
+          items: nextItems
+        };
+        setDailySchedule(nextSchedule);
+        saveDailySchedule(nextSchedule);
+
+        const nextClinics = clinics.map(c =>
+          c.id === targetDoc.clinicId
+            ? { ...c, isOpenToday: shouldClinicBeOpenToday, active: shouldClinicBeOpenToday, isActive: shouldClinicBeOpenToday }
+            : c
+        );
+        setClinics(nextClinics);
+        saveClinics(nextClinics);
+
+        if (isSupabaseConfigured) {
+          await saveDailyScheduleToDb(nextSchedule);
+          await updateClinicInDb(targetDoc.clinicId, {
+            isOpenToday: shouldClinicBeOpenToday,
+            active: shouldClinicBeOpenToday,
+            isActive: shouldClinicBeOpenToday
+          });
+        }
+      }
+    }
+
     if (isSupabaseConfigured) {
       try {
         const channel = supabase.channel('system_updates');
@@ -2015,6 +2117,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           type: 'broadcast',
           event: 'doctors_updated',
           payload: { doctorId, scheduleDays, scheduleHours }
+        });
+        channel.send({
+          type: 'broadcast',
+          event: 'schedule_updated',
+          payload: { doctorId }
         });
       } catch {
         // ignore
@@ -2024,7 +2131,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     addToast({
       type: 'success',
       title: 'الجدول الأسبوعي للطبيب',
-      message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل بنجاح.'
+      message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل في قاعدة البيانات وتعميمها على جميع الأجهزة.'
     });
     return true;
   };
@@ -2514,17 +2621,85 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     if (isSupabaseConfigured) {
-      await updateDoctorInDb(doctorId, mergedDoc);
+      const saved = await updateDoctorInDb(doctorId, mergedDoc);
+      if (!saved) {
+        addToast({
+          type: 'error',
+          title: 'تعذر تحديث بيانات الطبيب',
+          message: 'فشل حفظ التعديلات في قاعدة البيانات السحابية. يرجى المحاولة مرة أخرى.'
+        });
+        return false;
+      }
     }
 
     const updated = doctors.map(d => (d.id === doctorId ? mergedDoc : d));
     setDoctors(updated);
     saveDoctors(updated);
 
+    if (data.scheduleDays && mergedDoc.clinicId) {
+      const todayStr = getLocalDateStr(new Date());
+      const isScheduledToday = isDoctorScheduledOnDate(mergedDoc, todayStr);
+      const isDocPresent = mergedDoc.status !== 'offline';
+      const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
+
+      const existingItem = dailySchedule.items.find(i => i.clinicId === mergedDoc.clinicId);
+      if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
+        const nextItems = existingItem
+          ? dailySchedule.items.map(i =>
+              i.clinicId === mergedDoc.clinicId
+                ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
+                : i
+            )
+          : [
+              ...dailySchedule.items,
+              { clinicId: mergedDoc.clinicId, doctorId, isOpen: shouldClinicBeOpenToday }
+            ];
+        const nextSchedule: DailyScheduleState = {
+          date: dailySchedule.date || todayStr,
+          items: nextItems
+        };
+        setDailySchedule(nextSchedule);
+        saveDailySchedule(nextSchedule);
+
+        const nextClinics = clinics.map(c =>
+          c.id === mergedDoc.clinicId
+            ? { ...c, isOpenToday: shouldClinicBeOpenToday, active: shouldClinicBeOpenToday, isActive: shouldClinicBeOpenToday }
+            : c
+        );
+        setClinics(nextClinics);
+        saveClinics(nextClinics);
+
+        if (isSupabaseConfigured) {
+          await saveDailyScheduleToDb(nextSchedule);
+          await updateClinicInDb(mergedDoc.clinicId, {
+            isOpenToday: shouldClinicBeOpenToday,
+            active: shouldClinicBeOpenToday,
+            isActive: shouldClinicBeOpenToday
+          });
+        }
+      }
+    }
+
+    if (isSupabaseConfigured) {
+      try {
+        const channel = supabase.channel('system_updates');
+        channel.send({
+          type: 'broadcast',
+          event: 'doctors_updated',
+          payload: { doctorId }
+        });
+        channel.send({
+          type: 'broadcast',
+          event: 'schedule_updated',
+          payload: { doctorId }
+        });
+      } catch {}
+    }
+
     addToast({
       type: 'success',
       title: 'تم تحديث بيانات الطبيب',
-      message: `تم حفظ تعديلات بيانات (${mergedDoc.name}) بنجاح.`
+      message: `تم حفظ تعديلات بيانات وجدول (${mergedDoc.name}) في قاعدة البيانات بنجاح.`
     });
     return true;
   };
@@ -2704,12 +2879,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
     const sanitized = sanitizeText(text);
+    lastSettingsSaveAtRef.current = Date.now();
     setSupportInfoText(sanitized);
     saveSupportInfoText(sanitized);
 
     let savedToCloud = false;
     if (isSupabaseConfigured) {
       savedToCloud = await saveSettingToDb('support_info_text', sanitized);
+      lastSettingsSaveAtRef.current = Date.now();
     }
 
     if (savedToCloud) {
@@ -2746,12 +2923,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       return false;
     }
+    lastSettingsSaveAtRef.current = Date.now();
     setOfficialWorkingHours(sanitized);
     saveOfficialWorkingHours(sanitized);
 
     let savedToCloud = false;
     if (isSupabaseConfigured) {
       savedToCloud = await saveSettingToDb('official_working_hours_text', sanitized);
+      lastSettingsSaveAtRef.current = Date.now();
     }
 
     if (savedToCloud) {

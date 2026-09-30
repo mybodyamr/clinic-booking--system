@@ -17,15 +17,22 @@ export default function handler(
   try {
     const rawUrl = req.url || '/';
     const parsedUrl = new URL(rawUrl, 'http://localhost');
-    const vpath = parsedUrl.searchParams.get('__vpath');
+    const vpath = parsedUrl.searchParams.get('__vpath') ?? parsedUrl.searchParams.get('__path');
 
     if (vpath !== null) {
       parsedUrl.searchParams.delete('__vpath');
+      parsedUrl.searchParams.delete('__path');
       const cleanVpath = vpath.replace(/^\/+/, '');
       const searchStr = parsedUrl.searchParams.toString();
-      req.url = `/api/${cleanVpath}${searchStr ? `?${searchStr}` : ''}`;
+      const restoredUrl = `/api/${cleanVpath}${searchStr ? `?${searchStr}` : ''}`;
+      req.url = restoredUrl;
+      req.originalUrl = restoredUrl;
     } else if (!rawUrl.startsWith('/api')) {
-      req.url = `/api${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+      const restoredUrl = `/api${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+      req.url = restoredUrl;
+      req.originalUrl = restoredUrl;
+    } else {
+      req.originalUrl = req.url;
     }
 
     const app = getApp();
