@@ -714,7 +714,7 @@ BEGIN
     END IF;
 
     IF v_doctor.max_daily_patients IS NOT NULL AND NEW.queue_position > v_doctor.max_daily_patients THEN
-      RAISE EXCEPTION 'عذراً، اكتمل العدد الأقصى المتاح لحجوزات هذا الطبيب لليوم (%s كشف)', v_doctor.max_daily_patients;
+      RAISE EXCEPTION 'عذراً، اكتمل العدد الأقصى المتاح لحجوزات هذا الطبيب لليوم (% كشف)', v_doctor.max_daily_patients;
     END IF;
 
     -- 7. التحقق الصارم من ticket_number لمنع تمرير رقم تذكرة مزور
@@ -992,6 +992,55 @@ $$;
 REVOKE ALL ON FUNCTION public.get_patient_ticket_secure(TEXT, TEXT) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.get_patient_ticket_secure(TEXT, TEXT) TO anon, authenticated, service_role;
 
+-- فحص التذكرة بالماسح الضوئي (QR) لموظفي الاستقبال والخزينة والإدارة
+CREATE OR REPLACE FUNCTION public.verify_ticket_for_staff(
+  p_lookup TEXT
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+  v_role TEXT := public.get_auth_role();
+  v_clean TEXT := trim(COALESCE(p_lookup, ''));
+  v_digits TEXT := regexp_replace(v_clean, '\D', '', 'g');
+  v_norm_phone TEXT := CASE WHEN length(v_digits) >= 10 THEN right(v_digits, 10) ELSE '' END;
+  v_today DATE := public.get_cairo_today();
+  v_booking public.bookings%ROWTYPE;
+BEGIN
+  IF COALESCE(v_role, '') NOT IN ('admin', 'cashier', 'reception') AND COALESCE(auth.role(), '') <> 'service_role' THEN
+    RAISE EXCEPTION 'غير مصرح بفحص التذاكر';
+  END IF;
+
+  IF v_clean = '' THEN
+    RETURN NULL;
+  END IF;
+
+  SELECT * INTO v_booking
+  FROM public.bookings b
+  WHERE b.date = v_today
+    AND b.status <> 'cancelled'
+    AND (b.notes IS NULL OR b.notes <> '__PURGED_PAST_BOOKING__')
+    AND (
+      b.id = v_clean
+      OR lower(b.ticket_number) = lower(v_clean)
+      OR (v_norm_phone <> '' AND right(regexp_replace(b.patient_phone, '\D', '', 'g'), 10) = v_norm_phone)
+    )
+  ORDER BY b.created_at DESC
+  LIMIT 1;
+
+  IF NOT FOUND THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN to_jsonb(v_booking) - 'doctor_diagnosis';
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.verify_ticket_for_staff(TEXT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.verify_ticket_for_staff(TEXT) TO authenticated, service_role;
+
 -- ==============================================================================
 -- استعلام سجل زيارات المريض برقم الهاتف للموظفين المعتمدين (Secure Patient History Lookup RPC)
 -- ==============================================================================
@@ -1138,7 +1187,7 @@ BEGIN
     RAISE EXCEPTION 'الطبيب المحدد لا يتبع العيادة المختارة؛ يرجى اختيار طبيب من نفس العيادة';
   END IF;
   IF NOT v_doctor.is_present_today OR v_doctor.status = 'offline' THEN
-    RAISE EXCEPTION 'عذراً، الطبيب غير متواجد اليوم (%s)', COALESCE(v_doctor.unavailable_reason, 'اعتذار رسمي');
+    RAISE EXCEPTION 'عذراً، الطبيب غير متواجد اليوم (%)', COALESCE(v_doctor.unavailable_reason, 'اعتذار رسمي');
   END IF;
 
   -- (ب) التحقق من عدم وجود حجز نشط بنفس الهاتف والاسم في نفس العيادة اليوم
@@ -1161,7 +1210,7 @@ BEGIN
 
   -- فحص الحد الأقصى للمرضى
   IF v_doctor.max_daily_patients IS NOT NULL AND v_next_ticket > v_doctor.max_daily_patients THEN
-    RAISE EXCEPTION 'عذراً، اكتمل العدد الأقصى المتاح لحجوزات هذا الطبيب لليوم (%s كشف)', v_doctor.max_daily_patients;
+    RAISE EXCEPTION 'عذراً، اكتمل العدد الأقصى المتاح لحجوزات هذا الطبيب لليوم (% كشف)', v_doctor.max_daily_patients;
   END IF;
 
   v_ticket_number_str := 'T-' || lpad(v_next_ticket::text, 3, '0');
@@ -1526,162 +1575,66 @@ ON CONFLICT (id) DO NOTHING;
 
 -- ==============================================================================
 -- إنشاء مستخدمي Supabase Auth السبعة بكلمات المرور الرسمية وربطهم بـ staff_accounts
--- (مع الحفاظ على كلمة المرور الحالية في حال تم تغييرها مسبقاً من قِبل المستخدم)
+-- (بأمان تام: دون المساس بكلمات المرور الحالية أو معرفات الحسابات الموجودة مسبقاً)
 -- ==============================================================================
 DO $$
 DECLARE
-  v_admin_id UUID    := 'a0000000-0000-0000-0000-000000000001'::uuid;
-  v_rec_id UUID      := 'a0000000-0000-0000-0000-000000000002'::uuid;
-  v_cash_id UUID     := 'a0000000-0000-0000-0000-000000000003'::uuid;
-  v_doc_id UUID      := 'a0000000-0000-0000-0000-000000000004'::uuid;
-  v_doc_ped_id UUID  := 'a0000000-0000-0000-0000-000000000005'::uuid;
-  v_doc_orth_id UUID := 'a0000000-0000-0000-0000-000000000006'::uuid;
-  v_doc_dent_id UUID := 'a0000000-0000-0000-0000-000000000007'::uuid;
+  r RECORD;
+  v_existing_user_id UUID;
 BEGIN
-  -- Admin: Adm@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_admin_id,
-    '00000000-0000-0000-0000-000000000000',
-    'admin@accounts.sharaya-clinics.internal',
-    crypt('Adm@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"admin","username":"admin","display_name":"د. أحمد الشناوي"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
+  FOR r IN
+    SELECT * FROM (VALUES
+      ('staff-admin',             'a0000000-0000-0000-0000-000000000001'::uuid, 'admin@accounts.sharaya-clinics.internal',             'Adm@Sharia2026!', 'admin',     'admin',             'د. أحمد الشناوي'),
+      ('staff-reception',         'a0000000-0000-0000-0000-000000000002'::uuid, 'reception@accounts.sharaya-clinics.internal',         'Rcp@Sharia2026!', 'reception', 'reception',         'أ. سارة مصطفى'),
+      ('staff-cashier',           'a0000000-0000-0000-0000-000000000003'::uuid, 'cashier@accounts.sharaya-clinics.internal',           'Csh@Sharia2026!', 'cashier',   'cashier',           'أ. محمود إبراهيم'),
+      ('staff-doctor',            'a0000000-0000-0000-0000-000000000004'::uuid, 'doctor@accounts.sharaya-clinics.internal',            'Doc@Sharia2026!', 'doctor',    'doctor',            'د. علي عبد الرحمن السقا'),
+      ('staff-doctor-pediatrics', 'a0000000-0000-0000-0000-000000000005'::uuid, 'doctor.pediatrics@accounts.sharaya-clinics.internal', 'Doc@Sharia2026!', 'doctor',    'doctor.pediatrics', 'د. فاطمة الزهراء كمال'),
+      ('staff-doctor-ortho',      'a0000000-0000-0000-0000-000000000006'::uuid, 'doctor.ortho@accounts.sharaya-clinics.internal',      'Doc@Sharia2026!', 'doctor',    'doctor.ortho',      'د. حسام الدين عبد الله'),
+      ('staff-doctor-dental',     'a0000000-0000-0000-0000-000000000007'::uuid, 'doctor.dental@accounts.sharaya-clinics.internal',     'Doc@Sharia2026!', 'doctor',    'doctor.dental',     'د. منى الشاذلي')
+    ) AS t(staff_id, default_uid, email, default_pwd, role_name, uname, dname)
+  LOOP
+    SELECT id INTO v_existing_user_id
+    FROM auth.users
+    WHERE lower(email) = lower(r.email) OR id = r.default_uid
+    LIMIT 1;
 
-  -- Reception: Rcp@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_rec_id,
-    '00000000-0000-0000-0000-000000000000',
-    'reception@accounts.sharaya-clinics.internal',
-    crypt('Rcp@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"reception","username":"reception","display_name":"أ. سارة مصطفى"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
+    IF v_existing_user_id IS NULL THEN
+      INSERT INTO auth.users (
+        id, instance_id, email, encrypted_password, email_confirmed_at,
+        raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at
+      ) VALUES (
+        r.default_uid,
+        '00000000-0000-0000-0000-000000000000',
+        r.email,
+        crypt(r.default_pwd, gen_salt('bf')),
+        now(),
+        '{"provider":"email","providers":["email"]}'::jsonb,
+        jsonb_build_object('role', r.role_name, 'username', r.uname, 'display_name', r.dname),
+        'authenticated',
+        'authenticated',
+        now(),
+        now()
+      );
+      v_existing_user_id := r.default_uid;
+    ELSE
+      UPDATE auth.users
+      SET email_confirmed_at = COALESCE(email_confirmed_at, now())
+      WHERE id = v_existing_user_id;
+    END IF;
 
-  -- Cashier: Csh@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_cash_id,
-    '00000000-0000-0000-0000-000000000000',
-    'cashier@accounts.sharaya-clinics.internal',
-    crypt('Csh@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"cashier","username":"cashier","display_name":"أ. محمود إبراهيم"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
-
-  -- Doctor (Internal): Doc@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_doc_id,
-    '00000000-0000-0000-0000-000000000000',
-    'doctor@accounts.sharaya-clinics.internal',
-    crypt('Doc@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"doctor","username":"doctor","display_name":"د. علي عبد الرحمن السقا"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
-
-  -- Doctor (Pediatrics): Doc@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_doc_ped_id,
-    '00000000-0000-0000-0000-000000000000',
-    'doctor.pediatrics@accounts.sharaya-clinics.internal',
-    crypt('Doc@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"doctor","username":"doctor.pediatrics","display_name":"د. فاطمة الزهراء كمال"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
-
-  -- Doctor (Orthopedics): Doc@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_doc_orth_id,
-    '00000000-0000-0000-0000-000000000000',
-    'doctor.ortho@accounts.sharaya-clinics.internal',
-    crypt('Doc@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"doctor","username":"doctor.ortho","display_name":"د. حسام الدين عبد الله"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
-
-  -- Doctor (Dental): Doc@Sharia2026!
-  INSERT INTO auth.users (id, instance_id, email, encrypted_password, email_confirmed_at, raw_app_meta_data, raw_user_meta_data, role, aud, created_at, updated_at)
-  VALUES (
-    v_doc_dent_id,
-    '00000000-0000-0000-0000-000000000000',
-    'doctor.dental@accounts.sharaya-clinics.internal',
-    crypt('Doc@Sharia2026!', gen_salt('bf')),
-    now(),
-    '{"provider":"email","providers":["email"]}',
-    '{"role":"doctor","username":"doctor.dental","display_name":"د. منى الشاذلي"}',
-    'authenticated',
-    'authenticated',
-    now(),
-    now()
-  ) ON CONFLICT (id) DO UPDATE SET
-    encrypted_password = COALESCE(NULLIF(auth.users.encrypted_password, ''), EXCLUDED.encrypted_password),
-    email_confirmed_at = COALESCE(auth.users.email_confirmed_at, now());
-
-  -- ربط مع staff_accounts فقط في حال لم يكن مرتبطاً مسبقاً
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_admin_id) WHERE id = 'staff-admin';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_rec_id) WHERE id = 'staff-reception';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_cash_id) WHERE id = 'staff-cashier';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_id) WHERE id = 'staff-doctor';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_ped_id) WHERE id = 'staff-doctor-pediatrics';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_orth_id) WHERE id = 'staff-doctor-ortho';
-  UPDATE public.staff_accounts SET auth_user_id = COALESCE(auth_user_id, v_doc_dent_id) WHERE id = 'staff-doctor-dental';
-
+    UPDATE public.staff_accounts
+    SET auth_user_id = COALESCE(auth_user_id, v_existing_user_id)
+    WHERE id = r.staff_id;
+  END LOOP;
 EXCEPTION
   WHEN OTHERS THEN
     RAISE NOTICE 'ملاحظة: إذا لم تكن صلاحيات الوصول لجدول auth.users متاحة للمستخدم الحالي، يمكن إنشاء المستخدمين مباشرة عبر لوحة تحكم Supabase Auth';
 END $$;
 
 -- ----------------------------------------------------------------------------
--- تهيئة سجل مواعيد العمل الرسمية في جدول العيادات وسياسة التحديث المفوض
+-- تهيئة سجل مواعيد العمل الرسمية وسجل الأخطاء في جدول العيادات وسياسة التحديث المفوض
 -- ----------------------------------------------------------------------------
-INSERT INTO public.clinics (id, name, icon_name, specialty, department, description, price, room_number, floor, active, is_open_today, max_daily_capacity)
+INSERT INTO public.clinics (id, name, icon_name, specialty, department, description, price, room_number, floor, is_open_today)
 VALUES (
   '_system_working_hours',
   '_system_working_hours',
@@ -1692,12 +1645,10 @@ VALUES (
   0,
   '-',
   '-',
-  FALSE,
-  FALSE,
-  0
+  FALSE
 ) ON CONFLICT (id) DO NOTHING;
 
-INSERT INTO public.clinics (id, name, icon_name, specialty, department, description, price, room_number, floor, active, is_open_today, max_daily_capacity)
+INSERT INTO public.clinics (id, name, icon_name, specialty, department, description, price, room_number, floor, is_open_today)
 VALUES (
   '_system_error_logs',
   'System Error Logs',
@@ -1708,9 +1659,7 @@ VALUES (
   0,
   '0',
   '-',
-  FALSE,
-  FALSE,
-  0
+  FALSE
 ) ON CONFLICT (id) DO NOTHING;
 
 -- دالة آمنة لتسجيل أخطاء الواجهة (ErrorBoundary & vite:preloadError) من أي جهاز متصل (مريض أو موظف أو شاشة عرض)
@@ -1718,7 +1667,7 @@ CREATE OR REPLACE FUNCTION public.report_client_error(p_error JSONB)
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = public
+SET search_path = public, pg_temp
 AS $$
 DECLARE
   v_existing_desc TEXT;
@@ -1760,19 +1709,19 @@ BEGIN
   ) sub;
 
   INSERT INTO public.clinics (
-    id, name, icon_name, specialty, department, description, price, room_number, floor, active, is_open_today, max_daily_capacity
+    id, name, icon_name, specialty, department, description, price, room_number, floor, is_open_today
   ) VALUES (
-    '_system_error_logs', 'System Error Logs', 'AlertTriangle', 'System', 'system', v_logs::TEXT, 0, '0', '-', FALSE, FALSE, 0
+    '_system_error_logs', 'System Error Logs', 'AlertTriangle', 'System', 'system', v_logs::TEXT, 0, '0', '-', FALSE
   )
   ON CONFLICT (id) DO UPDATE SET
-    description = EXCLUDED.description,
-    updated_at = NOW();
+    description = EXCLUDED.description;
 
   RETURN TRUE;
 END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.report_client_error(JSONB) TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.report_client_error(JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.report_client_error(JSONB) TO anon, authenticated, service_role;
 
 DROP POLICY IF EXISTS "clinics_staff_delegated_update" ON public.clinics;
 CREATE POLICY "clinics_staff_delegated_update"
@@ -1787,4 +1736,7 @@ CREATE POLICY "clinics_staff_delegated_update"
     public.get_auth_role() IN ('reception', 'cashier')
     AND id NOT IN ('_system_permissions', '_system_support_info', '_system_working_hours', '_system_passwords', '_system_error_logs')
   );
+
+-- تحديث كاش المخطط في PostgREST فوراً ليتعرف على الجداول والدوال المضافة دون إعادة تشغيل
+NOTIFY pgrst, 'reload schema';
 

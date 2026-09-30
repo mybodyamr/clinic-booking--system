@@ -3281,24 +3281,47 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             }
           }
 
+          let lateBookingRow: any = null;
+          let calledBookingRow: any = null;
+
           if (currentBookingId) {
-            await adminClient
+            const { data: updatedLate } = await adminClient
               .from('bookings')
               .update({ status: 'late' })
               .eq('id', currentBookingId)
-              .neq('status', 'cancelled');
+              .neq('status', 'cancelled')
+              .select('*')
+              .maybeSingle();
+            if (updatedLate) {
+              lateBookingRow =
+                verified.caller.role === 'reception'
+                  ? { ...updatedLate, doctor_diagnosis: null }
+                  : updatedLate;
+            }
           }
 
           if (nextBookingId) {
-            await adminClient
+            const { data: updatedNext } = await adminClient
               .from('bookings')
               .update({ status: 'in-progress', called_at: new Date().toISOString() })
               .eq('id', nextBookingId)
-              .neq('status', 'cancelled');
+              .neq('status', 'cancelled')
+              .select('*')
+              .maybeSingle();
+            if (updatedNext) {
+              calledBookingRow =
+                verified.caller.role === 'reception'
+                  ? { ...updatedNext, doctor_diagnosis: null }
+                  : updatedNext;
+            }
           }
 
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
-          res.status(200).json({ ok: true });
+          res.status(200).json({
+            ok: true,
+            late_booking: lateBookingRow,
+            called_booking: calledBookingRow,
+          });
           return;
         }
 
@@ -3513,6 +3536,12 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                   const filteredBookings = parsedBookings
                     .filter((row: any) => {
                       if (!row || row.notes === '__PURGED_PAST_BOOKING__') return false;
+                      if (callerRole === 'reception') {
+                        return (
+                          (row.payment_status === 'paid' || row.payment_status === 'exempt') &&
+                          row.status !== 'cancelled'
+                        );
+                      }
                       if (callerRole === 'doctor') {
                         return (
                           (verified.caller.doctorId && row.doctor_id === verified.caller.doctorId) ||
