@@ -26,6 +26,7 @@ import {
 import { useApp } from '../context/AppContext';
 import { getLocalDateStr } from '../services/scheduleService';
 import { trackPatientQueueByPhoneRpc, PatientLiveQueueResult } from '../services/supabaseService';
+import { PWAInstallBanner } from '../components/PWAInstallBanner';
 
 export const LandingView: React.FC = () => {
   const { 
@@ -477,6 +478,9 @@ export const LandingView: React.FC = () => {
             </div>
           </div>
         </section>
+
+        {/* خانة تثبيت التطبيق على الشاشة الرئيسية للهاتف للمستخدمين الجدد */}
+        <PWAInstallBanner variant="home-card" />
 
         {/* 2. قائمة العيادات التخصصية بحجم مريح وواضح بدون قص الأسماء */}
         <section className="space-y-4">

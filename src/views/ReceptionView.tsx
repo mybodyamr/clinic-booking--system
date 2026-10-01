@@ -22,7 +22,9 @@ import {
   CalendarCheck,
   Coins,
   FileSpreadsheet,
-  Edit2
+  Edit2,
+  ArrowRightLeft,
+  X
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useApp } from '../context/AppContext';
@@ -30,6 +32,7 @@ import { maskPhoneNumber, validateTripleName, validateEgyptianPhone, sanitizeSpr
 import { getLocalDateStr } from '../services/scheduleService';
 import { verifyTicketForStaffRpc } from '../services/supabaseService';
 import { Booking, BookingStatus, DailyClinicScheduleItem } from '../types';
+import { QrCameraScanner } from '../components/QrCameraScanner';
 
 export const ReceptionView: React.FC = () => {
   const { 
@@ -50,7 +53,11 @@ export const ReceptionView: React.FC = () => {
     setSelectedTicket,
     currentUser,
     hasPermission,
-    updateDoctorStatus
+    updateDoctorStatus,
+    staffAccounts,
+    shiftHandovers,
+    createShiftHandover,
+    acknowledgeShiftHandover
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'queue' | 'new-booking' | 'scanner' | 'doctors' | 'daily-clinics' | 'clinic-fees' | 'financial-reports'>('queue');
@@ -74,6 +81,65 @@ export const ReceptionView: React.FC = () => {
 
   // حالة النافذة المنبثقة للتعامل مع المريض المتأخر
   const [lateActionBooking, setLateActionBooking] = useState<Booking | null>(null);
+
+  // حالة تسليم شفت الاستقبال للزميل مع التحقق من أنه مسجل كمسؤول استقبال
+  const [isReceptionHandoverOpen, setIsReceptionHandoverOpen] = useState(false);
+  const [selectedHandoverStaffId, setSelectedHandoverStaffId] = useState<string>('');
+  const [receptionHandoverNotes, setReceptionHandoverNotes] = useState<string>('');
+  const [isSubmittingReceptionHandover, setIsSubmittingReceptionHandover] = useState(false);
+
+  const selectedReceptionColleague = React.useMemo(
+    () => staffAccounts.find(s => s.id === selectedHandoverStaffId) || null,
+    [staffAccounts, selectedHandoverStaffId]
+  );
+
+  const isSelectedColleagueValidReception =
+    !selectedReceptionColleague || selectedReceptionColleague.role === 'reception';
+
+  const pendingReceptionHandovers = React.useMemo(
+    () =>
+      shiftHandovers.filter(
+        h => h.department === 'reception' && h.status === 'pending_colleague'
+      ),
+    [shiftHandovers]
+  );
+
+  const handleSubmitReceptionHandover = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedReceptionColleague) {
+      addToast({
+        type: 'error',
+        title: 'يرجى اختيار الزميل المستلم',
+        message: 'اختر موظف الاستقبال المستلم للشفت من القائمة.'
+      });
+      return;
+    }
+
+    if (selectedReceptionColleague.role !== 'reception') {
+      addToast({
+        type: 'error',
+        title: 'هذا الشخص غير مسجل أنه مسؤول استقبال!',
+        message: `الموظف (${selectedReceptionColleague.displayName || selectedReceptionColleague.username}) غير مسجل كمسؤول استقبال — يرجى الرجوع للمدير.`
+      });
+      return;
+    }
+
+    setIsSubmittingReceptionHandover(true);
+    try {
+      const ok = await createShiftHandover({
+        department: 'reception',
+        handoverType: 'reception_shift',
+        toStaffId: selectedReceptionColleague.id,
+        notes: receptionHandoverNotes.trim() || `تسليم شفت الاستقبال (المنتظرون حالياً: ${waitingCount})`
+      });
+      if (ok) {
+        setIsReceptionHandoverOpen(false);
+        setReceptionHandoverNotes('');
+      }
+    } finally {
+      setIsSubmittingReceptionHandover(false);
+    }
+  };
 
   // حالة الماسح الضوئي التجريبي
   const [scannedTicketInput, setScannedTicketInput] = useState('');
@@ -238,26 +304,34 @@ export const ReceptionView: React.FC = () => {
 
     let targetTicketNumber = code;
     let targetBookingId = '';
+    let targetPhone = '';
     try {
       const parsed = JSON.parse(code);
-      if (parsed.ticket) targetTicketNumber = String(parsed.ticket);
-      if (parsed.id) targetBookingId = String(parsed.id);
+      if (parsed.ticket) targetTicketNumber = String(parsed.ticket).trim();
+      if (parsed.id) targetBookingId = String(parsed.id).trim();
+      if (parsed.phone) targetPhone = String(parsed.phone).replace(/[\s-]/g, '');
     } catch {
       // ليس JSON، استخدام النص المدخل
     }
+
+    const cleanPhone = (targetPhone || targetTicketNumber).replace(/[\s-]/g, '');
 
     let matched = bookings.find(b => 
       (targetBookingId && b.id === targetBookingId) ||
       b.ticketNumber.toLowerCase() === targetTicketNumber.toLowerCase() ||
       b.id === targetTicketNumber ||
-      b.patientPhone === targetTicketNumber
+      (cleanPhone.length >= 9 && b.patientPhone.replace(/[\s-]/g, '') === cleanPhone)
     );
 
     // إذا لم تكن التذكرة في قائمة الاستقبال المحلية (مثلاً لأنها غير مسددة بعد في الخزينة)، نفحصها عبر الخادم
     if (!matched) {
-      const remoteTicket = await verifyTicketForStaffRpc(targetBookingId || targetTicketNumber);
-      if (remoteTicket) {
-        matched = remoteTicket;
+      const lookupsToTry = Array.from(new Set([targetBookingId, targetTicketNumber, cleanPhone].filter(Boolean)));
+      for (const key of lookupsToTry) {
+        const remoteTicket = await verifyTicketForStaffRpc(key);
+        if (remoteTicket) {
+          matched = remoteTicket;
+          break;
+        }
       }
     }
 
@@ -427,8 +501,55 @@ export const ReceptionView: React.FC = () => {
               <span>التقارير المالية</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedHandoverStaffId('');
+              setReceptionHandoverNotes('');
+              setIsReceptionHandoverOpen(true);
+            }}
+            className="px-3 py-2 rounded-lg bg-amber-600 hover:bg-amber-700 text-white transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-2xs"
+          >
+            <ArrowRightLeft className="w-3.5 h-3.5" />
+            <span>تسليم الشفت لزميل</span>
+          </button>
         </div>
       </div>
+
+      {/* إشعار استلام شفت الاستقبال من الزميل السابق */}
+      {pendingReceptionHandovers.length > 0 && (
+        <div className="space-y-2.5">
+          {pendingReceptionHandovers.map(h => (
+            <div
+              key={h.id}
+              className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/60 border-2 border-amber-400 dark:border-amber-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-amber-600 text-white flex items-center justify-center shrink-0">
+                  <ArrowRightLeft className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-xs sm:text-sm font-extrabold text-slate-900 dark:text-white">
+                    تسليم شفت الاستقبال من الزميل ({h.fromStaffName}) إلى ({h.toStaffName || 'مسؤول الاستقبال المناوب'})
+                  </h3>
+                  {h.notes && (
+                    <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5">{h.notes}</p>
+                  )}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => acknowledgeShiftHandover(h.id, true)}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 shrink-0 cursor-pointer"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>تأكيد استلام شفت الاستقبال</span>
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* تنبيه معماري لقاعدة الاستقبال */}
       <div className="bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/80 p-3 rounded-xl flex items-center justify-between text-xs text-emerald-900 dark:text-emerald-200">
@@ -873,32 +994,40 @@ export const ReceptionView: React.FC = () => {
             <h3 className="font-bold text-base text-slate-900 dark:text-white">قارئ ومتحقق تذاكر الكشف (QR Scanner)</h3>
           </div>
 
-          {/* محاكاة واجهة الكاميرا */}
-          <div className="bg-slate-900 rounded-2xl p-6 text-center text-white border-2 border-dashed border-emerald-600/60 relative overflow-hidden">
-            <div className="w-32 h-32 mx-auto border-2 border-emerald-400 rounded-2xl flex items-center justify-center relative">
-              <div className="absolute inset-x-0 top-0 h-0.5 bg-emerald-400 shadow-[0_0_8px_#34d399] animate-bounce" />
-              <Camera className="w-12 h-12 text-emerald-400/60 animate-pulse" />
-            </div>
-            <div className="text-[11px] text-emerald-200 mt-4 text-center font-medium">
-              وجه كاميرا الجهاز لرمز QR بتذكرة المريض أو أدخل كود التذكرة أدناه
-            </div>
-          </div>
+          {/* كاميرا المسح الضوئي الحية لرمز QR */}
+          <QrCameraScanner
+            active={activeTab === 'scanner'}
+            onScanSuccess={(decodedText) => {
+              let displayCode = decodedText;
+              try {
+                const parsed = JSON.parse(decodedText);
+                if (parsed.ticket) displayCode = String(parsed.ticket);
+              } catch {}
+              setScannedTicketInput(displayCode);
+              handleVerifyScan(decodedText);
+            }}
+            hintText="وجه كاميرا الجهاز لرمز QR بتذكرة المريض أو أدخل كود التذكرة أدناه"
+          />
 
           {/* إدخال كود التذكرة يدوياً */}
           <div className="space-y-3">
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
               <input
                 type="text"
                 value={scannedTicketInput}
                 onChange={(e) => setScannedTicketInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleVerifyScan();
+                }}
                 placeholder="أدخل كود التذكرة (مثل: باطنة-02 أو أطفال-01)..."
-                className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                className="min-w-0 flex-1 px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
               />
               <button
+                type="button"
                 onClick={() => handleVerifyScan()}
-                className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all shrink-0 cursor-pointer"
+                className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all shrink-0 whitespace-nowrap cursor-pointer"
               >
-                تحقق
+                تحقق ومسح
               </button>
             </div>
 
@@ -1431,6 +1560,139 @@ export const ReceptionView: React.FC = () => {
                   إلغاء الأمر
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* نافذة تسليم شفت الاستقبال للزميل مع فحص صلاحية مسؤول الاستقبال */}
+      <AnimatePresence>
+        {isReceptionHandoverOpen && (
+          <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 rounded-3xl max-w-lg w-full border border-amber-200 dark:border-amber-800 shadow-2xl overflow-hidden my-auto"
+            >
+              <div className="bg-gradient-to-l from-amber-700 via-amber-600 to-orange-600 p-5 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-white/15 flex items-center justify-center border border-white/25">
+                    <ArrowRightLeft className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base">تسليم شفت الاستقبال لزميل</h3>
+                    <p className="text-xs text-amber-100">
+                      المسلم الحالي: {currentUser?.displayName || currentUser?.username}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsReceptionHandoverOpen(false)}
+                  className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/25 flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSubmitReceptionHandover} className="p-5 sm:p-6 space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    اختر الزميل المستلم لشفت الاستقبال:
+                  </label>
+                  <select
+                    value={selectedHandoverStaffId}
+                    onChange={e => setSelectedHandoverStaffId(e.target.value)}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs sm:text-sm font-bold text-slate-900 dark:text-white"
+                  >
+                    <option value="">-- اختر الموظف المستلم للشفت --</option>
+                    <optgroup label="مسؤولو الاستقبال المسجلون (معتمد ✓)">
+                      {staffAccounts
+                        .filter(s => s.role === 'reception' && s.username !== currentUser?.username)
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.displayName || s.username} — (مسؤول استقبال ✓)
+                          </option>
+                        ))}
+                    </optgroup>
+                    <optgroup label="بقية الموظفين بالحسابات الأخرى (غير مسجلين كمسؤول استقبال)">
+                      {staffAccounts
+                        .filter(s => s.role !== 'reception' && s.username !== currentUser?.username)
+                        .map(s => (
+                          <option key={s.id} value={s.id}>
+                            {s.displayName || s.username} — (
+                            {s.role === 'cashier'
+                              ? 'مسؤول خزينة'
+                              : s.role === 'doctor'
+                              ? 'طبيب'
+                              : s.role === 'finance_manager'
+                              ? 'مدير مالية'
+                              : 'مدير النظام'}
+                            )
+                          </option>
+                        ))}
+                    </optgroup>
+                  </select>
+                </div>
+
+                {/* تحذير فوري إذا اختار موظفاً غير مسجل كمسؤول استقبال */}
+                {selectedReceptionColleague && !isSelectedColleagueValidReception && (
+                  <div className="p-4 rounded-2xl bg-rose-100 dark:bg-rose-950/90 border-2 border-rose-500 text-rose-900 dark:text-rose-200 text-xs space-y-1.5 shadow-xs">
+                    <div className="font-extrabold text-sm flex items-center gap-2">
+                      <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0" />
+                      <span>تنبيه: هذا الشخص غير مسجل أنه مسؤول استقبال!</span>
+                    </div>
+                    <p className="leading-relaxed font-semibold">
+                      الموظف المختار (<strong>{selectedReceptionColleague.displayName || selectedReceptionColleague.username}</strong>) غير مسجل بصلاحية مسؤول استقبال في النظام. يرجى الرجوع للمدير لتسجيله كمسؤول استقبال، أو اختيار زميل مسجل من قسم الاستقبال.
+                    </p>
+                  </div>
+                )}
+
+                {selectedReceptionColleague && isSelectedColleagueValidReception && (
+                  <div className="p-3.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-xs font-bold flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>
+                      الموظف ({selectedReceptionColleague.displayName || selectedReceptionColleague.username}) معتمد ومسجل كمسؤول استقبال ✓
+                    </span>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    ملاحظات تسليم الشفت للزميل (اختياري):
+                  </label>
+                  <input
+                    type="text"
+                    value={receptionHandoverNotes}
+                    onChange={e => setReceptionHandoverNotes(e.target.value)}
+                    placeholder="مثال: توجد حالتان متأخرتان في عيادة الباطنة..."
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2.5 pt-2">
+                  <button
+                    type="submit"
+                    disabled={
+                      isSubmittingReceptionHandover ||
+                      !selectedReceptionColleague ||
+                      !isSelectedColleagueValidReception
+                    }
+                    className="flex-1 py-3 px-4 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 dark:disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 transition-all cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>تأكيد تسليم شفت الاستقبال</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsReceptionHandoverOpen(false)}
+                    className="py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-xs cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}

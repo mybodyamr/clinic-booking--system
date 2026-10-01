@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { AppView } from '../types';
+import { PWAInstallBanner } from './PWAInstallBanner';
 
 export const Navbar: React.FC = () => {
   const { 
@@ -54,10 +55,19 @@ export const Navbar: React.FC = () => {
       ];
     }
 
+    if (currentUser.role === 'finance_manager') {
+      return [
+        { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
+        { id: 'finance', label: 'الإدارة المالية والتعاقدات', icon: <Receipt className="w-4 h-4" /> },
+        { id: 'cashier', label: 'شاشة الخزينة', icon: <Receipt className="w-4 h-4" /> }
+      ];
+    }
+
     // مدير النظام (admin)
     return [
       { id: 'landing', label: 'الرئيسية', icon: <Hospital className="w-4 h-4" /> },
       { id: 'admin', label: 'الإدارة والتقارير', icon: <Settings className="w-4 h-4" /> },
+      { id: 'finance', label: 'مدير المالية والتأمين', icon: <Receipt className="w-4 h-4" /> },
       { id: 'reception', label: 'مكتب الاستقبال', icon: <UserCheck className="w-4 h-4" /> },
       { id: 'cashier', label: 'الخزينة والتحصيل', icon: <Receipt className="w-4 h-4" /> },
       { id: 'doctor', label: 'بوابة الطبيب', icon: <Stethoscope className="w-4 h-4" /> }
@@ -70,6 +80,8 @@ export const Navbar: React.FC = () => {
     switch (role) {
       case 'admin':
         return { text: 'مدير النظام', classes: 'bg-emerald-50 text-emerald-900 border-emerald-200 dark:bg-amber-400/20 dark:text-amber-300 dark:border-amber-400/40' };
+      case 'finance_manager':
+        return { text: 'مدير المالية', classes: 'bg-teal-50 text-teal-900 border-teal-200 dark:bg-teal-400/20 dark:text-teal-300 dark:border-teal-400/40' };
       case 'doctor':
         return { text: 'طبيب استشاري', classes: 'bg-emerald-50 text-emerald-800 border-emerald-200 dark:bg-emerald-500/20 dark:text-emerald-300 dark:border-emerald-500/40' };
       case 'reception':
@@ -137,6 +149,7 @@ export const Navbar: React.FC = () => {
 
           {/* أدوات التحكم وحساب الموظف */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <PWAInstallBanner variant="navbar-button" />
             
             {currentUser && currentUser.role === 'admin' && (
               <button

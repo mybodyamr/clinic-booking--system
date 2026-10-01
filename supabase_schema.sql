@@ -71,12 +71,22 @@ CREATE TABLE IF NOT EXISTS public.staff_accounts (
   auth_user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   username TEXT UNIQUE NOT NULL,
   display_name TEXT NOT NULL,
-  role TEXT NOT NULL CHECK (role IN ('admin', 'reception', 'cashier', 'doctor')),
+  role TEXT NOT NULL CHECK (role IN ('admin', 'reception', 'cashier', 'doctor', 'finance_manager')),
   doctor_id TEXT REFERENCES public.doctors(id) ON DELETE SET NULL,
   clinic_id TEXT REFERENCES public.clinics(id) ON DELETE SET NULL,
   recovery_email TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ترقية قيد الأدوار (role CHECK constraint) على الجداول القائمة لدعم دور مدير المالية (finance_manager)
+DO $$
+BEGIN
+  ALTER TABLE public.staff_accounts DROP CONSTRAINT IF EXISTS staff_accounts_role_check;
+  ALTER TABLE public.staff_accounts ADD CONSTRAINT staff_accounts_role_check
+    CHECK (role IN ('admin', 'reception', 'cashier', 'doctor', 'finance_manager'));
+EXCEPTION
+  WHEN OTHERS THEN NULL;
+END $$;
 
 -- 4.1 جدول رموز التحقق المؤقتة لاستعادة كلمة المرور (password_reset_codes)
 CREATE TABLE IF NOT EXISTS public.password_reset_codes (
@@ -170,15 +180,15 @@ $$;
 DROP POLICY IF EXISTS "Public read clinics" ON public.clinics;
 CREATE POLICY "Public read clinics" ON public.clinics FOR SELECT USING (
   id NOT IN ('_system_passwords', '_system_error_logs')
-  OR public.get_auth_role() = 'admin'
+  OR public.get_auth_role() IN ('admin', 'finance_manager')
   OR auth.role() = 'service_role'
 );
 
 DROP POLICY IF EXISTS "Admin modify clinics" ON public.clinics;
 CREATE POLICY "Admin modify clinics" ON public.clinics FOR ALL USING (
-  public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
+  public.get_auth_role() IN ('admin', 'finance_manager') OR auth.role() = 'service_role'
 ) WITH CHECK (
-  public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
+  public.get_auth_role() IN ('admin', 'finance_manager') OR auth.role() = 'service_role'
 );
 
 -- سياسات الأطباء (doctors)
@@ -299,7 +309,7 @@ CREATE POLICY "Authenticated read staff" ON public.staff_accounts
 FOR SELECT TO authenticated
 USING (
   (auth.uid() IS NOT NULL AND auth_user_id = auth.uid())
-  OR public.get_auth_role() = 'admin'
+  OR public.get_auth_role() IN ('admin', 'finance_manager', 'reception', 'cashier')
   OR auth.role() = 'service_role'
 );
 
@@ -600,8 +610,8 @@ DECLARE
   v_expected_ticket_2 TEXT;
   v_trimmed_name TEXT;
 BEGIN
-  -- الأدمن و service_role معفيان من القيود
-  IF v_role = 'admin' OR auth.role() = 'service_role' THEN
+  -- الأدمن ومدير المالية و service_role معفيون من القيود
+  IF v_role IN ('admin', 'finance_manager') OR auth.role() = 'service_role' THEN
     IF TG_OP = 'DELETE' THEN
       RETURN OLD;
     END IF;
@@ -899,12 +909,12 @@ FOR SELECT USING (
   AND date = public.get_cairo_today()
 );
 
--- 5. وصول كامل وشامل لمدير النظام و service_role (قراءة، إضافة، تعديل، حذف وتطهير)
+-- 5. وصول كامل وشامل لمدير النظام ومدير المالية و service_role (قراءة، إضافة، تعديل، حذف وتطهير)
 CREATE POLICY "Admin full access bookings" ON public.bookings
 FOR ALL USING (
-  public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
+  public.get_auth_role() IN ('admin', 'finance_manager') OR auth.role() = 'service_role'
 ) WITH CHECK (
-  public.get_auth_role() = 'admin' OR auth.role() = 'service_role'
+  public.get_auth_role() IN ('admin', 'finance_manager') OR auth.role() = 'service_role'
 );
 
 -- ==============================================================================
@@ -1552,6 +1562,7 @@ ON CONFLICT (date, clinic_id) DO NOTHING;
 INSERT INTO public.staff_accounts (id, username, display_name, role, doctor_id, clinic_id, recovery_email)
 VALUES
   ('staff-admin', 'admin', 'د. أحمد الشناوي (مدير المنظومة)', 'admin', NULL, NULL, 'amrrmybody@gmail.com'),
+  ('staff-finance', 'finance', 'أ. طارق المنشاوي (مدير الإدارة المالية)', 'finance_manager', NULL, NULL, 'amrrmybody@gmail.com'),
   ('staff-reception', 'reception', 'أ. سارة مصطفى (مسؤولة الاستقبال)', 'reception', NULL, NULL, 'amrrmybody@gmail.com'),
   ('staff-cashier', 'cashier', 'أ. محمود إبراهيم (أمين الصندوق والخزينة)', 'cashier', NULL, NULL, 'amrrmybody@gmail.com'),
   ('staff-doctor', 'doctor', 'د. علي عبد الرحمن السقا (طبيب باطنة)', 'doctor', 'doc-1', 'clinic-internal', 'amrrmybody@gmail.com'),
@@ -1584,13 +1595,14 @@ DECLARE
 BEGIN
   FOR r IN
     SELECT * FROM (VALUES
-      ('staff-admin',             'a0000000-0000-0000-0000-000000000001'::uuid, 'admin@accounts.sharaya-clinics.internal',             'Adm@Sharia2026!', 'admin',     'admin',             'د. أحمد الشناوي'),
-      ('staff-reception',         'a0000000-0000-0000-0000-000000000002'::uuid, 'reception@accounts.sharaya-clinics.internal',         'Rcp@Sharia2026!', 'reception', 'reception',         'أ. سارة مصطفى'),
-      ('staff-cashier',           'a0000000-0000-0000-0000-000000000003'::uuid, 'cashier@accounts.sharaya-clinics.internal',           'Csh@Sharia2026!', 'cashier',   'cashier',           'أ. محمود إبراهيم'),
-      ('staff-doctor',            'a0000000-0000-0000-0000-000000000004'::uuid, 'doctor@accounts.sharaya-clinics.internal',            'Doc@Sharia2026!', 'doctor',    'doctor',            'د. علي عبد الرحمن السقا'),
-      ('staff-doctor-pediatrics', 'a0000000-0000-0000-0000-000000000005'::uuid, 'doctor.pediatrics@accounts.sharaya-clinics.internal', 'Doc@Sharia2026!', 'doctor',    'doctor.pediatrics', 'د. فاطمة الزهراء كمال'),
-      ('staff-doctor-ortho',      'a0000000-0000-0000-0000-000000000006'::uuid, 'doctor.ortho@accounts.sharaya-clinics.internal',      'Doc@Sharia2026!', 'doctor',    'doctor.ortho',      'د. حسام الدين عبد الله'),
-      ('staff-doctor-dental',     'a0000000-0000-0000-0000-000000000007'::uuid, 'doctor.dental@accounts.sharaya-clinics.internal',     'Doc@Sharia2026!', 'doctor',    'doctor.dental',     'د. منى الشاذلي')
+      ('staff-admin',             'a0000000-0000-0000-0000-000000000001'::uuid, 'admin@accounts.sharaya-clinics.internal',             'Adm@Sharia2026!', 'admin',           'admin',             'د. أحمد الشناوي'),
+      ('staff-reception',         'a0000000-0000-0000-0000-000000000002'::uuid, 'reception@accounts.sharaya-clinics.internal',         'Rcp@Sharia2026!', 'reception',       'reception',         'أ. سارة مصطفى'),
+      ('staff-cashier',           'a0000000-0000-0000-0000-000000000003'::uuid, 'cashier@accounts.sharaya-clinics.internal',           'Csh@Sharia2026!', 'cashier',         'cashier',           'أ. محمود إبراهيم'),
+      ('staff-doctor',            'a0000000-0000-0000-0000-000000000004'::uuid, 'doctor@accounts.sharaya-clinics.internal',            'Doc@Sharia2026!', 'doctor',          'doctor',            'د. علي عبد الرحمن السقا'),
+      ('staff-doctor-pediatrics', 'a0000000-0000-0000-0000-000000000005'::uuid, 'doctor.pediatrics@accounts.sharaya-clinics.internal', 'Doc@Sharia2026!', 'doctor',          'doctor.pediatrics', 'د. فاطمة الزهراء كمال'),
+      ('staff-doctor-ortho',      'a0000000-0000-0000-0000-000000000006'::uuid, 'doctor.ortho@accounts.sharaya-clinics.internal',      'Doc@Sharia2026!', 'doctor',          'doctor.ortho',      'د. حسام الدين عبد الله'),
+      ('staff-doctor-dental',     'a0000000-0000-0000-0000-000000000007'::uuid, 'doctor.dental@accounts.sharaya-clinics.internal',     'Doc@Sharia2026!', 'doctor',          'doctor.dental',     'د. منى الشاذلي'),
+      ('staff-finance',           'a0000000-0000-0000-0000-000000000008'::uuid, 'finance@accounts.sharaya-clinics.internal',           'Fin@Sharia2026!', 'finance_manager', 'finance',           'أ. طارق المنشاوي')
     ) AS t(staff_id, default_uid, email, default_pwd, role_name, uname, dname)
   LOOP
     SELECT id INTO v_existing_user_id
@@ -1661,6 +1673,14 @@ VALUES (
   '-',
   FALSE
 ) ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO public.clinics (id, name, icon_name, specialty, department, description, price, room_number, floor, is_open_today)
+VALUES
+  ('_system_insurance_contracts', 'System Insurance Contracts', 'Shield', 'System', 'system', '[]', 0, '0', '-', FALSE),
+  ('_system_insurance_bookings', 'System Insurance Bookings', 'ShieldCheck', 'System', 'system', '{}', 0, '0', '-', FALSE),
+  ('_system_shift_handovers', 'System Shift Handovers', 'ArrowRightLeft', 'System', 'system', '[]', 0, '0', '-', FALSE),
+  ('_system_consultation_registry', 'System Consultation Registry', 'Stethoscope', 'System', 'system', '{"stampedTickets":{},"consultationBookingIds":[]}', 0, '0', '-', FALSE)
+ON CONFLICT (id) DO NOTHING;
 
 -- دالة آمنة لتسجيل أخطاء الواجهة (ErrorBoundary & vite:preloadError) من أي جهاز متصل (مريض أو موظف أو شاشة عرض)
 CREATE OR REPLACE FUNCTION public.report_client_error(p_error JSONB)

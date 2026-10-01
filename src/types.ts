@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'doctor' | 'reception' | 'cashier';
+export type UserRole = 'admin' | 'doctor' | 'reception' | 'cashier' | 'finance_manager';
 
 export type DoctorStatus = 'available' | 'break' | 'busy' | 'offline';
 
@@ -7,6 +7,78 @@ export type BookingStatus = 'waiting' | 'in-progress' | 'completed' | 'cancelled
 export type PaymentStatus = 'paid' | 'unpaid' | 'exempt';
 
 export type PaymentMethod = 'cash' | 'insurance' | 'charity_exempt' | 'consultation';
+
+export interface InsuranceCompanyContract {
+  id: string;
+  companyName: string;
+  name?: string;
+  cardCategories: string[];
+  defaultCopayHint?: string;
+  notes?: string;
+  isActive: boolean;
+  active?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface BookingInsuranceDetails {
+  bookingId?: string;
+  companyId: string;
+  companyName: string;
+  cardCategory: string;
+  cardNumber: string;
+  copayInputRaw: string;
+  copayRateText?: string;
+  copayPercentage: number;
+  originalFee: number;
+  originalClinicFee?: number;
+  patientPaidAmount: number;
+  insuranceCoveredAmount: number;
+  insuranceClaimAmount?: number;
+  recordedBy?: string;
+  recordedAt?: string;
+}
+
+export type ShiftHandoverType =
+  | 'reception_shift'
+  | 'cashier_to_management'
+  | 'cashier_to_colleague';
+
+export type ShiftHandoverStatus =
+  | 'delivered_to_management'
+  | 'pending_colleague'
+  | 'accepted_exact'
+  | 'discrepancy_reported';
+
+export interface ShiftHandoverRecord {
+  id: string;
+  department: 'reception' | 'cashier';
+  fromStaffId: string;
+  fromStaffUsername: string;
+  fromStaffName: string;
+  toStaffId: string;
+  toStaffUsername: string;
+  toStaffName: string;
+  handoverType: ShiftHandoverType;
+  expectedAmount?: number;
+  actualReceivedAmount?: number;
+  status: ShiftHandoverStatus;
+  notes?: string;
+  acknowledgmentNotes?: string;
+  createdAt: string;
+  acknowledgedAt?: string;
+  shiftDate: string;
+}
+
+export interface SelectivePurgeOptions {
+  purgePastBookings: boolean;
+  purgeAllBookings: boolean;
+  beforeDate?: string;
+  purgeShiftHandovers: boolean;
+  purgeConsultationStamps: boolean;
+  purgeWhatsAppAndPrintLogs: boolean;
+  purgeSystemErrorLogs: boolean;
+}
 
 export interface ConsultationStamp {
   phone: string;
@@ -83,6 +155,7 @@ export interface Booking {
   completedAt?: string;
   paidAt?: string;
   paymentMethod?: PaymentMethod;
+  insuranceDetails?: BookingInsuranceDetails;
 }
 
 export interface UserSession {
@@ -114,6 +187,7 @@ export type AppView =
   | 'reception' 
   | 'doctor' 
   | 'cashier' 
+  | 'finance'
   | 'admin';
 
 export interface ToastMessage {
@@ -141,7 +215,9 @@ export type SystemPermission =
   | 'view_financial_reports'
   | 'confirm_payments_exemptions'
   | 'call_queue_patients'
-  | 'manage_patient_exemptions';
+  | 'manage_patient_exemptions'
+  | 'manage_insurance_contracts'
+  | 'selective_data_purge';
 
 export interface PermissionDefinition {
   key: SystemPermission;

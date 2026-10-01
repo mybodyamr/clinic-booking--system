@@ -81,7 +81,8 @@ export const AdminView: React.FC = () => {
     clearAllErrorLogs,
     syncErrorLogsNow,
     consultationRegistry,
-    updateConsultationSettings
+    updateConsultationSettings,
+    navigate
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports' | 'error-logs'>('overview');
@@ -144,7 +145,10 @@ export const AdminView: React.FC = () => {
         'sharaya_daily_schedule_v2',
         'sharaya_support_info_text_v2',
         'sharaya_official_working_hours_v2',
-        'sharaya_staff_accounts_v2'
+        'sharaya_staff_accounts_v2',
+        'sharaya_insurance_contracts_v1',
+        'sharaya_shift_handovers_v1',
+        'sharaya_insurance_bookings_map_v1'
       ];
       for (const k of keysToClear) {
         localStorage.removeItem(k);
@@ -617,6 +621,16 @@ export const AdminView: React.FC = () => {
 
         {/* أزرار الإجراءات السريعة */}
         <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => navigate('finance')}
+            className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-extrabold transition-all shadow-xs flex items-center gap-1.5 cursor-pointer"
+            title="الانتقال إلى بوابة مدير المالية وتعاقدات التأمين وتطهير السجلات الانتقائي"
+          >
+            <Receipt className="w-4 h-4 text-amber-200" />
+            <span>بوابة مدير المالية والتعاقدات</span>
+          </button>
+
           <button
             type="button"
             disabled={isRefreshingCache}
@@ -1772,6 +1786,8 @@ export const AdminView: React.FC = () => {
                   switch (role) {
                     case 'admin':
                       return { roleName: 'مدير المنظومة', icon: LayoutDashboard, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/40' };
+                    case 'finance_manager':
+                      return { roleName: 'مدير المالية', icon: Receipt, color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-950/40' };
                     case 'reception':
                       return { roleName: 'مسؤول الاستقبال', icon: UserCheck, color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-950/40' };
                     case 'cashier':
@@ -3180,6 +3196,7 @@ export const AdminView: React.FC = () => {
                 >
                   <option value="reception">مسؤول الاستقبال (reception)</option>
                   <option value="cashier">أمين الخزينة (cashier)</option>
+                  <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
                   <option value="doctor">طبيب العيادة (doctor)</option>
                   <option value="admin">مدير المنظومة (admin)</option>
                 </select>
@@ -3418,6 +3435,7 @@ export const AdminView: React.FC = () => {
                 >
                   <option value="reception">مسؤول الاستقبال (reception)</option>
                   <option value="cashier">أمين الخزينة (cashier)</option>
+                  <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
                   <option value="doctor">طبيب العيادة (doctor)</option>
                   <option value="admin">مدير المنظومة (admin)</option>
                 </select>

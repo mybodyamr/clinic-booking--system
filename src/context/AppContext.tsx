@@ -18,7 +18,11 @@ import {
   StaffAccount,
   SystemErrorLog,
   SystemErrorSource,
-  ConsultationRegistryState
+  ConsultationRegistryState,
+  InsuranceCompanyContract,
+  BookingInsuranceDetails,
+  ShiftHandoverRecord,
+  SelectivePurgeOptions
 } from '../types';
 import { 
   getStoredClinics, 
@@ -70,7 +74,14 @@ import {
   getStoredConsultationRegistry,
   saveConsultationRegistry,
   pruneConsultationRegistry,
-  checkPatientConsultationEligibility
+  checkPatientConsultationEligibility,
+  getStoredInsuranceContracts,
+  saveInsuranceContracts,
+  getStoredInsuranceBookingsMap,
+  saveInsuranceBookingsMap,
+  getStoredShiftHandovers,
+  saveShiftHandovers,
+  clearWhatsAppAndPrintLogs
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
@@ -112,11 +123,15 @@ import {
   subscribeToBookingsRealtime,
   ensureActiveSupabaseSession,
   ensureAdminSupabaseSession,
+  ensureAdminOrFinanceSupabaseSession,
   adminChangeStaffPassword,
   deleteBookingsBeforeDateFromDb,
   deleteBookingFromDb,
   reportClientErrorToDb,
-  saveConsultationRegistryToDb
+  saveConsultationRegistryToDb,
+  saveInsuranceContractsToDb,
+  saveInsuranceBookingsMapToDb,
+  saveShiftHandoversToDb
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -194,7 +209,12 @@ interface AppContextType {
     notes?: string;
   }) => Promise<{ success: boolean; booking?: Booking; error?: string }>;
   updateBookingStatus: (bookingId: string, status: BookingStatus) => void;
-  updatePaymentStatus: (bookingId: string, paymentStatus: PaymentStatus, method?: PaymentMethod) => boolean;
+  updatePaymentStatus: (
+    bookingId: string,
+    paymentStatus: PaymentStatus,
+    method?: PaymentMethod,
+    insuranceDetails?: BookingInsuranceDetails
+  ) => boolean;
   deleteBooking: (bookingId: string) => Promise<{ success: boolean; error?: string }>;
   updateDoctorStatus: (doctorId: string, status: DoctorStatus, reason?: string) => Promise<boolean>;
   updateDoctorSchedule: (doctorId: string, scheduleDays: string[], scheduleHours: string, shiftStartTime?: string, shiftEndTime?: string) => Promise<boolean>;
@@ -233,6 +253,28 @@ interface AppContextType {
   deleteErrorLog: (errorId: string) => Promise<void>;
   clearAllErrorLogs: () => Promise<void>;
   syncErrorLogsNow: () => Promise<boolean>;
+  insuranceContracts: InsuranceCompanyContract[];
+  saveInsuranceContract: (
+    contract: Omit<InsuranceCompanyContract, 'id' | 'createdAt'> & { id?: string }
+  ) => Promise<boolean>;
+  deleteInsuranceContract: (id: string) => Promise<boolean>;
+  shiftHandovers: ShiftHandoverRecord[];
+  createShiftHandover: (input: {
+    department: 'reception' | 'cashier';
+    toStaffId: string;
+    handoverType: 'reception_shift' | 'cashier_to_management' | 'cashier_to_colleague';
+    expectedAmount?: number;
+    notes?: string;
+  }) => Promise<boolean>;
+  acknowledgeShiftHandover: (
+    handoverId: string,
+    receivedExact: boolean,
+    actualReceivedAmount?: number,
+    acknowledgmentNotes?: string
+  ) => Promise<boolean>;
+  selectivePurgeRecords: (
+    options: SelectivePurgeOptions
+  ) => Promise<{ success: boolean; summary: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -292,6 +334,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // سجلات أخطاء النظام المجمعة من جميع الأجهزة (ErrorBoundary + vite:preloadError + Runtime)
   const [errorLogs, setErrorLogs] = useState<SystemErrorLog[]>(getStoredErrorLogs);
+
+  // تعاقدات شركات التأمين الطبي المعتمدة
+  const [insuranceContracts, setInsuranceContracts] = useState<InsuranceCompanyContract[]>(
+    getStoredInsuranceContracts
+  );
+
+  // سجلات تسليم واستلام الشفتات والخزينة
+  const [shiftHandovers, setShiftHandovers] = useState<ShiftHandoverRecord[]>(
+    getStoredShiftHandovers
+  );
 
   const mergeErrorLogLists = (cloudList: SystemErrorLog[], localList: SystemErrorLog[]): SystemErrorLog[] => {
     const map = new Map<string, SystemErrorLog>();
@@ -470,6 +522,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } catch {}
         }
+        if (dbSettings && dbSettings['insurance_contracts_json']) {
+          try {
+            const parsedContracts = JSON.parse(dbSettings['insurance_contracts_json']);
+            if (Array.isArray(parsedContracts) && parsedContracts.length > 0) {
+              setInsuranceContracts(parsedContracts);
+              saveInsuranceContracts(parsedContracts);
+            }
+          } catch {}
+        }
+        if (dbSettings && dbSettings['insurance_bookings_json']) {
+          try {
+            const parsedInsMap = JSON.parse(dbSettings['insurance_bookings_json']);
+            if (parsedInsMap && typeof parsedInsMap === 'object') {
+              saveInsuranceBookingsMap(parsedInsMap);
+              setBookings(prev => {
+                const next = prev.map(b =>
+                  parsedInsMap[b.id] ? { ...b, insuranceDetails: parsedInsMap[b.id] } : b
+                );
+                saveBookings(next);
+                return next;
+              });
+            }
+          } catch {}
+        }
+        if (dbSettings && dbSettings['shift_handovers_json']) {
+          try {
+            const parsedHandovers = JSON.parse(dbSettings['shift_handovers_json']);
+            if (Array.isArray(parsedHandovers)) {
+              setShiftHandovers(parsedHandovers);
+              saveShiftHandovers(parsedHandovers);
+            }
+          } catch {}
+        }
 
         // دفع أي أخطاء محلية معلقة لم يتم رفعها بعد إلى قاعدة البيانات السحابية
         const pendingErrors = getPendingErrorLogs();
@@ -495,13 +580,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           );
 
           if (matchedStaff) {
+            const effectiveStaffRole: UserRole =
+              currentStored.role === 'finance_manager' || matchedStaff.username.toLowerCase() === 'finance'
+                ? 'finance_manager'
+                : matchedStaff.role;
             // إذا كان الحساب مرتبطاً بـ Supabase Auth، يشترط وجود جلسة JWT سحابية نشطة ومطابقة
             if (matchedStaff.authUserId && (!authUid || matchedStaff.authUserId !== authUid)) {
               setCurrentUser(null);
               saveSession(null);
               setActiveView('landing');
             } else if (
-              currentStored.role !== matchedStaff.role ||
+              currentStored.role !== effectiveStaffRole ||
               currentStored.id !== matchedStaff.id ||
               (currentStored.clinicId || '') !== (matchedStaff.clinicId || '') ||
               currentStored.displayName !== matchedStaff.displayName
@@ -511,7 +600,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 id: matchedStaff.id,
                 username: matchedStaff.username,
                 displayName: matchedStaff.displayName,
-                role: matchedStaff.role,
+                role: effectiveStaffRole,
                 doctorId: matchedStaff.doctorId,
                 clinicId: matchedStaff.clinicId,
               };
@@ -639,6 +728,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   return next;
                 });
               }
+            }
+          } catch {}
+        }
+      })
+      .on('broadcast', { event: 'insurance_contracts_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (Array.isArray(parsed)) {
+              setInsuranceContracts(parsed);
+              saveInsuranceContracts(parsed);
+            }
+          } catch {}
+        }
+      })
+      .on('broadcast', { event: 'insurance_bookings_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (parsed && typeof parsed === 'object') {
+              saveInsuranceBookingsMap(parsed);
+              setBookings(prev => {
+                const next = prev.map(b =>
+                  parsed[b.id] ? { ...b, insuranceDetails: parsed[b.id] } : b
+                );
+                saveBookings(next);
+                return next;
+              });
+            }
+          } catch {}
+        }
+      })
+      .on('broadcast', { event: 'shift_handovers_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (Array.isArray(parsed)) {
+              setShiftHandovers(parsed);
+              saveShiftHandovers(parsed);
             }
           } catch {}
         }
@@ -935,6 +1069,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } catch {}
         }
+
+        if (
+          freshSettings?.['insurance_contracts_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const parsedContracts = JSON.parse(freshSettings['insurance_contracts_json']);
+            if (Array.isArray(parsedContracts) && parsedContracts.length > 0) {
+              setInsuranceContracts(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(parsedContracts)) {
+                  saveInsuranceContracts(parsedContracts);
+                  return parsedContracts;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
+
+        if (
+          freshSettings?.['insurance_bookings_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const parsedMap = JSON.parse(freshSettings['insurance_bookings_json']);
+            if (parsedMap && typeof parsedMap === 'object') {
+              saveInsuranceBookingsMap(parsedMap);
+              setBookings(prev => {
+                let changed = false;
+                const next = prev.map(b => {
+                  if (parsedMap[b.id] && JSON.stringify(b.insuranceDetails) !== JSON.stringify(parsedMap[b.id])) {
+                    changed = true;
+                    return { ...b, insuranceDetails: parsedMap[b.id] };
+                  }
+                  return b;
+                });
+                if (changed) {
+                  saveBookings(next);
+                  return next;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
+
+        if (
+          freshSettings?.['shift_handovers_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const parsedHandovers = JSON.parse(freshSettings['shift_handovers_json']);
+            if (Array.isArray(parsedHandovers)) {
+              setShiftHandovers(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(parsedHandovers)) {
+                  saveShiftHandovers(parsedHandovers);
+                  return parsedHandovers;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
       } catch {
         // silent fallback
       }
@@ -1043,11 +1243,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    if (view === 'cashier' && currentUser.role !== 'cashier' && currentUser.role !== 'admin') {
+    if (view === 'cashier' && currentUser.role !== 'cashier' && currentUser.role !== 'admin' && currentUser.role !== 'finance_manager') {
       addToast({
         type: 'error',
         title: 'وصول غير مصرح به',
         message: 'هذه الواجهة مخصصة لقسم الخزينة والصندوق.'
+      });
+      return;
+    }
+
+    if (view === 'finance' && currentUser.role !== 'finance_manager' && currentUser.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'وصول غير مصرح به',
+        message: 'هذه الواجهة مخصصة لمدير المالية والإدارة العليا فقط.'
       });
       return;
     }
@@ -1096,7 +1305,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           }).catch(() => {});
         }
-        if (authRes.session.role === 'admin') {
+        if (authRes.session.role === 'admin' || authRes.session.role === 'finance_manager') {
           fetchStaffAccountsFromDb().then(freshS => {
             if (freshS && freshS.length > 0) {
               setStaffAccounts(freshS);
@@ -1114,6 +1323,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         switch (authRes.session.role) {
           case 'admin':
             setActiveView('admin');
+            break;
+          case 'finance_manager':
+            setActiveView('finance');
             break;
           case 'doctor':
             setActiveView('doctor');
@@ -1137,12 +1349,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let authSuccess = false;
     let matchedUser: UserSession | null = null;
 
-    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline فقط
+    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline أو لحساب مدير المالية الافتراضي قبل تهيئة البذور السحابية
     const matchedAccount = staffAccounts.find(
       acc => acc.username.toLowerCase() === cleanUser
     );
 
-    if (matchedAccount && !rejectedByCloudAuth && !isSupabaseConfigured) {
+    if (
+      matchedAccount &&
+      (!isSupabaseConfigured || (!rejectedByCloudAuth && matchedAccount.role === 'finance_manager') || (cleanUser === 'finance' && matchedAccount.role === 'finance_manager'))
+    ) {
       const storedHashes = getStoredStaffPasswordHashes();
       const providedHash = await hashPassword(pass);
       const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
@@ -1157,6 +1372,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           doctorId: matchedAccount.doctorId,
           clinicId: matchedAccount.clinicId,
         };
+        if (isSupabaseConfigured && matchedAccount.role === 'finance_manager') {
+          ensureAdminOrFinanceSupabaseSession().then(() => {
+            fetchBookingsFromDb().then(freshB => {
+              if (freshB) {
+                setBookings(freshB);
+                saveBookings(freshB);
+              }
+            }).catch(() => {});
+          }).catch(() => {});
+        }
       }
     }
 
@@ -1175,6 +1400,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       switch (matchedUser.role) {
         case 'admin':
           setActiveView('admin');
+          break;
+        case 'finance_manager':
+          setActiveView('finance');
           break;
         case 'doctor':
           setActiveView('doctor');
@@ -1232,7 +1460,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const cleanUsername = input.username.trim().toLowerCase();
     const cleanDisplayName = sanitizeText(input.displayName);
     const cleanEmail = input.recoveryEmail ? input.recoveryEmail.trim().toLowerCase() : undefined;
-    const allowedRoles: UserRole[] = ['admin', 'doctor', 'reception', 'cashier'];
+    const allowedRoles: UserRole[] = ['admin', 'doctor', 'reception', 'cashier', 'finance_manager'];
 
     if (!/^[a-z0-9_.-]{3,30}$/.test(cleanUsername)) {
       addToast({
@@ -1265,7 +1493,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addToast({
         type: 'error',
         title: 'دور وظيفي غير صالح',
-        message: 'الأدوار المسموحة فقط هي: admin, doctor, reception, cashier.'
+        message: 'الأدوار المسموحة فقط هي: admin, finance_manager, doctor, reception, cashier.'
       });
       return false;
     }
@@ -1986,8 +2214,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updatePaymentStatus = (bookingId: string, paymentStatus: PaymentStatus, method: PaymentMethod = 'cash'): boolean => {
-    if (!currentUser || (currentUser.role !== 'cashier' && currentUser.role !== 'admin')) {
+  const updatePaymentStatus = (
+    bookingId: string,
+    paymentStatus: PaymentStatus,
+    method: PaymentMethod = 'cash',
+    insuranceDetails?: BookingInsuranceDetails
+  ): boolean => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'cashier' &&
+        currentUser.role !== 'admin' &&
+        currentUser.role !== 'finance_manager')
+    ) {
       addToast({
         type: 'error',
         title: 'غير مصرح',
@@ -2080,6 +2318,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const paidAtNow = new Date().toISOString();
+    if (method === 'insurance' && insuranceDetails) {
+      const insMap = getStoredInsuranceBookingsMap();
+      insMap[bookingId] = insuranceDetails;
+      saveInsuranceBookingsMap(insMap);
+      if (isSupabaseConfigured) {
+        saveInsuranceBookingsMapToDb(insMap).catch(() => {});
+      }
+    }
+
     setBookings(prev => {
       const updated = prev.map(b => {
         if (b.id === bookingId) {
@@ -2088,7 +2335,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             paymentStatus: effectivePaymentStatus,
             paymentMethod: method,
             fee: method === 'consultation' ? 0 : b.fee,
-            paidAt: paidAtNow
+            paidAt: paidAtNow,
+            insuranceDetails: method === 'insurance' ? (insuranceDetails || b.insuranceDetails) : undefined
           };
         }
         return b;
@@ -3379,7 +3627,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       admin: 'الإدارة العامة',
       doctor: 'الأطباء',
       reception: 'الاستقبال والعيادات',
-      cashier: 'الخزينة والتحصيل'
+      cashier: 'الخزينة والتحصيل',
+      finance_manager: 'مدير المالية والحسابات'
     };
     addToast({
       type: 'success',
@@ -3644,11 +3893,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const clearPastBookings = async (beforeDate?: string): Promise<{ success: boolean; count: number }> => {
-    if (currentUser?.role !== 'admin') {
+    if (currentUser?.role !== 'admin' && currentUser?.role !== 'finance_manager') {
       addToast({
         type: 'error',
         title: 'غير مصرح',
-        message: 'تطهير وأرشفة السجلات السابقة مخصص لمدير النظام فقط.'
+        message: 'تطهير وأرشفة السجلات السابقة مخصص لمدير النظام أو مدير المالية فقط.'
       });
       return { success: false, count: 0 };
     }
@@ -3807,6 +4056,428 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  // ==========================================
+  // إدارة تعاقدات شركات التأمين الطبي وفئات الكروت (للمدير المالي والأدمن)
+  // ==========================================
+  const saveInsuranceContract = async (
+    contractInput: Omit<InsuranceCompanyContract, 'id' | 'createdAt'> & { id?: string }
+  ): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'admin' &&
+        currentUser.role !== 'finance_manager' &&
+        !hasPermission(currentUser.role, 'manage_insurance_contracts'))
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'إدارة تعاقدات شركات التأمين مخصصة لمدير المالية أو مدير النظام فقط.'
+      });
+      return false;
+    }
+
+    const cleanName = sanitizeText(contractInput.companyName);
+    if (!cleanName || cleanName.length < 2) {
+      addToast({
+        type: 'error',
+        title: 'بيانات غير مكتملة',
+        message: 'يرجى إدخال اسم شركة التأمين بشكل صحيح.'
+      });
+      return false;
+    }
+
+    const validCategories = (contractInput.cardCategories || [])
+      .map(c => sanitizeText(c))
+      .filter(Boolean);
+
+    if (validCategories.length === 0) {
+      addToast({
+        type: 'error',
+        title: 'فئات الكروت مطلوبة',
+        message: 'يرجى تحديد فئة كارت واحدة على الأقل (مثل: جولد، فضي، بلاتينيوم).'
+      });
+      return false;
+    }
+
+    lastSettingsSaveAtRef.current = Date.now();
+    const isEditing = Boolean(contractInput.id && insuranceContracts.some(c => c.id === contractInput.id));
+    const item: InsuranceCompanyContract = {
+      id: contractInput.id || `ins-${Date.now().toString().slice(-6)}`,
+      companyName: cleanName,
+      cardCategories: Array.from(new Set(validCategories)),
+      isActive: contractInput.isActive !== false,
+      notes: contractInput.notes ? sanitizeText(contractInput.notes) : undefined,
+      createdAt: isEditing
+        ? insuranceContracts.find(c => c.id === contractInput.id)?.createdAt || new Date().toISOString()
+        : new Date().toISOString()
+    };
+
+    const nextContracts = isEditing
+      ? insuranceContracts.map(c => (c.id === item.id ? item : c))
+      : [item, ...insuranceContracts];
+
+    setInsuranceContracts(nextContracts);
+    saveInsuranceContracts(nextContracts);
+
+    if (isSupabaseConfigured) {
+      await saveInsuranceContractsToDb(nextContracts);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: isEditing ? 'تم تحديث تعاقد شركة التأمين' : 'تمت إضافة شركة التأمين',
+      message: `تم حفظ تعاقد (${cleanName}) وفئات الكروت المعتمدة (${item.cardCategories.join('، ')}) بنجاح.`
+    });
+    return true;
+  };
+
+  const deleteInsuranceContract = async (id: string): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'admin' &&
+        currentUser.role !== 'finance_manager' &&
+        !hasPermission(currentUser.role, 'manage_insurance_contracts'))
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'حذف تعاقدات شركات التأمين مخصص لمدير المالية أو مدير النظام فقط.'
+      });
+      return false;
+    }
+
+    const target = insuranceContracts.find(c => c.id === id);
+    if (!target) return false;
+
+    lastSettingsSaveAtRef.current = Date.now();
+    const nextContracts = insuranceContracts.filter(c => c.id !== id);
+    setInsuranceContracts(nextContracts);
+    saveInsuranceContracts(nextContracts);
+
+    if (isSupabaseConfigured) {
+      await saveInsuranceContractsToDb(nextContracts);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'info',
+      title: 'تم حذف شركة التأمين',
+      message: `تمت إزالة تعاقد (${target.companyName}) من قائمة الشركات المعتمدة.`
+    });
+    return true;
+  };
+
+  // ==========================================
+  // نظام تسليم واستلام الشفتات والخزينة (الاستقبال + الخزينة)
+  // ==========================================
+  const createShiftHandover = async (input: {
+    department: 'reception' | 'cashier';
+    toStaffId: string;
+    handoverType: 'reception_shift' | 'cashier_to_management' | 'cashier_to_colleague';
+    expectedAmount?: number;
+    notes?: string;
+  }): Promise<boolean> => {
+    if (!currentUser) return false;
+
+    const todayStr = getLocalDateStr(new Date());
+    const nowIso = new Date().toISOString();
+
+    // حالة 1: تسليم مبلغ الخزينة للإدارة مباشرة (لا يظهر لزميل الكاشير سؤال هل تم الاستلام)
+    if (input.handoverType === 'cashier_to_management') {
+      const record: ShiftHandoverRecord = {
+        id: `handover-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        department: 'cashier',
+        fromStaffId: currentUser.id,
+        fromStaffUsername: currentUser.username,
+        fromStaffName: currentUser.displayName,
+        toStaffId: 'management',
+        toStaffUsername: 'management',
+        toStaffName: 'الإدارة المالية / الإدارة العليا',
+        handoverType: 'cashier_to_management',
+        expectedAmount: Number(input.expectedAmount || 0),
+        status: 'delivered_to_management',
+        notes: input.notes ? sanitizeText(input.notes) : 'تم تسليم عهدة الخزينة مباشرة للإدارة.',
+        createdAt: nowIso,
+        acknowledgedAt: nowIso,
+        shiftDate: todayStr
+      };
+
+      const nextList = [record, ...shiftHandovers].slice(0, 150);
+      lastSettingsSaveAtRef.current = Date.now();
+      setShiftHandovers(nextList);
+      saveShiftHandovers(nextList);
+
+      if (isSupabaseConfigured) {
+        await saveShiftHandoversToDb(nextList);
+        lastSettingsSaveAtRef.current = Date.now();
+      }
+
+      addToast({
+        type: 'success',
+        title: 'تم تسليم المبلغ للإدارة',
+        message: 'تم توثيق تسليم مبلغ الخزينة للإدارة بنجاح ولن يظهر إشعار استلام نقدية للزميل القادم.'
+      });
+      return true;
+    }
+
+    // حالة 2 و 3: تسليم الشفت لزميل في الاستقبال أو تسليم الخزينة لزميل كاشير
+    const targetStaff = staffAccounts.find(s => s.id === input.toStaffId);
+    if (!targetStaff) {
+      addToast({
+        type: 'error',
+        title: 'الموظف غير محدد',
+        message: 'يرجى اختيار الموظف المستلم للشفت من القائمة.'
+      });
+      return false;
+    }
+
+    if (input.department === 'reception' && targetStaff.role !== 'reception') {
+      addToast({
+        type: 'error',
+        title: 'تنبيه صلاحية الموظف المستلم',
+        message: `الموظف (${targetStaff.displayName}) غير مسجل كمسؤول استقبال في المنظومة! يرجى الرجوع للمدير لتعديل صلاحيته أو اختيار موظف استقبال معتمد.`
+      });
+      return false;
+    }
+
+    if (input.department === 'cashier' && targetStaff.role !== 'cashier') {
+      addToast({
+        type: 'error',
+        title: 'تنبيه صلاحية الموظف المستلم',
+        message: `الموظف (${targetStaff.displayName}) غير مسجل كمسؤول خزينة (كاشير) في المنظومة! يرجى الرجوع للمدير لتعديل صلاحيته أو اختيار كاشير معتمد.`
+      });
+      return false;
+    }
+
+    const expectedAmt =
+      input.handoverType === 'cashier_to_colleague'
+        ? Math.max(0, Number(input.expectedAmount || 0))
+        : undefined;
+
+    const record: ShiftHandoverRecord = {
+      id: `handover-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      department: input.department,
+      fromStaffId: currentUser.id,
+      fromStaffUsername: currentUser.username,
+      fromStaffName: currentUser.displayName,
+      toStaffId: targetStaff.id,
+      toStaffUsername: targetStaff.username,
+      toStaffName: targetStaff.displayName,
+      handoverType: input.handoverType,
+      expectedAmount: expectedAmt,
+      status: 'pending_colleague',
+      notes: input.notes ? sanitizeText(input.notes) : undefined,
+      createdAt: nowIso,
+      shiftDate: todayStr
+    };
+
+    const nextList = [record, ...shiftHandovers].slice(0, 150);
+    lastSettingsSaveAtRef.current = Date.now();
+    setShiftHandovers(nextList);
+    saveShiftHandovers(nextList);
+
+    if (isSupabaseConfigured) {
+      await saveShiftHandoversToDb(nextList);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: input.department === 'cashier' ? 'تم تسجيل تسليم الخزينة للزميل' : 'تم تسجيل تسليم شفت الاستقبال',
+      message:
+        input.department === 'cashier'
+          ? `تم إرسال إشعار استلام الخزينة بمبلغ (${expectedAmt} ج.م) للزميل (${targetStaff.displayName}) ليؤكد الاستلام فور فتح حسابه.`
+          : `تم تسجيل تسليم شفت الاستقبال للزميل (${targetStaff.displayName}) بنجاح.`
+    });
+    return true;
+  };
+
+  const acknowledgeShiftHandover = async (
+    handoverId: string,
+    receivedExact: boolean,
+    actualReceivedAmount?: number,
+    acknowledgmentNotes?: string
+  ): Promise<boolean> => {
+    if (!currentUser) return false;
+
+    const target = shiftHandovers.find(h => h.id === handoverId);
+    if (!target) return false;
+
+    const nowIso = new Date().toISOString();
+    const expected = Number(target.expectedAmount || 0);
+    const actual = receivedExact ? expected : Math.max(0, Number(actualReceivedAmount ?? 0));
+    const newStatus: ShiftHandoverRecord['status'] = receivedExact
+      ? 'accepted_exact'
+      : 'discrepancy_reported';
+
+    const nextList = shiftHandovers.map(h =>
+      h.id === handoverId
+        ? {
+            ...h,
+            status: newStatus,
+            actualReceivedAmount: actual,
+            acknowledgmentNotes: acknowledgmentNotes ? sanitizeText(acknowledgmentNotes) : undefined,
+            acknowledgedAt: nowIso
+          }
+        : h
+    );
+
+    lastSettingsSaveAtRef.current = Date.now();
+    setShiftHandovers(nextList);
+    saveShiftHandovers(nextList);
+
+    if (isSupabaseConfigured) {
+      await saveShiftHandoversToDb(nextList);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: receivedExact ? 'success' : 'warning',
+      title: receivedExact ? 'تم تأكيد استلام الشفت بالكامل' : 'تم تسجيل المبلغ الفعلي المستلم وفرق العهدة',
+      message: receivedExact
+        ? 'تم توثيق استلامك للعهدة والمبلغ مطابق تماماً لما سلمه الزميل.'
+        : `تم تسجيل المبلغ الفعلي المستلم (${actual} ج.م) بدلاً من (${expected} ج.م) وإبلاغ مدير المالية والإدارة بالفرق.`
+    });
+    return true;
+  };
+
+  // ==========================================
+  // نافذة المسح والتفريغ الانتقائي للسجلات (لمدير المالية والأدمن)
+  // ==========================================
+  const selectivePurgeRecords = async (
+    options: SelectivePurgeOptions
+  ): Promise<{ success: boolean; summary: string }> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'admin' &&
+        currentUser.role !== 'finance_manager' &&
+        !hasPermission(currentUser.role, 'selective_data_purge'))
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تفريغ ومسح السجلات مخصص لمدير المالية أو مدير النظام فقط.'
+      });
+      return { success: false, summary: 'غير مصرح' };
+    }
+
+    const actionsSummary: string[] = [];
+    const todayStr = getLocalDateStr(new Date());
+
+    activeMutationsCountRef.current += 1;
+    lastMutationAtRef.current = Date.now();
+    lastSettingsSaveAtRef.current = Date.now();
+
+    try {
+      // 1. مسح كل الحجوزات أو حجوزات الأيام السابقة
+      if (options.purgeAllBookings) {
+        const count = bookings.length;
+        for (const item of bookings) {
+          if (item?.id) markBookingDeletedLocally(item.id);
+        }
+        setSelectedTicket(null);
+        removeBookingsBeforeDate('9999-12-31');
+        setBookings([]);
+        saveBookings([]);
+        saveInsuranceBookingsMap({});
+        if (isSupabaseConfigured) {
+          await deleteBookingsBeforeDateFromDb('9999-12-31');
+          await saveInsuranceBookingsMapToDb({});
+        }
+        actionsSummary.push(`مسح جميع الحجوزات بالكامل (${count} سجل)`);
+      } else if (options.purgePastBookings) {
+        const cutoff = options.beforeDate || todayStr;
+        const toRemove = bookings.filter(b => b.date < cutoff);
+        const remaining = bookings.filter(b => b.date >= cutoff && b.notes !== '__PURGED_PAST_BOOKING__');
+        for (const item of toRemove) {
+          if (item?.id) markBookingDeletedLocally(item.id);
+        }
+        removeBookingsBeforeDate(cutoff);
+        setBookings(remaining);
+        saveBookings(remaining);
+
+        // تنظيف تفاصيل التأمين للحجوزات المحذوفة لتوفير المساحة
+        const insMap = getStoredInsuranceBookingsMap();
+        const remainingIds = new Set(remaining.map(b => b.id));
+        const prunedInsMap: Record<string, BookingInsuranceDetails> = {};
+        for (const [k, v] of Object.entries(insMap)) {
+          if (remainingIds.has(k)) prunedInsMap[k] = v;
+        }
+        saveInsuranceBookingsMap(prunedInsMap);
+
+        if (isSupabaseConfigured) {
+          await deleteBookingsBeforeDateFromDb(cutoff);
+          await saveInsuranceBookingsMapToDb(prunedInsMap);
+        }
+        actionsSummary.push(`مسح حجوزات ما قبل ${cutoff} (${toRemove.length} سجل)`);
+      }
+
+      // 2. مسح سجلات تسليم واستلام الشفتات والخزينة
+      if (options.purgeShiftHandovers) {
+        const count = shiftHandovers.length;
+        setShiftHandovers([]);
+        saveShiftHandovers([]);
+        if (isSupabaseConfigured) {
+          await saveShiftHandoversToDb([]);
+        }
+        actionsSummary.push(`مسح سجلات تسليم الشفتات والخزينة (${count} سجل)`);
+      }
+
+      // 3. مسح بصمات الاستشارة المجانية
+      if (options.purgeConsultationStamps) {
+        const count = consultationRegistry.stamps.length;
+        const clearedReg: ConsultationRegistryState = {
+          ...consultationRegistry,
+          stamps: [],
+          consultationBookingIds: []
+        };
+        const savedReg = saveConsultationRegistry(clearedReg, todayStr);
+        setConsultationRegistry(savedReg);
+        if (isSupabaseConfigured) {
+          await saveConsultationRegistryToDb(savedReg);
+        }
+        actionsSummary.push(`تصفير بصمات الاستشارات المجانية (${count} بصمة)`);
+      }
+
+      // 4. مسح سجلات إشعارات الواتساب والطباعة الحرارية
+      if (options.purgeWhatsAppAndPrintLogs) {
+        clearWhatsAppAndPrintLogs();
+        actionsSummary.push('تطهير سجلات الواتساب والطباعة الحرارية');
+      }
+
+      // 5. مسح سجلات أخطاء النظام
+      if (options.purgeSystemErrorLogs) {
+        const count = errorLogs.length;
+        setErrorLogs([]);
+        saveErrorLogs([]);
+        savePendingErrorLogs([]);
+        if (isSupabaseConfigured) {
+          await saveSettingToDb('system_error_logs_json', JSON.stringify([]));
+        }
+        actionsSummary.push(`مسح سجلات أخطاء النظام (${count} سجل)`);
+      }
+
+      const finalSummary =
+        actionsSummary.length > 0
+          ? `تم بنجاح: ${actionsSummary.join(' + ')}.`
+          : 'لم يتم تحديد أي سجلات للمسح.';
+
+      if (actionsSummary.length > 0) {
+        addToast({
+          type: 'success',
+          title: 'تم تنظيف وتفريغ السجلات المحددة',
+          message: finalSummary
+        });
+      }
+
+      return { success: actionsSummary.length > 0, summary: finalSummary };
+    } finally {
+      lastMutationAtRef.current = Date.now();
+      activeMutationsCountRef.current = Math.max(0, activeMutationsCountRef.current - 1);
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -3880,7 +4551,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resolveAllErrorLogs,
         deleteErrorLog,
         clearAllErrorLogs,
-        syncErrorLogsNow
+        syncErrorLogsNow,
+        insuranceContracts,
+        saveInsuranceContract,
+        deleteInsuranceContract,
+        shiftHandovers,
+        createShiftHandover,
+        acknowledgeShiftHandover,
+        selectivePurgeRecords
       }}
     >
       {children}

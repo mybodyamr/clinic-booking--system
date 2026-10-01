@@ -102,7 +102,32 @@
 }
 
 @media print {
+  @page {
+    margin: 3mm;
+  }
+
+  html,
+  body,
+  #root {
+    background: #ffffff !important;
+    color: #000000 !important;
+    min-height: 0 !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+
   .no-print {
     display: none !important;
+  }
+
+  .print-only-receipt {
+    display: block !important;
+    width: 100% !important;
+    max-width: 78mm !important;
+    margin: 0 auto !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    box-shadow: none !important;
   }
 }

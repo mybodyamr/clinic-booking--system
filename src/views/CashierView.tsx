@@ -1,5 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import QRCode from 'qrcode';
+import { toPng } from 'html-to-image';
 import { 
   Receipt, 
   Search, 
@@ -27,7 +29,14 @@ import {
   FileSpreadsheet,
   Edit2,
   Trash2,
-  Loader2
+  Loader2,
+  Download,
+  Hospital,
+  MapPin,
+  ArrowRightLeft,
+  CreditCard,
+  BadgePercent,
+  Building2
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useApp } from '../context/AppContext';
@@ -35,7 +44,8 @@ import { maskPhoneNumber, validateTripleName, validateEgyptianPhone, sanitizeSpr
 import { getLocalDateStr } from '../services/scheduleService';
 import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 import { fetchSettingsFromDb, markWhatsAppSentInDb, verifyTicketForStaffRpc } from '../services/supabaseService';
-import { PaymentStatus, PaymentMethod, Booking, DailyClinicScheduleItem } from '../types';
+import { PaymentStatus, PaymentMethod, Booking, DailyClinicScheduleItem, BookingInsuranceDetails } from '../types';
+import { QrCameraScanner } from '../components/QrCameraScanner';
 
 export const CashierView: React.FC = () => {
   const {
@@ -58,14 +68,84 @@ export const CashierView: React.FC = () => {
     navigate,
     setSelectedTicket,
     checkConsultationEligibility,
-    consultationRegistry
+    consultationRegistry,
+    insuranceContracts,
+    shiftHandovers,
+    createShiftHandover,
+    acknowledgeShiftHandover,
+    staffAccounts
   } = useApp();
   const [activeTab, setActiveTab] = useState<'unpaid' | 'paid' | 'financial-reports' | 'clinic-fees' | 'daily-clinics'>('unpaid');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedClinic, setSelectedClinic] = useState<string>('all');
   const [selectedReceiptBooking, setSelectedReceiptBooking] = useState<Booking | null>(null);
+  const [receiptQrDataUrl, setReceiptQrDataUrl] = useState<string>('');
+  const [isDownloadingReceipt, setIsDownloadingReceipt] = useState(false);
+  const receiptPreviewRef = useRef<HTMLDivElement>(null);
+  const [autoOpenReceiptOnPay, setAutoOpenReceiptOnPay] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('sharaya_cashier_auto_receipt_v1');
+      return saved === null ? true : saved === 'true';
+    } catch {
+      return true;
+    }
+  });
+  const [printedReceiptIds, setPrintedReceiptIds] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem('sharaya_printed_receipts_v1');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
   const [editingFeeClinicId, setEditingFeeClinicId] = useState<string | null>(null);
   const [tempClinicFee, setTempClinicFee] = useState<number>(50);
+
+  useEffect(() => {
+    if (!selectedReceiptBooking) {
+      setReceiptQrDataUrl('');
+      return;
+    }
+    const qrPayload = JSON.stringify({
+      id: selectedReceiptBooking.id,
+      ticket: selectedReceiptBooking.ticketNumber,
+      clinic: selectedReceiptBooking.clinicName,
+      patient: selectedReceiptBooking.patientName,
+      phone: selectedReceiptBooking.patientPhone,
+      date: selectedReceiptBooking.date,
+      queuePosition: selectedReceiptBooking.queuePosition
+    });
+    QRCode.toDataURL(qrPayload, {
+      width: 160,
+      margin: 1,
+      color: {
+        dark: '#000000',
+        light: '#FFFFFF'
+      }
+    })
+      .then((url) => setReceiptQrDataUrl(url))
+      .catch(() => setReceiptQrDataUrl(''));
+  }, [selectedReceiptBooking]);
+
+  const markReceiptPrinted = (bookingId: string) => {
+    setPrintedReceiptIds((prev) => {
+      const next = { ...prev, [bookingId]: true };
+      try {
+        localStorage.setItem('sharaya_printed_receipts_v1', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    if (isSupabaseConfigured) {
+      try {
+        const channel = supabase.channel('cashier_whatsapp_sync');
+        channel.send({
+          type: 'broadcast',
+          event: 'receipt_printed_updated',
+          payload: { bookingId }
+        });
+      } catch {}
+    }
+  };
 
   // الصلاحيات الأساسية والمفوضة للكاشير من لوحة تحكم الأدمن
   const canConfirmPayments =
@@ -83,6 +163,209 @@ export const CashierView: React.FC = () => {
   // حالة نافذة تأكيد حذف حجز مريض لم يحضر
   const [bookingPendingDeletion, setBookingPendingDeletion] = useState<Booking | null>(null);
   const [isDeletingBooking, setIsDeletingBooking] = useState(false);
+
+  // ==========================================
+  // 1) حالة نافذة تحصيل التأمين الطبي (الشركة + فئة الكارت + رقم الكارت + نسبة التحمل مثل 20/10)
+  // ==========================================
+  const [insuranceModalBooking, setInsuranceModalBooking] = useState<Booking | null>(null);
+  const [selectedInsCompanyId, setSelectedInsCompanyId] = useState<string>('');
+  const [selectedInsCardCategory, setSelectedInsCardCategory] = useState<string>('');
+  const [insCardNumber, setInsCardNumber] = useState<string>('');
+  const [insCopayRawInput, setInsCopayRawInput] = useState<string>('20%');
+  const [insFormError, setInsFormError] = useState<string>('');
+
+  const activeInsuranceContracts = React.useMemo(
+    () => insuranceContracts.filter(c => c.isActive !== false),
+    [insuranceContracts]
+  );
+
+  const selectedInsCompanyObj = React.useMemo(
+    () =>
+      activeInsuranceContracts.find(c => c.id === selectedInsCompanyId) ||
+      activeInsuranceContracts[0] ||
+      null,
+    [activeInsuranceContracts, selectedInsCompanyId]
+  );
+
+  // استخراج نسبة التحمل الرقمية من النص المدخل (مثلاً "20/10" -> 20%، أو "10%" -> 10%)
+  const parsedCopayPercentage = React.useMemo(() => {
+    const raw = insCopayRawInput.trim();
+    if (!raw) return 0;
+    const match = raw.match(/(\d+(?:\.\d+)?)/);
+    if (!match) return 0;
+    const num = parseFloat(match[1]);
+    return Math.max(0, Math.min(100, isNaN(num) ? 0 : num));
+  }, [insCopayRawInput]);
+
+  const openInsurancePaymentModal = (booking: Booking) => {
+    const firstComp = activeInsuranceContracts[0];
+    setInsuranceModalBooking(booking);
+    setSelectedInsCompanyId(firstComp?.id || '');
+    setSelectedInsCardCategory(firstComp?.cardCategories?.[0] || 'فضي (Silver)');
+    setInsCardNumber(booking.insuranceDetails?.cardNumber || '');
+    setInsCopayRawInput(booking.insuranceDetails?.copayInputRaw || '20%');
+    setInsFormError('');
+  };
+
+  const handleConfirmInsuranceModal = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!insuranceModalBooking) return;
+    setInsFormError('');
+
+    const comp = selectedInsCompanyObj;
+    if (!comp) {
+      setInsFormError('يرجى اختيار شركة التأمين أولاً.');
+      return;
+    }
+    if (!selectedInsCardCategory.trim()) {
+      setInsFormError('يرجى اختيار فئة الكارت (جولد / فضي / بلاتينيوم...).');
+      return;
+    }
+    if (!insCardNumber.trim() || insCardNumber.trim().length < 2) {
+      setInsFormError('يرجى كتابة رقم كارت التأمين الخاص بالمريض.');
+      return;
+    }
+
+    const originalFee = insuranceModalBooking.fee || 0;
+    const patientPaidAmount = Math.round((originalFee * parsedCopayPercentage) / 100);
+    const insuranceCoveredAmount = Math.max(0, originalFee - patientPaidAmount);
+
+    const details: BookingInsuranceDetails = {
+      companyId: comp.id,
+      companyName: comp.companyName,
+      cardCategory: selectedInsCardCategory.trim(),
+      cardNumber: insCardNumber.trim(),
+      copayInputRaw: insCopayRawInput.trim() || `${parsedCopayPercentage}%`,
+      copayPercentage: parsedCopayPercentage,
+      originalFee,
+      patientPaidAmount,
+      insuranceCoveredAmount
+    };
+
+    const ok = updatePaymentStatus(insuranceModalBooking.id, 'paid', 'insurance', details);
+    if (ok) {
+      const updatedBooking: Booking = {
+        ...insuranceModalBooking,
+        paymentStatus: 'paid',
+        paymentMethod: 'insurance',
+        paidAt: new Date().toISOString(),
+        insuranceDetails: details
+      };
+      if (scannedBooking?.id === insuranceModalBooking.id) {
+        setScannedBooking(updatedBooking);
+      }
+      setInsuranceModalBooking(null);
+      if (autoOpenReceiptOnPay) {
+        setSelectedReceiptBooking(updatedBooking);
+      }
+    }
+  };
+
+  // ==========================================
+  // 2) حالة تسليم واستلام شفت الخزينة (إلى الإدارة أو إلى زميل كاشير)
+  // ==========================================
+  const [isHandoverModalOpen, setIsHandoverModalOpen] = useState(false);
+  const [handoverMode, setHandoverMode] = useState<'cashier_to_management' | 'cashier_to_colleague'>('cashier_to_management');
+  const [selectedColleagueId, setSelectedColleagueId] = useState<string>('');
+  const [handoverAmountInput, setHandoverAmountInput] = useState<string>('');
+  const [handoverNotesInput, setHandoverNotesInput] = useState<string>('');
+  const [isSubmittingHandover, setIsSubmittingHandover] = useState(false);
+
+  // حالة الرد على إشعار استلام الخزينة للزميل (تم أو لا + المبلغ الفعلي)
+  const [discrepancyHandoverId, setDiscrepancyHandoverId] = useState<string | null>(null);
+  const [actualReceivedInput, setActualReceivedInput] = useState<string>('');
+  const [discrepancyNoteInput, setDiscrepancyNoteInput] = useState<string>('');
+
+  // الموظف المختار لتسليم الخزينة وفحص ما إذا كان مسجلاً كمسؤول خزينة (كاشير) أم لا
+  const selectedColleagueObj = React.useMemo(
+    () => staffAccounts.find(s => s.id === selectedColleagueId) || null,
+    [staffAccounts, selectedColleagueId]
+  );
+  const isSelectedColleagueValidCashier =
+    !selectedColleagueObj || selectedColleagueObj.role === 'cashier';
+
+  // إشعار الاستلام المعلق للزميل (لا يظهر أبداً إذا اختار الكاشير السابق "تم تسليم المبلغ للإدارة")
+  const pendingCashierHandovers = React.useMemo(() => {
+    return shiftHandovers.filter(
+      h =>
+        h.department === 'cashier' &&
+        h.handoverType === 'cashier_to_colleague' &&
+        h.status === 'pending_colleague'
+    );
+  }, [shiftHandovers]);
+
+  const handleSubmitCashierHandover = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmittingHandover) return;
+
+    const amountNum = Math.max(0, Number(handoverAmountInput) || 0);
+    if (handoverMode === 'cashier_to_colleague') {
+      if (!selectedColleagueId) {
+        addToast({
+          type: 'error',
+          title: 'يرجى اختيار الزميل المستلم',
+          message: 'اختر الزميل الذي سيتسلم الخزينة من القائمة.'
+        });
+        return;
+      }
+      if (!isSelectedColleagueValidCashier) {
+        addToast({
+          type: 'error',
+          title: 'تنبيه صلاحية استلام الخزينة',
+          message: `الموظف (${selectedColleagueObj?.displayName || selectedColleagueObj?.username}) غير مسجل كمسؤول خزينة (كاشير). يرجى الرجوع للمدير لتعديل الصلاحية أو اختيار كاشير مسجل.`
+        });
+        return;
+      }
+    }
+
+    setIsSubmittingHandover(true);
+    try {
+      const ok = await createShiftHandover({
+        department: 'cashier',
+        handoverType: handoverMode,
+        toStaffId: handoverMode === 'cashier_to_colleague' ? (selectedColleagueObj?.id || '') : 'management',
+        expectedAmount: amountNum,
+        notes: handoverNotesInput.trim() || undefined
+      });
+
+      if (ok) {
+        setIsHandoverModalOpen(false);
+        setHandoverNotesInput('');
+      }
+    } finally {
+      setIsSubmittingHandover(false);
+    }
+  };
+
+  const handleConfirmColleagueReceipt = async (handoverId: string, confirmedExact: boolean, expectedAmount: number) => {
+    if (confirmedExact) {
+      await acknowledgeShiftHandover(handoverId, true, expectedAmount);
+      setDiscrepancyHandoverId(null);
+      setActualReceivedInput('');
+      setDiscrepancyNoteInput('');
+      return;
+    }
+
+    const actualNum = Number(actualReceivedInput);
+    if (actualReceivedInput.trim() === '' || isNaN(actualNum) || actualNum < 0) {
+      addToast({
+        type: 'error',
+        title: 'المبلغ الفعلي غير صالح',
+        message: 'يرجى كتابة المبلغ الفعلي الذي استلمته في الخزينة بالأرقام.'
+      });
+      return;
+    }
+
+    await acknowledgeShiftHandover(
+      handoverId,
+      false,
+      actualNum,
+      discrepancyNoteInput.trim() || undefined
+    );
+    setDiscrepancyHandoverId(null);
+    setActualReceivedInput('');
+    setDiscrepancyNoteInput('');
+  };
 
   const handleConfirmDeleteBooking = async () => {
     if (!bookingPendingDeletion || isDeletingBooking) return;
@@ -356,6 +639,19 @@ export const CashierView: React.FC = () => {
           return next;
         });
       })
+      .on('broadcast', { event: 'receipt_printed_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const bookingId = payload?.payload?.bookingId;
+        if (bookingId) {
+          setPrintedReceiptIds(prev => {
+            const next = { ...prev, [bookingId]: true };
+            try {
+              localStorage.setItem('sharaya_printed_receipts_v1', JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        }
+      })
       .subscribe();
 
     return () => {
@@ -398,10 +694,14 @@ export const CashierView: React.FC = () => {
     .filter(b => b.paymentStatus === 'paid' || b.paymentStatus === 'exempt')
     .sort((a, b) => new Date(b.paidAt || b.createdAt).getTime() - new Date(a.paidAt || a.createdAt).getTime());
 
-  // إجمالي الإيرادات النقدية
-  const cashRevenue = paidBookings
-    .filter(b => b.paymentMethod === 'cash')
-    .reduce((acc, b) => acc + b.fee, 0);
+  // إجمالي الإيرادات النقدية (شاملة النقدي المباشر + نسبة تحمل المريض المحصلة نقداً في التأمين)
+  const cashRevenue = paidBookings.reduce((acc, b) => {
+    if (b.paymentMethod === 'cash') return acc + b.fee;
+    if (b.paymentMethod === 'insurance') {
+      return acc + (b.insuranceDetails?.patientPaidAmount ?? 0);
+    }
+    return acc;
+  }, 0);
 
   const insuranceCount = paidBookings.filter(b => b.paymentMethod === 'insurance').length;
   const consultationCount = paidBookings.filter(b => b.paymentMethod === 'consultation').length;
@@ -422,7 +722,23 @@ export const CashierView: React.FC = () => {
   });
 
   const handleProcessPayment = (bookingId: string, status: PaymentStatus, method: PaymentMethod) => {
-    updatePaymentStatus(bookingId, status, method);
+    const targetBooking = bookings.find(b => b.id === bookingId);
+    if (!targetBooking) return;
+    if (method === 'insurance') {
+      openInsurancePaymentModal(targetBooking);
+      return;
+    }
+    const ok = updatePaymentStatus(bookingId, status, method);
+    if (ok && targetBooking && autoOpenReceiptOnPay) {
+      const updatedBooking: Booking = {
+        ...targetBooking,
+        paymentStatus: status,
+        paymentMethod: method,
+        fee: method === 'consultation' ? 0 : targetBooking.fee,
+        paidAt: new Date().toISOString()
+      };
+      setSelectedReceiptBooking(updatedBooking);
+    }
   };
 
   // التحقق من رمز QR أو كود التذكرة في ماسح الخزينة
@@ -432,27 +748,33 @@ export const CashierView: React.FC = () => {
 
     let targetCode = code;
     let targetBookingId = '';
+    let targetPhone = '';
     try {
       const parsed = JSON.parse(code);
-      if (parsed.ticket) targetCode = String(parsed.ticket);
-      if (parsed.id) targetBookingId = String(parsed.id);
+      if (parsed.ticket) targetCode = String(parsed.ticket).trim();
+      if (parsed.id) targetBookingId = String(parsed.id).trim();
+      if (parsed.phone) targetPhone = String(parsed.phone).replace(/[\s-]/g, '');
     } catch {
       // ليس JSON
     }
 
-    const cleanInputPhone = targetCode.replace(/[\s-]/g, '');
+    const cleanInputPhone = (targetPhone || targetCode).replace(/[\s-]/g, '');
 
     let matched = bookings.find(b => 
       (targetBookingId && b.id === targetBookingId) ||
       b.ticketNumber.toLowerCase() === targetCode.toLowerCase() ||
       b.id === targetCode ||
-      b.patientPhone.replace(/[\s-]/g, '') === cleanInputPhone
+      (cleanInputPhone.length >= 9 && b.patientPhone.replace(/[\s-]/g, '') === cleanInputPhone)
     );
 
     if (!matched && isSupabaseConfigured) {
-      const remoteMatched = await verifyTicketForStaffRpc(targetBookingId || targetCode);
-      if (remoteMatched) {
-        matched = remoteMatched;
+      const lookupsToTry = Array.from(new Set([targetBookingId, targetCode, cleanInputPhone].filter(Boolean)));
+      for (const lookupKey of lookupsToTry) {
+        const remoteMatched = await verifyTicketForStaffRpc(lookupKey);
+        if (remoteMatched) {
+          matched = remoteMatched;
+          break;
+        }
       }
     }
 
@@ -478,6 +800,10 @@ export const CashierView: React.FC = () => {
   // معالجة الدفع السريع من داخل شاشة الماسح الضوئي
   const handleScanPayment = (status: PaymentStatus, method: PaymentMethod) => {
     if (!scannedBooking) return;
+    if (method === 'insurance') {
+      openInsurancePaymentModal(scannedBooking);
+      return;
+    }
     const ok = updatePaymentStatus(scannedBooking.id, status, method);
     if (!ok) return;
     
@@ -502,11 +828,253 @@ export const CashierView: React.FC = () => {
     setScanNotFound(false);
   };
 
-  const handlePrintReceipt = (booking: Booking) => {
-    setSelectedReceiptBooking(booking);
+  const executeThermalReceiptPrint = (booking: Booking) => {
+    markReceiptPrinted(booking.id);
+    const clinicInfo = clinics.find(c => c.id === booking.clinicId);
+    const roomFloorText = `${clinicInfo?.room || 'غرفة الكشف'} • ${clinicInfo?.floor || 'الطابق الأول'}`;
+    const amountText =
+      booking.paymentMethod === 'consultation'
+        ? '٠ ج.م (استشارة مجانية)'
+        : booking.paymentStatus === 'exempt'
+        ? '٠ ج.م (إعفاء تكافل خيري)'
+        : `${booking.fee} ج.م`;
+    const methodText =
+      booking.paymentMethod === 'cash'
+        ? 'سداد نقدي بالخزينة ✓'
+        : booking.paymentMethod === 'insurance'
+        ? 'تأمين طبي معتمد ✓'
+        : booking.paymentMethod === 'consultation'
+        ? 'استشارة مجانية ✓'
+        : booking.paymentStatus === 'exempt'
+        ? 'إعفاء تكافل خيري ✓'
+        : 'بانتظار السداد';
+    const paidDateObj = booking.paidAt ? new Date(booking.paidAt) : new Date();
+    const dateTimeStr = `${paidDateObj.toLocaleDateString('ar-EG')} — ${paidDateObj.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}`;
+
+    try {
+      let printFrame = document.getElementById('sharaya-thermal-print-frame') as HTMLIFrameElement | null;
+      if (!printFrame) {
+        printFrame = document.createElement('iframe');
+        printFrame.id = 'sharaya-thermal-print-frame';
+        printFrame.style.position = 'fixed';
+        printFrame.style.right = '0';
+        printFrame.style.bottom = '0';
+        printFrame.style.width = '0';
+        printFrame.style.height = '0';
+        printFrame.style.border = '0';
+        document.body.appendChild(printFrame);
+      }
+
+      const doc = printFrame.contentWindow?.document;
+      if (doc && printFrame.contentWindow) {
+        doc.open();
+        doc.write(`<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+  <meta charset="UTF-8" />
+  <title>إيصال خزينة وتذكرة دور - ${booking.ticketNumber}</title>
+  <style>
+    @page {
+      size: 80mm auto;
+      margin: 3mm;
+    }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: 'Cairo', 'Tahoma', 'Arial', sans-serif;
+      background: #ffffff;
+      color: #000000;
+      width: 100%;
+      max-width: 74mm;
+      margin: 0 auto;
+      padding: 4px;
+      direction: rtl;
+      text-align: right;
+    }
+    .receipt-box {
+      border: 2px solid #000;
+      border-radius: 8px;
+      padding: 8px;
+    }
+    .header {
+      text-align: center;
+      border-bottom: 2px dashed #000;
+      padding-bottom: 6px;
+      margin-bottom: 8px;
+    }
+    .header h1 {
+      font-size: 15px;
+      font-weight: 900;
+      margin-bottom: 2px;
+    }
+    .header p {
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .queue-hero {
+      border: 2px solid #000;
+      border-radius: 6px;
+      padding: 6px;
+      text-align: center;
+      margin-bottom: 8px;
+      background: #f8f8f8;
+    }
+    .queue-label {
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .queue-num {
+      font-size: 32px;
+      font-weight: 900;
+      line-height: 1.1;
+      font-family: monospace;
+      margin: 2px 0;
+    }
+    .ticket-code {
+      font-size: 13px;
+      font-weight: 900;
+      border-top: 1px dashed #000;
+      padding-top: 4px;
+      margin-top: 4px;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 11.5px;
+      padding: 3px 0;
+      border-bottom: 1px dotted #999;
+    }
+    .row:last-child {
+      border-bottom: none;
+    }
+    .row .lbl {
+      font-weight: 700;
+    }
+    .row .val {
+      font-weight: 900;
+      text-align: left;
+    }
+    .total-box {
+      border-top: 2px dashed #000;
+      border-bottom: 2px dashed #000;
+      padding: 6px 0;
+      margin: 6px 0;
+    }
+    .qr-wrap {
+      text-align: center;
+      margin: 6px 0 4px;
+    }
+    .qr-wrap img {
+      width: 105px;
+      height: 105px;
+    }
+    .footer {
+      text-align: center;
+      font-size: 10px;
+      font-weight: 700;
+      margin-top: 6px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="receipt-box">
+    <div class="header">
+      <h1>عيادات الجمعية الشرعية التخصصية</h1>
+      <p>إيصال سداد الخزينة وتذكرة الدور الرسمية</p>
+    </div>
+
+    <div class="queue-hero">
+      <div class="queue-label">رقم الدور بالطابور</div>
+      <div class="queue-num">#${booking.queuePosition}</div>
+      <div class="ticket-code">كود التذكرة: ${booking.ticketNumber}</div>
+    </div>
+
+    <div>
+      <div class="row"><span class="lbl">المريض:</span><span class="val">${booking.patientName}</span></div>
+      <div class="row"><span class="lbl">العيادة:</span><span class="val">${booking.clinicName}</span></div>
+      <div class="row"><span class="lbl">الطبيب:</span><span class="val">${booking.doctorName}</span></div>
+      <div class="row"><span class="lbl">المكان:</span><span class="val">${roomFloorText}</span></div>
+      <div class="row"><span class="lbl">التاريخ والموعد:</span><span class="val">${booking.date} (${booking.timeSlot})</span></div>
+    </div>
+
+    <div class="total-box">
+      <div class="row"><span class="lbl">المبلغ المسدد:</span><span class="val">${amountText}</span></div>
+      <div class="row"><span class="lbl">طريقة الاعتماد:</span><span class="val">${methodText}</span></div>
+      <div class="row"><span class="lbl">وقت الإصدار:</span><span class="val">${dateTimeStr}</span></div>
+    </div>
+
+    ${receiptQrDataUrl ? `<div class="qr-wrap"><img src="${receiptQrDataUrl}" alt="QR" /></div>` : ''}
+
+    <div class="footer">
+      يرجى الاحتفاظ ببون الدور وتقديمه لمكتب الاستقبال عند النداء<br/>
+      نتمنى لكم تمام الشفاء والعافية
+    </div>
+  </div>
+</body>
+</html>`);
+        doc.close();
+        setTimeout(() => {
+          try {
+            printFrame?.contentWindow?.focus();
+            printFrame?.contentWindow?.print();
+          } catch {
+            window.print();
+          }
+        }, 180);
+        return;
+      }
+    } catch {
+      // fallback to window.print
+    }
     setTimeout(() => {
       window.print();
-    }, 200);
+    }, 150);
+  };
+
+  const handlePrintReceipt = (booking: Booking, immediatePrint = false) => {
+    setSelectedReceiptBooking(booking);
+    if (immediatePrint) {
+      setTimeout(() => {
+        executeThermalReceiptPrint(booking);
+      }, 220);
+    }
+  };
+
+  const handleDownloadReceiptImage = async () => {
+    if (!receiptPreviewRef.current || !selectedReceiptBooking || isDownloadingReceipt) return;
+    setIsDownloadingReceipt(true);
+    try {
+      const dataUrl = await toPng(receiptPreviewRef.current, {
+        quality: 1,
+        pixelRatio: 3,
+        backgroundColor: '#ffffff',
+        cacheBust: true
+      });
+      const link = document.createElement('a');
+      link.download = `بون-خزينة-${selectedReceiptBooking.ticketNumber}-${selectedReceiptBooking.patientName.replace(/\s+/g, '-')}.png`;
+      link.href = dataUrl;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      markReceiptPrinted(selectedReceiptBooking.id);
+      addToast({
+        type: 'success',
+        title: 'تم حفظ بون الخزينة',
+        message: 'تم حفظ صورة بون الخزينة ورقم الدور بجودة عالية'
+      });
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'تعذر حفظ الصورة',
+        message: 'يمكنك استخدام زر الطباعة المباشرة للبون'
+      });
+    } finally {
+      setIsDownloadingReceipt(false);
+    }
   };
 
   // توليد رقم مرجعي صالح للمرضى الحضوريين الذين لا يحملون هاتفاً محمولاً
@@ -578,6 +1146,11 @@ export const CashierView: React.FC = () => {
     }
 
     let finalBooking: Booking = res.booking;
+    if (walkInPaymentMode === 'insurance' && canConfirmPayments) {
+      setIsWalkInModalOpen(false);
+      openInsurancePaymentModal(res.booking);
+      return;
+    }
     if (walkInPaymentMode !== 'unpaid' && canConfirmPayments) {
       const targetStatus: PaymentStatus = (walkInPaymentMode === 'charity_exempt' || walkInPaymentMode === 'consultation') ? 'exempt' : 'paid';
       const ok = updatePaymentStatus(res.booking.id, targetStatus, walkInPaymentMode);
@@ -625,7 +1198,8 @@ export const CashierView: React.FC = () => {
   };
 
   return (
-    <div className="space-y-6 pb-16">
+    <>
+    <div className="no-print space-y-6 pb-16">
       
       {/* رأس شاشة الخزينة وشريط المؤشرات المالية الموحد */}
       <div className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 shadow-2xs overflow-hidden">
@@ -639,13 +1213,36 @@ export const CashierView: React.FC = () => {
                 قسم الخزينة وتأكيد الحجوزات
               </h1>
               <p className="text-xs text-slate-500 dark:text-slate-400">
-                تأكيد السداد (نقدي / تأمين / إعفاء خيري)، الحجز الحضوري، وإرسال تأكيد الواتساب
+                تأكيد السداد (نقدي / تأمين / إعفاء خيري)، الحجز الحضوري، طباعة بون الدور، وإرسال تأكيد الواتساب
               </p>
             </div>
           </div>
 
           {/* أزرار الإجراءات والتبديل */}
           <div className="flex flex-wrap items-center gap-2">
+            {/* زر تفعيل/إيقاف فتح بون الخزينة وتذكرة الدور تلقائياً بعد تأكيد الدفع */}
+            <button
+              type="button"
+              onClick={() => {
+                setAutoOpenReceiptOnPay(prev => {
+                  const next = !prev;
+                  try {
+                    localStorage.setItem('sharaya_cashier_auto_receipt_v1', String(next));
+                  } catch {}
+                  return next;
+                });
+              }}
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-lg font-bold text-xs border transition-colors cursor-pointer ${
+                autoOpenReceiptOnPay
+                  ? 'bg-emerald-50 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-200 border-emerald-300 dark:border-emerald-700'
+                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-slate-700'
+              }`}
+              title="فتح نافذة بون الخزينة ورقم الدور تلقائياً بمجرد تأكيد سداد المريض"
+            >
+              <Printer className={`w-4 h-4 ${autoOpenReceiptOnPay ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-400'}`} />
+              <span>بون تلقائي بعد الدفع: {autoOpenReceiptOnPay ? 'مفعل ✓' : 'متوقف'}</span>
+            </button>
+
             {/* زر الاستعلام عن سجل المريض برقم الهاتف */}
             <button
               onClick={() => {
@@ -695,6 +1292,20 @@ export const CashierView: React.FC = () => {
             >
               <QrCode className="w-4 h-4" />
               <span>مسح تذكرة (QR)</span>
+            </button>
+
+            {/* زر تسليم الشفت / تسليم الخزينة (للإدارة أو للزميل) */}
+            <button
+              onClick={() => {
+                setHandoverAmountInput(String(cashRevenue));
+                setHandoverNotesInput('');
+                setIsHandoverModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 bg-amber-600 hover:bg-amber-700 text-white px-3.5 py-2 rounded-lg font-bold text-xs shadow-2xs transition-colors cursor-pointer"
+              title="تسليم مبلغ الخزينة للإدارة أو تسليم الخزينة للزميل المستلم للشفت"
+            >
+              <ArrowRightLeft className="w-4 h-4" />
+              <span>تسليم الشفت والخزينة</span>
             </button>
 
             {/* التبديل بين الحجوزات التي تحتاج تأكيد والمؤكدة والتبويبات المفوضة */}
@@ -790,6 +1401,122 @@ export const CashierView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* إشعار استلام الخزينة للزميل (يظهر فقط عندما يختار الكاشير السابق "تسليم الخزينة لزميله" ولا يظهر إذا اختار "تم تسليم المبلغ للإدارة") */}
+      {pendingCashierHandovers.length > 0 && (
+        <div className="space-y-3">
+          {pendingCashierHandovers.map(h => {
+            const isDiscrepancyMode = discrepancyHandoverId === h.id;
+            return (
+              <div
+                key={h.id}
+                className="p-5 rounded-2xl bg-gradient-to-l from-amber-50 via-orange-50 to-amber-50 dark:from-amber-950/70 dark:via-slate-900 dark:to-amber-950/60 border-2 border-amber-400 dark:border-amber-700 shadow-sm space-y-3"
+              >
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-amber-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                      <ArrowRightLeft className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-amber-200 dark:bg-amber-900 text-amber-950 dark:text-amber-200">
+                          إقرار استلام عهدة الخزينة من الزميل
+                        </span>
+                        <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                          {new Date(h.createdAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
+                        </span>
+                      </div>
+                      <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white mt-1">
+                        هل تم استلام مبلغ{' '}
+                        <span className="text-amber-800 dark:text-amber-300 font-mono text-base sm:text-lg underline">
+                          {h.expectedAmount ?? 0} ج.م
+                        </span>{' '}
+                        في الخزينة من الزميل ({h.fromStaffName})؟
+                      </h3>
+                      {h.notes && (
+                        <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
+                          ملاحظة التسليم: {h.notes}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {!isDiscrepancyMode && (
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmColleagueReceipt(h.id, true, h.expectedAmount ?? 0)}
+                        className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-extrabold text-xs flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-4 h-4" />
+                        <span>نعم، تم استلام ({h.expectedAmount ?? 0} ج.م)</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDiscrepancyHandoverId(h.id);
+                          setActualReceivedInput('');
+                          setDiscrepancyNoteInput('');
+                        }}
+                        className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl font-extrabold text-xs flex items-center gap-1.5 shadow-xs cursor-pointer"
+                      >
+                        <X className="w-4 h-4" />
+                        <span>لا، المبلغ المستلم مختلف</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {isDiscrepancyMode && (
+                  <div className="pt-3 border-t border-amber-300 dark:border-amber-800/80 grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-1">
+                        اكتب المبلغ الفعلي الذي استلمته (ج.م):
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        value={actualReceivedInput}
+                        onChange={e => setActualReceivedInput(e.target.value)}
+                        placeholder="مثال: 850"
+                        className="w-full px-3 py-2 rounded-xl border border-rose-400 dark:border-rose-700 bg-white dark:bg-slate-900 text-sm font-mono font-bold text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-1">
+                        ملاحظة توضيحية (اختياري):
+                      </label>
+                      <input
+                        type="text"
+                        value={discrepancyNoteInput}
+                        onChange={e => setDiscrepancyNoteInput(e.target.value)}
+                        placeholder="سبب الفرق إن وجد..."
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                      />
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleConfirmColleagueReceipt(h.id, false, h.expectedAmount ?? 0)}
+                        className="flex-1 py-2.5 px-3 bg-rose-700 hover:bg-rose-800 text-white rounded-xl font-bold text-xs cursor-pointer"
+                      >
+                        تأكيد وتسجيل المبلغ الفعلي
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDiscrepancyHandoverId(null)}
+                        className="py-2.5 px-3 bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-xs cursor-pointer"
+                      >
+                        إلغاء
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* تبويبات السجلات المالية (بانتظار التأكيد / المؤكدة اليوم) */}
       {(activeTab === 'unpaid' || activeTab === 'paid') && (
@@ -899,6 +1626,11 @@ export const CashierView: React.FC = () => {
                             وقت اعتماد الخزينة: {new Date(b.paidAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
                           </span>
                         )}
+                        {b.paymentMethod === 'insurance' && b.insuranceDetails && (
+                          <span className="text-blue-700 dark:text-blue-300 font-bold bg-blue-50 dark:bg-blue-950/60 px-2 py-0.5 rounded-md border border-blue-200 dark:border-blue-800">
+                            تأمين: {b.insuranceDetails.companyName} ({b.insuranceDetails.cardCategory}) • كارت: {b.insuranceDetails.cardNumber} • تحمل: {b.insuranceDetails.copayInputRaw} (دفع المريض: {b.insuranceDetails.patientPaidAmount} ج.م)
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -989,10 +1721,15 @@ export const CashierView: React.FC = () => {
                       ) : (
                         <button
                           onClick={() => handlePrintReceipt(b)}
-                          className="px-3.5 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-800 dark:text-slate-200 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer"
+                          className={`px-3.5 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer ${
+                            printedReceiptIds[b.id]
+                              ? 'bg-emerald-50 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-700 hover:bg-emerald-100'
+                              : 'bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 text-white shadow-2xs'
+                          }`}
+                          title="معاينة وطباعة بون الخزينة الحراري ورقم الدور للمريض"
                         >
-                          <Printer className="w-3.5 h-3.5 text-emerald-600" />
-                          <span>إيصال الخزينة</span>
+                          <Printer className={`w-3.5 h-3.5 ${printedReceiptIds[b.id] ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-300'}`} />
+                          <span>{printedReceiptIds[b.id] ? 'تم طباعة البون ✓ (إعادة طباعة)' : 'طباعة بون الدور والإيصال'}</span>
                         </button>
                       )}
 
@@ -1915,29 +2652,32 @@ export const CashierView: React.FC = () => {
               </div>
 
               <div className="p-5 overflow-y-auto space-y-4">
-                {/* إذا لم يتم مسح تذكرة بعد: نعرض شاشة الكاميرا وحقل الإدخال */}
+                {/* إذا لم يتم مسح تذكرة بعد: نعرض شاشة الكاميرا الحية وحقل الإدخال */}
                 {!scannedBooking ? (
                   <div className="space-y-4">
-                    {/* محاكاة واجهة الكاميرا مع خط ليزر متحرك */}
-                    <div className="bg-slate-900 rounded-2xl p-6 text-center text-white border-2 border-dashed border-emerald-500/60 relative overflow-hidden">
-                      <div className="w-32 h-32 mx-auto border-2 border-emerald-400 rounded-2xl flex items-center justify-center relative">
-                        <div className="absolute inset-x-0 top-0 h-0.5 bg-emerald-400 shadow-[0_0_8px_#34d399] animate-bounce" />
-                        <Camera className="w-12 h-12 text-emerald-400/60 animate-pulse" />
-                      </div>
-                      <div className="text-xs text-emerald-200 mt-4 font-medium">
-                        وجّه كاميرا الجهاز أو قارئ الباركود نحو رمز QR بتذكرة المريض
-                      </div>
-                    </div>
+                    {/* كاميرا المسح الضوئي الحية لرمز QR */}
+                    <QrCameraScanner
+                      active={isScannerOpen && !scannedBooking}
+                      onScanSuccess={(decodedText) => {
+                        let displayCode = decodedText;
+                        try {
+                          const parsed = JSON.parse(decodedText);
+                          if (parsed.ticket) displayCode = String(parsed.ticket);
+                        } catch {}
+                        setScannedTicketInput(displayCode);
+                        handleVerifyScan(decodedText);
+                      }}
+                      hintText="وجّه كاميرا الهاتف أو الكمبيوتر نحو رمز QR بتذكرة المريض ليتم فتح التذكرة فوراً"
+                    />
 
                     {/* إدخال كود التذكرة أو رقم هاتف المريض يدوياً */}
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
                         أو اكتب كود التذكرة / رقم الهاتف يدوياً:
                       </label>
-                      <div className="flex gap-2">
+                      <div className="flex items-center gap-2">
                         <input
                           type="text"
-                          autoFocus
                           value={scannedTicketInput}
                           onChange={(e) => {
                             setScannedTicketInput(e.target.value);
@@ -1946,12 +2686,13 @@ export const CashierView: React.FC = () => {
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleVerifyScan();
                           }}
-                          placeholder="مثال: باطنة-01 أو أطفال-02 أو 01012345678..."
-                          className="flex-1 px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                          placeholder="مثال: باطنة-01 أو أطفال-02 أو 010..."
+                          className="min-w-0 flex-1 px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
                         />
                         <button
+                          type="button"
                           onClick={() => handleVerifyScan()}
-                          className="px-5 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all shrink-0 cursor-pointer"
+                          className="px-4 py-2.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs rounded-xl shadow-xs transition-all shrink-0 whitespace-nowrap cursor-pointer"
                         >
                           تحقق ومسح
                         </button>
@@ -2272,28 +3013,706 @@ export const CashierView: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* قالب إيصال السداد للطباعة */}
-      {selectedReceiptBooking && (
-        <div className="hidden print:block p-8 border-2 border-black max-w-md mx-auto text-black font-sans">
-          <div className="text-center pb-4 border-b-2 border-black">
-            <h2 className="text-xl font-bold">عيادات الجمعية الشرعية التخصصية</h2>
-            <p className="text-sm">إيصال سداد وتأكيد حجز معتمد من الخزينة</p>
+      {/* نافذة معاينة وطباعة بون الخزينة الحراري وتذكرة الدور الرسمية */}
+      <AnimatePresence>
+        {selectedReceiptBooking && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white dark:bg-slate-900 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl max-w-md w-full max-h-[94dvh] overflow-y-auto my-auto flex flex-col"
+            >
+              {/* رأس نافذة المعاينة */}
+              <div className="bg-gradient-to-l from-emerald-950 via-emerald-900 to-teal-900 p-4 sm:p-5 text-white flex items-center justify-between shrink-0">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-white/10 border border-amber-400/40 flex items-center justify-center text-amber-300 shrink-0">
+                    <Printer className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-sm sm:text-base">
+                      بون الخزينة وتذكرة الدور الرسمية
+                    </h3>
+                    <p className="text-[11px] text-emerald-200">
+                      مجهز لطابعات الكاشير الحرارية (80mm / 58mm) والطابعات العادية
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSelectedReceiptBooking(null)}
+                  className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/25 flex items-center justify-center transition-colors cursor-pointer"
+                  title="إغلاق"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* جسم النافذة: محاكاة واقعية لبون الكاشير الحراري */}
+              <div className="p-4 sm:p-5 bg-slate-100 dark:bg-slate-950/80 flex-1 overflow-y-auto">
+                <div
+                  ref={receiptPreviewRef}
+                  className="bg-white text-black rounded-2xl border-2 border-slate-900 p-4 sm:p-5 max-w-[320px] mx-auto shadow-md space-y-3.5 font-sans"
+                >
+                  {/* ترويسة البون */}
+                  <div className="text-center border-b-2 border-dashed border-slate-900 pb-3 space-y-1">
+                    <div className="w-9 h-9 rounded-xl bg-emerald-950 text-amber-300 flex items-center justify-center mx-auto mb-1">
+                      <Hospital className="w-5 h-5" />
+                    </div>
+                    <h4 className="font-black text-sm text-black">
+                      عيادات الجمعية الشرعية التخصصية
+                    </h4>
+                    <p className="text-[11px] font-bold text-slate-700">
+                      إيصال سداد الخزينة وتذكرة الدور الرسمية
+                    </p>
+                  </div>
+
+                  {/* مربع رقم الدور الضخم وكود التذكرة */}
+                  <div className="border-2 border-black rounded-xl p-3 text-center bg-slate-50 space-y-1">
+                    <div className="text-[11px] font-extrabold text-slate-700">
+                      رقم الدور بالطابور
+                    </div>
+                    <div className="text-4xl font-black font-mono text-black leading-none py-1">
+                      #{selectedReceiptBooking.queuePosition}
+                    </div>
+                    <div className="pt-1.5 mt-1 border-t border-dashed border-slate-400 text-xs font-black font-mono text-emerald-950">
+                      كود التذكرة: {selectedReceiptBooking.ticketNumber}
+                    </div>
+                  </div>
+
+                  {/* تفاصيل المريض والعيادة */}
+                  {(() => {
+                    const rClinic = clinics.find(c => c.id === selectedReceiptBooking.clinicId);
+                    return (
+                      <div className="space-y-1.5 text-xs border-b-2 border-dashed border-slate-900 pb-3">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-slate-600 font-bold shrink-0">اسم المريض:</span>
+                          <span className="font-black text-black text-left">{selectedReceiptBooking.patientName}</span>
+                        </div>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-slate-600 font-bold shrink-0">العيادة:</span>
+                          <span className="font-black text-black text-left">{selectedReceiptBooking.clinicName}</span>
+                        </div>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-slate-600 font-bold shrink-0">الطبيب:</span>
+                          <span className="font-bold text-black text-left">{selectedReceiptBooking.doctorName}</span>
+                        </div>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-slate-600 font-bold shrink-0">المكان:</span>
+                          <span className="font-bold text-black text-left">
+                            {rClinic?.room || 'غرفة الكشف'} • {rClinic?.floor || 'الطابق الأول'}
+                          </span>
+                        </div>
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="text-slate-600 font-bold shrink-0">الموعد:</span>
+                          <span className="font-bold text-black text-left">
+                            {selectedReceiptBooking.date} ({selectedReceiptBooking.timeSlot})
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* تفاصيل السداد المالي */}
+                  <div className="space-y-1.5 text-xs border-b-2 border-dashed border-slate-900 pb-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 font-bold">قيمة الكشف:</span>
+                      <span className="font-black text-sm font-mono text-black">
+                        {selectedReceiptBooking.paymentMethod === 'consultation'
+                          ? '٠ ج.م (استشارة مجانية)'
+                          : selectedReceiptBooking.paymentStatus === 'exempt'
+                          ? '٠ ج.م (إعفاء خيري)'
+                          : `${selectedReceiptBooking.fee} ج.م`}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600 font-bold">حالة الاعتماد:</span>
+                      <span className="font-extrabold text-emerald-900">
+                        {selectedReceiptBooking.paymentMethod === 'cash'
+                          ? 'مسدد نقداً بالخزينة ✓'
+                          : selectedReceiptBooking.paymentMethod === 'insurance'
+                          ? 'تأمين طبي معتمد ✓'
+                          : selectedReceiptBooking.paymentMethod === 'consultation'
+                          ? 'استشارة مجانية ✓'
+                          : selectedReceiptBooking.paymentStatus === 'exempt'
+                          ? 'إعفاء تكافل خيري ✓'
+                          : 'بانتظار السداد'}
+                      </span>
+                    </div>
+                    {selectedReceiptBooking.paymentMethod === 'insurance' && selectedReceiptBooking.insuranceDetails && (
+                      <div className="p-2 rounded-lg bg-slate-100 border border-slate-300 space-y-1 text-[11px]">
+                        <div className="flex justify-between">
+                          <span className="font-bold text-slate-600">شركة التأمين:</span>
+                          <span className="font-black text-black">{selectedReceiptBooking.insuranceDetails.companyName}</span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="font-bold text-slate-600">فئة الكارت ورقمه:</span>
+                          <span className="font-bold text-black">
+                            {selectedReceiptBooking.insuranceDetails.cardCategory} ({selectedReceiptBooking.insuranceDetails.cardNumber})
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="font-bold text-slate-600">نسبة التحمل والمحصل:</span>
+                          <span className="font-black text-black">
+                            {selectedReceiptBooking.insuranceDetails.copayInputRaw} — سدد المريض: {selectedReceiptBooking.insuranceDetails.patientPaidAmount} ج.م
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-600 font-bold">وقت الإصدار:</span>
+                      <span className="font-mono font-bold text-slate-800">
+                        {new Date(selectedReceiptBooking.paidAt || Date.now()).toLocaleDateString('ar-EG')} -{' '}
+                        {new Date(selectedReceiptBooking.paidAt || Date.now()).toLocaleTimeString('ar-EG', {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* رمز QR للمسح الضوئي */}
+                  {receiptQrDataUrl && (
+                    <div className="text-center pt-1">
+                      <img
+                        src={receiptQrDataUrl}
+                        alt="QR"
+                        className="w-28 h-28 mx-auto border border-slate-300 rounded-lg p-1 bg-white"
+                      />
+                      <div className="text-[10px] font-bold text-slate-600 mt-1">
+                        امسح الرمز في مكتب الاستقبال أو بوابة الطبيب
+                      </div>
+                    </div>
+                  )}
+
+                  {/* تذييل البون */}
+                  <div className="text-center text-[10px] font-bold text-slate-700 pt-1 leading-relaxed">
+                    يرجى الاحتفاظ ببون الدور وتقديمه لمكتب الاستقبال عند النداء
+                    <br />
+                    نتمنى لكم تمام الشفاء والعافية
+                  </div>
+                </div>
+              </div>
+
+              {/* أزرار التحكم بالطباعة والحفظ والواتساب */}
+              <div className="p-4 sm:p-5 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 space-y-2.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => executeThermalReceiptPrint(selectedReceiptBooking)}
+                  className="w-full py-3 px-4 bg-emerald-800 hover:bg-emerald-900 text-white rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
+                >
+                  <Printer className="w-4 h-4 text-amber-300" />
+                  <span>طباعة البون الآن على الطابعة (Thermal 80mm / A4)</span>
+                </button>
+
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={isDownloadingReceipt}
+                    onClick={handleDownloadReceiptImage}
+                    className="py-2.5 px-3 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {isDownloadingReceipt ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-emerald-700 dark:text-emerald-400" />
+                    )}
+                    <span>حفظ البون كصورة</span>
+                  </button>
+
+                  <a
+                    href={generateWhatsAppUrl(selectedReceiptBooking)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => markWhatsAppSent(selectedReceiptBooking.id)}
+                    className="py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5" />
+                    <span>إرسال تأكيد واتساب</span>
+                  </a>
+                </div>
+              </div>
+            </motion.div>
           </div>
-          <div className="py-4 space-y-2 text-sm">
-            <div>رقم التذكرة: <strong>{selectedReceiptBooking.ticketNumber}</strong></div>
-            <div>اسم المريض: <strong>{selectedReceiptBooking.patientName}</strong></div>
-            <div>العيادة: <strong>{selectedReceiptBooking.clinicName}</strong></div>
-            <div>الطبيب: <strong>{selectedReceiptBooking.doctorName}</strong></div>
-            <div>المبلغ المسدد: <strong>{selectedReceiptBooking.paymentMethod === 'consultation' ? '0 ج.م (استشارة مجانية)' : selectedReceiptBooking.paymentStatus === 'exempt' ? '0 (إعفاء خيري)' : `${selectedReceiptBooking.fee} ج.م`}</strong></div>
-            <div>طريقة الدفع: <strong>{selectedReceiptBooking.paymentMethod === 'cash' ? 'دفع نقدي' : selectedReceiptBooking.paymentMethod === 'insurance' ? 'تأمين طبي' : selectedReceiptBooking.paymentMethod === 'consultation' ? 'استشارة مجانية' : 'إعفاء خيري'}</strong></div>
-            <div>تاريخ السداد: {new Date().toLocaleDateString('ar-EG')} - {new Date().toLocaleTimeString('ar-EG')}</div>
+        )}
+      </AnimatePresence>
+
+      {/* نافذة تحصيل كارت التأمين الطبي (اختيار شركة التأمين + فئة الكارت + رقم الكارت + نسبة التحمل مثل 20/10) */}
+      <AnimatePresence>
+        {insuranceModalBooking && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white dark:bg-slate-900 rounded-3xl border border-blue-200 dark:border-blue-800 shadow-2xl max-w-lg w-full max-h-[92dvh] overflow-y-auto my-auto"
+            >
+              <div className="bg-gradient-to-l from-blue-900 via-blue-800 to-indigo-800 p-5 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-white/15 flex items-center justify-center border border-white/25">
+                    <ShieldCheck className="w-6 h-6 text-blue-200" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base">تسجيل وتحصيل كارت التأمين الطبي</h3>
+                    <p className="text-xs text-blue-100">
+                      المريض: {insuranceModalBooking.patientName} ({insuranceModalBooking.ticketNumber})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setInsuranceModalBooking(null)}
+                  className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/25 flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleConfirmInsuranceModal} className="p-5 sm:p-6 space-y-4">
+                {insFormError && (
+                  <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-200 text-xs font-bold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{insFormError}</span>
+                  </div>
+                )}
+
+                {/* 1. اختيار شركة التأمين */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    ١. شركة التأمين المتعاقدة:
+                  </label>
+                  <select
+                    value={selectedInsCompanyObj?.id || ''}
+                    onChange={e => {
+                      const nextId = e.target.value;
+                      setSelectedInsCompanyId(nextId);
+                      const comp = activeInsuranceContracts.find(c => c.id === nextId);
+                      if (comp && comp.cardCategories.length > 0) {
+                        setSelectedInsCardCategory(comp.cardCategories[0]);
+                      }
+                    }}
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs sm:text-sm font-bold text-slate-900 dark:text-white"
+                  >
+                    {activeInsuranceContracts.map(comp => (
+                      <option key={comp.id} value={comp.id}>
+                        {comp.companyName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 2. اختيار فئة الكارت المتاحة في هذه الشركة */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    ٢. فئة الكارنيه (حسب تعاقد الشركة):
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {(selectedInsCompanyObj?.cardCategories || ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)']).map(cat => (
+                      <button
+                        key={cat}
+                        type="button"
+                        onClick={() => setSelectedInsCardCategory(cat)}
+                        className={`py-2 px-3 rounded-xl font-bold text-xs border transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                          selectedInsCardCategory === cat
+                            ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                            : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-blue-400'
+                        }`}
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        <span>{cat}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 3. رقم كارت التأمين */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    ٣. رقم كارت التأمين / رقم البوليصة:
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={insCardNumber}
+                    onChange={e => setInsCardNumber(e.target.value)}
+                    placeholder="اكتب رقم الكارنيه المدون على بطاقة المريض..."
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs sm:text-sm font-mono font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                {/* 4. نسبة التحمل كما هي مكتوبة على الكارت (مثلاً 20% أو 10% أو 20/10 أو 0%) */}
+                <div className="space-y-2">
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                    ٤. نسبة التحمل المدونة على الكارت (يمكنك الاختيار أو كتابة مثل 20/10 أو 10%):
+                  </label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {['0% (تحمل كامل للتأمين)', '10%', '15%', '20%', '20/10', '25%', '30%', '50%'].map(preset => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setInsCopayRawInput(preset.startsWith('0%') ? '0%' : preset)}
+                        className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all cursor-pointer ${
+                          insCopayRawInput === (preset.startsWith('0%') ? '0%' : preset)
+                            ? 'bg-indigo-600 text-white border-indigo-600'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        {preset}
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={insCopayRawInput}
+                      onChange={e => setInsCopayRawInput(e.target.value)}
+                      placeholder="اكتب نسبة التحمل مثل: 20% أو 20/10 أو 0%"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-blue-300 dark:border-blue-700 bg-blue-50/40 dark:bg-slate-800 text-sm font-mono font-bold text-slate-900 dark:text-white"
+                    />
+                    <BadgePercent className="w-4 h-4 text-blue-600 absolute left-3.5 top-3" />
+                  </div>
+                </div>
+
+                {/* ملخص الحساب التلقائي للكشف */}
+                {(() => {
+                  const fullFee = insuranceModalBooking.fee || 0;
+                  const patientShare = Math.round((fullFee * parsedCopayPercentage) / 100);
+                  const companyShare = Math.max(0, fullFee - patientShare);
+                  return (
+                    <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/90 border border-slate-200 dark:border-slate-700 grid grid-cols-3 gap-2 text-center">
+                      <div>
+                        <div className="text-[11px] text-slate-500 font-bold">سعر الكشف الأساسي</div>
+                        <div className="text-sm font-extrabold font-mono text-slate-900 dark:text-white mt-0.5">
+                          {fullFee} ج.م
+                        </div>
+                      </div>
+                      <div className="border-x border-slate-200 dark:border-slate-700">
+                        <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-bold">
+                          يسدد المريض نقداً ({parsedCopayPercentage}%)
+                        </div>
+                        <div className="text-base font-black font-mono text-emerald-700 dark:text-emerald-300 mt-0.5">
+                          {patientShare} ج.م
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-blue-700 dark:text-blue-400 font-bold">
+                          مطالبة شركة التأمين
+                        </div>
+                        <div className="text-base font-black font-mono text-blue-700 dark:text-blue-300 mt-0.5">
+                          {companyShare} ج.م
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="flex items-center gap-2.5 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-3 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>اعتماد كارت التأمين وإدخال المريض للطابور</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setInsuranceModalBooking(null)}
+                    className="py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-xs cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            </motion.div>
           </div>
-          <div className="text-center pt-4 border-t-2 border-black text-xs">
-            نتمنى لكم تمام الشفاء والعافية • عيادات الجمعية الشرعية
+        )}
+      </AnimatePresence>
+
+      {/* نافذة تسليم الشفت والخزينة (خانتان: تم تسليم المبلغ للإدارة / أو تسليم الخزينة لزميل) */}
+      <AnimatePresence>
+        {isHandoverModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-950/75 backdrop-blur-xs overflow-y-auto">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 12 }}
+              className="bg-white dark:bg-slate-900 rounded-3xl border border-amber-200 dark:border-amber-800 shadow-2xl max-w-xl w-full max-h-[92dvh] overflow-y-auto my-auto"
+            >
+              <div className="bg-gradient-to-l from-amber-800 via-amber-700 to-orange-700 p-5 text-white flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-white/15 flex items-center justify-center border border-white/25">
+                    <ArrowRightLeft className="w-5 h-5 text-amber-200" />
+                  </div>
+                  <div>
+                    <h3 className="font-extrabold text-base">تسليم شفت الخزينة والعهدة النقدية</h3>
+                    <p className="text-xs text-amber-100">
+                      المسلم الحالي: {currentUser?.displayName || currentUser?.username} • حصيلة اليوم النقدية: {cashRevenue} ج.م
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsHandoverModalOpen(false)}
+                  className="w-8 h-8 rounded-xl bg-white/15 hover:bg-white/25 flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSubmitCashierHandover} className="p-5 sm:p-6 space-y-5">
+                {/* الخانتان الأساسيتان لتسليم الخزينة */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-2">
+                    اختر طريقة تسليم الخزينة في نهاية الشفت:
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {/* الخانة الأولى: تم تسليم المبلغ للإدارة */}
+                    <button
+                      type="button"
+                      onClick={() => setHandoverMode('cashier_to_management')}
+                      className={`p-4 rounded-2xl border-2 text-right transition-all cursor-pointer space-y-1 ${
+                        handoverMode === 'cashier_to_management'
+                          ? 'border-emerald-600 bg-emerald-50/80 dark:bg-emerald-950/60 text-emerald-950 dark:text-emerald-100 shadow-xs'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-extrabold text-xs sm:text-sm flex items-center gap-1.5">
+                          <Building2 className="w-4 h-4 text-emerald-600" />
+                          <span>١. تم تسليم المبلغ للإدارة</span>
+                        </span>
+                        {handoverMode === 'cashier_to_management' && (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                        توريد المبلغ مباشرة لمدير المالية / الإدارة (لن يظهر للزميل سؤال "هل تم استلام كذا").
+                      </p>
+                    </button>
+
+                    {/* الخانة الثانية: تسليم الخزينة لزميل */}
+                    <button
+                      type="button"
+                      onClick={() => setHandoverMode('cashier_to_colleague')}
+                      className={`p-4 rounded-2xl border-2 text-right transition-all cursor-pointer space-y-1 ${
+                        handoverMode === 'cashier_to_colleague'
+                          ? 'border-amber-600 bg-amber-50/80 dark:bg-amber-950/60 text-amber-950 dark:text-amber-100 shadow-xs'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/60 text-slate-700 dark:text-slate-300 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-extrabold text-xs sm:text-sm flex items-center gap-1.5">
+                          <ArrowRightLeft className="w-4 h-4 text-amber-600" />
+                          <span>٢. تسليم الخزينة لزميل</span>
+                        </span>
+                        {handoverMode === 'cashier_to_colleague' && (
+                          <CheckCircle2 className="w-4 h-4 text-amber-600 shrink-0" />
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                        ترك المبلغ في الدرج للزميل، وسيظهر له عند فتح حسابه: "هل تم استلام مبلغ كذا؟ (تم / لا)".
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                {/* إذا اختار تسليم الخزينة لزميل: اختيار الزميل وفحص صلاحيته */}
+                {handoverMode === 'cashier_to_colleague' && (
+                  <div className="space-y-3 p-4 rounded-2xl bg-amber-50/50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/70">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-800 dark:text-slate-200 mb-1.5">
+                        اختر الزميل المستلم للخزينة:
+                      </label>
+                      <select
+                        value={selectedColleagueId}
+                        onChange={e => setSelectedColleagueId(e.target.value)}
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs sm:text-sm font-bold text-slate-900 dark:text-white"
+                      >
+                        <option value="">-- اختر الموظف المستلم للشفت --</option>
+                        {staffAccounts
+                          .filter(s => s.username !== currentUser?.username)
+                          .map(staff => (
+                            <option key={staff.id} value={staff.id}>
+                              {staff.displayName || staff.username} (
+                              {staff.role === 'cashier'
+                                ? 'مسؤول خزينة معتمد ✓'
+                                : staff.role === 'reception'
+                                ? 'مسؤول استقبال'
+                                : staff.role === 'doctor'
+                                ? 'طبيب'
+                                : staff.role === 'finance_manager'
+                                ? 'مدير مالية'
+                                : 'إدارة'}
+                              )
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+
+                    {selectedColleagueObj && !isSelectedColleagueValidCashier && (
+                      <div className="p-3.5 rounded-xl bg-rose-100 dark:bg-rose-950/90 border-2 border-rose-500 text-rose-900 dark:text-rose-200 text-xs font-extrabold flex items-start gap-2.5">
+                        <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+                        <div>
+                          <div>تنبيه: هذا الشخص غير مسجل أنه مسؤول خزينة (كاشير)!</div>
+                          <div className="font-normal mt-0.5">
+                            الموظف ({selectedColleagueObj.displayName || selectedColleagueObj.username}) مسجل بصلاحية أخرى. يرجى الرجوع للمدير لتعديل صلاحيته أو اختيار زميل مسجل كمسؤول خزينة.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* إدخال المبلغ المسلم */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    {handoverMode === 'cashier_to_management'
+                      ? 'المبلغ المورد للإدارة (ج.م):'
+                      : 'المبلغ المتروك في الخزينة للزميل (ج.م):'}
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    required
+                    value={handoverAmountInput}
+                    onChange={e => setHandoverAmountInput(e.target.value)}
+                    placeholder="اكتب المبلغ بالجنيه..."
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-base font-mono font-extrabold text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                {/* ملاحظات إضافية */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                    ملاحظات التسليم (اختياري):
+                  </label>
+                  <input
+                    type="text"
+                    value={handoverNotesInput}
+                    onChange={e => setHandoverNotesInput(e.target.value)}
+                    placeholder="أي ملاحظات حول عهدة الشفت أو الفكة..."
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs text-slate-900 dark:text-white"
+                  />
+                </div>
+
+                <div className="flex items-center gap-2.5 pt-2">
+                  <button
+                    type="submit"
+                    disabled={
+                      isSubmittingHandover ||
+                      (handoverMode === 'cashier_to_colleague' && (!selectedColleagueId || !isSelectedColleagueValidCashier))
+                    }
+                    className="flex-1 py-3 px-4 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 dark:disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl font-extrabold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-md transition-all cursor-pointer"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      {handoverMode === 'cashier_to_management'
+                        ? 'تأكيد تسليم المبلغ للإدارة'
+                        : 'تأكيد تسليم الخزينة للزميل'}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsHandoverModalOpen(false)}
+                    className="py-3 px-4 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 rounded-xl font-bold text-xs cursor-pointer"
+                  >
+                    إلغاء
+                  </button>
+                </div>
+              </form>
+            </motion.div>
           </div>
-        </div>
-      )}
+        )}
+      </AnimatePresence>
 
     </div>
+
+    {/* قالب الطباعة الحرارية المعزول (يظهر فقط عند الطباعة المباشرة Ctrl+P / window.print) */}
+    {selectedReceiptBooking && (
+      <div className="hidden print:block print-only-receipt text-black font-sans">
+        <div className="border-2 border-black rounded-lg p-3 space-y-2.5">
+          <div className="text-center pb-2 border-b-2 border-dashed border-black">
+            <h2 className="text-base font-black">عيادات الجمعية الشرعية التخصصية</h2>
+            <p className="text-xs font-bold">إيصال سداد الخزينة وتذكرة الدور الرسمية</p>
+          </div>
+
+          <div className="border-2 border-black rounded-md p-2 text-center">
+            <div className="text-xs font-bold">رقم الدور بالطابور</div>
+            <div className="text-3xl font-black font-mono leading-tight">
+              #{selectedReceiptBooking.queuePosition}
+            </div>
+            <div className="text-xs font-black font-mono border-t border-dashed border-black pt-1 mt-1">
+              كود التذكرة: {selectedReceiptBooking.ticketNumber}
+            </div>
+          </div>
+
+          <div className="space-y-1 text-xs border-b-2 border-dashed border-black pb-2">
+            <div className="flex justify-between">
+              <span className="font-bold">المريض:</span>
+              <span className="font-black">{selectedReceiptBooking.patientName}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-bold">العيادة:</span>
+              <span className="font-black">{selectedReceiptBooking.clinicName}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-bold">الطبيب:</span>
+              <span className="font-bold">{selectedReceiptBooking.doctorName}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-bold">التاريخ والموعد:</span>
+              <span className="font-bold">{selectedReceiptBooking.date} ({selectedReceiptBooking.timeSlot})</span>
+            </div>
+          </div>
+
+          <div className="space-y-1 text-xs border-b-2 border-dashed border-black pb-2">
+            <div className="flex justify-between">
+              <span className="font-bold">المبلغ المسدد:</span>
+              <span className="font-black">
+                {selectedReceiptBooking.paymentMethod === 'consultation'
+                  ? '٠ ج.م (استشارة مجانية)'
+                  : selectedReceiptBooking.paymentStatus === 'exempt'
+                  ? '٠ ج.م (إعفاء خيري)'
+                  : `${selectedReceiptBooking.fee} ج.م`}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-bold">طريقة الدفع:</span>
+              <span className="font-bold">
+                {selectedReceiptBooking.paymentMethod === 'cash'
+                  ? 'دفع نقدي ✓'
+                  : selectedReceiptBooking.paymentMethod === 'insurance'
+                  ? 'تأمين طبي ✓'
+                  : selectedReceiptBooking.paymentMethod === 'consultation'
+                  ? 'استشارة مجانية ✓'
+                  : 'إعفاء خيري ✓'}
+              </span>
+            </div>
+            <div className="flex justify-between">
+              <span className="font-bold">وقت الإصدار:</span>
+              <span className="font-mono font-bold">
+                {new Date(selectedReceiptBooking.paidAt || Date.now()).toLocaleDateString('ar-EG')} -{' '}
+                {new Date(selectedReceiptBooking.paidAt || Date.now()).toLocaleTimeString('ar-EG', {
+                  hour: '2-digit',
+                  minute: '2-digit'
+                })}
+              </span>
+            </div>
+          </div>
+
+          {receiptQrDataUrl && (
+            <div className="text-center py-1">
+              <img src={receiptQrDataUrl} alt="QR" className="w-24 h-24 mx-auto" />
+            </div>
+          )}
+
+          <div className="text-center text-[10px] font-bold pt-1">
+            يرجى الاحتفاظ ببون الدور وتقديمه لمكتب الاستقبال عند النداء • نتمنى لكم تمام الشفاء
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 };

@@ -17,6 +17,7 @@ import { ReceptionView } from './views/ReceptionView';
 import { DoctorView } from './views/DoctorView';
 import { CashierView } from './views/CashierView';
 import { AdminView } from './views/AdminView';
+import { FinanceManagerView } from './views/FinanceManagerView';
 import { OfflineBanner } from './components/OfflineBanner';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Hospital, Moon, Sun, ShieldCheck } from 'lucide-react';
@@ -48,10 +49,20 @@ const AppContent: React.FC = () => {
         }
         return <DoctorView />;
       case 'cashier':
-        if (!currentUser || (currentUser.role !== 'cashier' && currentUser.role !== 'admin')) {
+        if (
+          !currentUser ||
+          (currentUser.role !== 'cashier' &&
+            currentUser.role !== 'admin' &&
+            currentUser.role !== 'finance_manager')
+        ) {
           return <LoginView />;
         }
         return <CashierView />;
+      case 'finance':
+        if (!currentUser || (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')) {
+          return <LoginView />;
+        }
+        return <FinanceManagerView />;
       case 'admin':
         if (!currentUser || currentUser.role !== 'admin') {
           return <LoginView />;
@@ -63,16 +74,18 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-dvh w-full overflow-x-clip bg-[#F8FBF9] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
+    <div className="min-h-dvh w-full overflow-x-clip bg-[#F8FBF9] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300 print:bg-white print:text-black print:min-h-0">
       
       {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
-      <OfflineBanner />
+      <div className="no-print">
+        <OfflineBanner />
+      </div>
 
       {/* الشريط العلوي العام */}
       <Navbar />
 
       {/* المحتوى الرئيسي للشاشة الحالية — متجاوب مع الهواتف، الأجهزة اللوحية، وشاشات الكمبيوتر العريضة */}
-      <main className="relative z-10 flex-1 w-full max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-7 lg:py-8">
+      <main className="relative z-10 flex-1 w-full max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-7 lg:py-8 print:p-0 print:m-0 print:max-w-none">
         <AnimatePresence mode="wait">
           <motion.div
             key={currentView}
@@ -115,10 +128,14 @@ const AppContent: React.FC = () => {
       </footer>
 
       {/* حاوية الإشعارات التفاعلية */}
-      <ToastContainer />
+      <div className="no-print">
+        <ToastContainer />
+      </div>
 
       {/* نافذة البحث السريع في سجلات وتذاكر المرضى */}
-      <PatientHistoryModal />
+      <div className="no-print">
+        <PatientHistoryModal />
+      </div>
 
     </div>
   );

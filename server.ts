@@ -6,7 +6,7 @@ import path from 'path';
 
 const ROOT_DIR = typeof process !== 'undefined' && typeof process.cwd === 'function' ? process.cwd() : '.';
 
-export const ALLOWED_STAFF_ROLES = ['admin', 'doctor', 'reception', 'cashier'] as const;
+export const ALLOWED_STAFF_ROLES = ['admin', 'doctor', 'reception', 'cashier', 'finance_manager'] as const;
 export type StaffRole = (typeof ALLOWED_STAFF_ROLES)[number];
 
 export interface VerifiedStaffCaller {
@@ -303,8 +303,8 @@ export async function verifyStaffFromBearerToken(
   if (staffError || !staffRow) {
     try {
       const { data: rpcRole, error: roleErr } = await adminClient.rpc('get_auth_role');
-      if (!roleErr && typeof rpcRole === 'string' && ['admin', 'reception', 'cashier', 'doctor'].includes(rpcRole)) {
-        if (rpcRole === 'admin') {
+      if (!roleErr && typeof rpcRole === 'string' && ['admin', 'reception', 'cashier', 'doctor', 'finance_manager'].includes(rpcRole)) {
+        if (rpcRole === 'admin' || rpcRole === 'finance_manager') {
           const { data: allStaff } = await adminClient.rpc('get_all_staff_accounts_for_admin');
           if (Array.isArray(allStaff)) {
             const matched = allStaff.find((s: any) => s && s.auth_user_id === authUserId);
@@ -359,7 +359,7 @@ export async function verifyStaffFromBearerToken(
     };
   }
 
-  const allowedRoles = ['admin', 'reception', 'cashier', 'doctor'] as const;
+  const allowedRoles = ['admin', 'reception', 'cashier', 'doctor', 'finance_manager'] as const;
   if (!allowedRoles.includes(staffRow.role as any)) {
     return {
       ok: false,
@@ -368,6 +368,12 @@ export async function verifyStaffFromBearerToken(
     };
   }
 
+  const metaRole = userData.user.user_metadata?.role as StaffRole | undefined;
+  const resolvedRole: StaffRole =
+    metaRole === 'finance_manager' || String(staffRow.username || '').toLowerCase() === 'finance'
+      ? 'finance_manager'
+      : (staffRow.role as VerifiedStaffCaller['role']);
+
   return {
     ok: true,
     caller: {
@@ -375,7 +381,7 @@ export async function verifyStaffFromBearerToken(
       staffId: staffRow.id,
       username: staffRow.username,
       displayName: staffRow.display_name,
-      role: staffRow.role as VerifiedStaffCaller['role'],
+      role: resolvedRole,
       doctorId: staffRow.doctor_id || null,
       clinicId: staffRow.clinic_id || null,
     },
@@ -858,7 +864,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       const slug = cleanUsername.replace(/[^a-z0-9]/g, '-') || validRole;
       const newStaffId = `staff-${slug}-${Date.now().toString().slice(-6)}`;
 
-      const { data: insertedStaff, error: insertStaffError } = await adminClient
+      let { data: insertedStaff, error: insertStaffError } = await adminClient
         .from('staff_accounts')
         .insert({
           id: newStaffId,
@@ -872,6 +878,28 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         })
         .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
         .single();
+
+      // إذا كانت قاعدة البيانات السحابية لم يُنفذ عليها تحديث قيد CHECK لـ finance_manager بعد، نحفظ الدور الفعلي في user_metadata ونستخدم admin كقيمة متوافقة في الجدول
+      if ((insertStaffError || !insertedStaff) && validRole === 'finance_manager') {
+        const retryInsert = await adminClient
+          .from('staff_accounts')
+          .insert({
+            id: newStaffId,
+            auth_user_id: createdAuthUserId,
+            username: cleanUsername,
+            display_name: cleanDisplayName,
+            role: 'admin',
+            doctor_id: finalDoctorId,
+            clinic_id: finalClinicId,
+            recovery_email: cleanRecoveryEmail,
+          })
+          .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
+          .single();
+        if (!retryInsert.error && retryInsert.data) {
+          insertedStaff = { ...retryInsert.data, role: 'finance_manager' };
+          insertStaffError = null;
+        }
+      }
 
       if (insertStaffError || !insertedStaff) {
         // Rollback تلقائي في حال فشل الإدراج في staff_accounts لمنع بقاء حساب يتيم في auth.users
@@ -1181,7 +1209,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         return;
       }
 
-      const { data: updatedStaff, error: updStaffErr } = await adminClient
+      let { data: updatedStaff, error: updStaffErr } = await adminClient
         .from('staff_accounts')
         .update({
           auth_user_id: effectiveAuthUserId,
@@ -1195,6 +1223,27 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         .eq('id', staffId)
         .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
         .single();
+
+      if ((updStaffErr || !updatedStaff) && effectiveRole === 'finance_manager') {
+        const retryUpd = await adminClient
+          .from('staff_accounts')
+          .update({
+            auth_user_id: effectiveAuthUserId,
+            username: effectiveUsername,
+            display_name: effectiveDisplayName,
+            role: 'admin',
+            doctor_id: effectiveDoctorId,
+            clinic_id: effectiveClinicId,
+            recovery_email: effectiveRecoveryEmail,
+          })
+          .eq('id', staffId)
+          .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
+          .single();
+        if (!retryUpd.error && retryUpd.data) {
+          updatedStaff = { ...retryUpd.data, role: 'finance_manager' };
+          updStaffErr = null;
+        }
+      }
 
       if (updStaffErr || !updatedStaff) {
         res.status(500).json({

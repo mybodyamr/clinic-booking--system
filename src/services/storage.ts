@@ -1,4 +1,22 @@
-import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission, SystemErrorLog, SystemErrorSource, ConsultationRegistryState, ConsultationStamp } from '../types';
+import {
+  Clinic,
+  Doctor,
+  Booking,
+  UserSession,
+  StaffAccount,
+  DailyScheduleState,
+  RolePermissionsMap,
+  PermissionDefinition,
+  UserRole,
+  SystemPermission,
+  SystemErrorLog,
+  SystemErrorSource,
+  ConsultationRegistryState,
+  ConsultationStamp,
+  InsuranceCompanyContract,
+  BookingInsuranceDetails,
+  ShiftHandoverRecord
+} from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
 
@@ -22,6 +40,9 @@ const STORAGE_KEYS = {
   ERROR_LOGS: 'sharaya_system_error_logs_v1',
   PENDING_ERROR_LOGS: 'sharaya_pending_error_logs_v1',
   CONSULTATION_REGISTRY: 'sharaya_consultation_registry_v1',
+  INSURANCE_CONTRACTS: 'sharaya_insurance_contracts_v1',
+  INSURANCE_BOOKINGS: 'sharaya_insurance_bookings_v1',
+  SHIFT_HANDOVERS: 'sharaya_shift_handovers_v1',
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
@@ -102,6 +123,12 @@ export const DEFAULT_ROLE_PERMISSIONS: RolePermissionsMap = {
     'call_queue_patients',
   ],
   cashier: [
+    'confirm_payments_exemptions',
+    'manage_patient_exemptions',
+  ],
+  finance_manager: [
+    'view_financial_reports',
+    'manage_clinic_fees',
     'confirm_payments_exemptions',
     'manage_patient_exemptions',
   ],
@@ -525,6 +552,7 @@ export const DEFAULT_PASSWORD_HASHES: Record<string, string> = {
   admin: '2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558',
   reception: '8d6a7d4173428e7073a5ad9b5209bc293336ed9ed5e08a25e0f82e6df653d804',
   cashier: '3a09f66bc67a9e66140e16d6e2279dd38dec038f51b01dcb2038a196fbef4ac6',
+  finance: '2e0ebbe2df13e248a1c1e9c1446a5d1a605484a416d66f4cc7802391d9a2b558',
   doctor: '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
   'doctor.pediatrics': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
   'doctor.ortho': '733d171967711964a0ea8dc5bbafa70e278008dbb225aaa23316f208e1e9f8c6',
@@ -538,6 +566,12 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     username: 'admin',
     displayName: 'د. أحمد الشناوي (مدير المنظومة)',
     role: 'admin',
+  },
+  {
+    id: 'staff-finance',
+    username: 'finance',
+    displayName: 'أ. خالد المنشاوي (مدير المالية والحسابات)',
+    role: 'finance_manager',
   },
   {
     id: 'staff-reception',
@@ -920,6 +954,7 @@ export function getStoredRolePermissions(): RolePermissionsMap {
       doctor: parsed.doctor || DEFAULT_ROLE_PERMISSIONS.doctor,
       reception: parsed.reception || DEFAULT_ROLE_PERMISSIONS.reception,
       cashier: parsed.cashier || DEFAULT_ROLE_PERMISSIONS.cashier,
+      finance_manager: parsed.finance_manager || DEFAULT_ROLE_PERMISSIONS.finance_manager,
     };
   } catch (e) {
     console.error('فشل قراءة الصلاحيات:', e);
@@ -1282,5 +1317,210 @@ export function checkPatientConsultationEligibility(
     patientName: match.patientName,
   };
 }
+
+// ==================== منظومة تعاقدات شركات التأمين والكروت ونسبة التحمل ====================
+
+export const STANDARD_INSURANCE_CARD_CATEGORIES: string[] = [
+  'فضي (Silver)',
+  'ذهبي (Gold)',
+  'بلاتينيوم (Platinum)',
+  'ماسي / VIP (Diamond)',
+  'عادي / أساسي (Standard)',
+];
+
+export const DEFAULT_INSURANCE_CONTRACTS: InsuranceCompanyContract[] = [
+  {
+    id: 'ins-metlife',
+    companyName: 'ميت لايف للتأمين (MetLife)',
+    name: 'ميت لايف للتأمين (MetLife)',
+    cardCategories: ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)', 'ماسي / VIP (Diamond)'],
+    notes: 'تعاقد الشركات والنقابات (مثل السويدي / سعودي) حسب نسبة الكارنيه (0% أو 10% أو 20%)',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'ins-axa',
+    companyName: 'أكسا للتأمين الطبي (AXA)',
+    name: 'أكسا للتأمين الطبي (AXA)',
+    cardCategories: ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)'],
+    notes: 'نسب التحمل المعتمدة: 10% أو 20% أو 20/10 حسب البطاقة',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'ins-mednet',
+    companyName: 'ميد نت للرعاية الصحية (MedNet)',
+    name: 'ميد نت للرعاية الصحية (MedNet)',
+    cardCategories: ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)'],
+    notes: 'تحمل 10% أو 20% حسب فئة الكارت',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'ins-nextcare',
+    companyName: 'نكست كير (NextCare)',
+    name: 'نكست كير (NextCare)',
+    cardCategories: ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)'],
+    notes: 'تحمل 10% أو 20% حسب فئة الكارت',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'ins-globemed',
+    companyName: 'جلوب ميد مصر (GlobeMed)',
+    name: 'جلوب ميد مصر (GlobeMed)',
+    cardCategories: ['فضي (Silver)', 'جولد (Gold)', 'بلاتينيوم (Platinum)'],
+    notes: 'تحمل 10% أو 20% حسب فئة الكارت',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+  {
+    id: 'ins-syndicates',
+    companyName: 'تعاقد نقابات وشركات خاصة',
+    name: 'تعاقد نقابات وشركات خاصة',
+    cardCategories: ['عادي / أساسي (Standard)', 'فضي (Silver)', 'جولد (Gold)'],
+    notes: 'حسب نسبة الكارت المدونة',
+    isActive: true,
+    active: true,
+    createdAt: '2026-01-01T00:00:00.000Z',
+  },
+];
+
+export function getStoredInsuranceContracts(): InsuranceCompanyContract[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.INSURANCE_CONTRACTS);
+    if (!raw) {
+      localStorage.setItem(STORAGE_KEYS.INSURANCE_CONTRACTS, JSON.stringify(DEFAULT_INSURANCE_CONTRACTS));
+      return DEFAULT_INSURANCE_CONTRACTS;
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return parsed.map((c: any) => ({
+        ...c,
+        companyName: c.companyName || c.name || 'شركة تأمين',
+        isActive: c.isActive !== undefined ? c.isActive : c.active !== false,
+        createdAt: c.createdAt || c.updatedAt || '2026-01-01T00:00:00.000Z',
+      }));
+    }
+    return DEFAULT_INSURANCE_CONTRACTS;
+  } catch {
+    return DEFAULT_INSURANCE_CONTRACTS;
+  }
+}
+
+export function saveInsuranceContracts(contracts: InsuranceCompanyContract[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.INSURANCE_CONTRACTS, JSON.stringify(contracts));
+  } catch (e) {
+    console.error('فشل حفظ تعاقدات التأمين:', e);
+  }
+}
+
+export function getStoredInsuranceBookingsMap(): Record<string, BookingInsuranceDetails> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.INSURANCE_BOOKINGS);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveInsuranceBookingsMap(map: Record<string, BookingInsuranceDetails>): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.INSURANCE_BOOKINGS, JSON.stringify(map));
+  } catch (e) {
+    console.error('فشل حفظ تفاصيل تأمين الحجوزات:', e);
+  }
+}
+
+/**
+ * تحليل نص نسبة التحمل المكتوب على كارت التأمين (مثل "20%" أو "10" أو "20/10" أو "0")
+ * وحساب حصة المريض النقدية والمطالبة المتبقية على شركة التأمين
+ */
+export function parseCopayRateInput(
+  rawInput: string,
+  originalClinicFee: number
+): {
+  copayRateText: string;
+  copayPercentage: number;
+  patientPaidAmount: number;
+  insuranceClaimAmount: number;
+} {
+  const fee = Math.max(0, Number(originalClinicFee) || 0);
+  const normalized = String(rawInput || '')
+    .replace(/[٠-٩]/g, (d) => String(d.charCodeAt(0) - 0x0660))
+    .replace(/[۰-۹]/g, (d) => String(d.charCodeAt(0) - 0x06f0))
+    .trim();
+
+  if (!normalized || normalized === '0' || normalized === '0%') {
+    return {
+      copayRateText: normalized ? (normalized.includes('%') ? normalized : `${normalized}%`) : '0%',
+      copayPercentage: 0,
+      patientPaidAmount: 0,
+      insuranceClaimAmount: fee,
+    };
+  }
+
+  // إذا كتب الكاشير صيغة مركبة مثل "20/10" أو "10/20" كما هو مدون على الكارت
+  if (normalized.includes('/')) {
+    const parts = normalized.split('/').map((p) => parseFloat(p.replace(/[^0-9.]/g, '')));
+    const firstNum = Number.isFinite(parts[0]) ? Math.min(100, Math.max(0, parts[0])) : 0;
+    const patientPaid = Math.round((fee * firstNum) / 100);
+    return {
+      copayRateText: normalized,
+      copayPercentage: firstNum,
+      patientPaidAmount: patientPaid,
+      insuranceClaimAmount: Math.max(0, fee - patientPaid),
+    };
+  }
+
+  const numMatch = parseFloat(normalized.replace(/[^0-9.]/g, ''));
+  const pct = Number.isFinite(numMatch) ? Math.min(100, Math.max(0, numMatch)) : 0;
+  const patientPaid = Math.round((fee * pct) / 100);
+  const displayText = normalized.includes('%') ? normalized : `${pct}%`;
+
+  return {
+    copayRateText: displayText,
+    copayPercentage: pct,
+    patientPaidAmount: patientPaid,
+    insuranceClaimAmount: Math.max(0, fee - patientPaid),
+  };
+}
+
+// ==================== منظومة تسليم الشيفتات والخزينة بين الكاشير والإدارة ====================
+
+export function getStoredShiftHandovers(): ShiftHandoverRecord[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.SHIFT_HANDOVERS);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveShiftHandovers(records: ShiftHandoverRecord[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.SHIFT_HANDOVERS, JSON.stringify(records.slice(0, 250)));
+  } catch (e) {
+    console.error('فشل حفظ سجلات تسليم الشيفت:', e);
+  }
+}
+
+export function clearWhatsAppAndPrintLogs(): void {
+  try {
+    localStorage.removeItem('sharaya_whatsapp_sent_v1');
+    localStorage.removeItem('sharaya_printed_receipts_v1');
+  } catch {}
+}
+
 
 

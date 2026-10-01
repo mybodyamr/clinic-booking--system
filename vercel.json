@@ -15,6 +15,10 @@
         {
           "key": "Cache-Control",
           "value": "no-cache, no-store, must-revalidate, max-age=0"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(self)"
         }
       ]
     },
@@ -34,7 +38,7 @@
       "destination": "/api?__vpath=$1"
     },
     {
-      "source": "/((?!api/|assets/|sw\\.js|manifest\\.webmanifest|icon-.*\\.svg).*)",
+      "source": "/((?!api/|assets/|sw\\.js|manifest\\.webmanifest|icon-.*\\.svg|pwa-.*\\.png|apple-touch-icon\\.png).*)",
       "destination": "/index.html"
     }
   ]

@@ -1,4 +1,5 @@
 import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { getLocalDateStr } from './scheduleService';
 import {
   hashPassword,
   getDeletedClinicIds,
@@ -10,7 +11,8 @@ import {
   unmarkDoctorDeletedLocally,
   markBookingDeletedLocally,
   getStoredConsultationRegistry,
-  pruneConsultationRegistry
+  pruneConsultationRegistry,
+  getStoredInsuranceBookingsMap
 } from './storage';
 import { 
   Clinic, 
@@ -26,7 +28,10 @@ import {
   PaymentMethod,
   UserRole,
   SystemErrorLog,
-  ConsultationRegistryState
+  ConsultationRegistryState,
+  InsuranceCompanyContract,
+  BookingInsuranceDetails,
+  ShiftHandoverRecord
 } from '../types';
 
 // ==========================================
@@ -79,6 +84,8 @@ export function mapDbBooking(row: any): Booking {
   const rawMethod = isConsultationBooking
     ? ('consultation' as PaymentMethod)
     : (row.payment_method as PaymentMethod | undefined);
+  const insMap = getStoredInsuranceBookingsMap();
+  const insDetails = row?.id ? insMap[String(row.id)] : undefined;
   return {
     id: row.id,
     ticketNumber: row.ticket_number,
@@ -100,7 +107,8 @@ export function mapDbBooking(row: any): Booking {
     createdAt: row.created_at || new Date().toISOString(),
     calledAt: row.called_at || undefined,
     completedAt: row.completed_at || undefined,
-    paidAt: row.paid_at || undefined
+    paidAt: row.paid_at || undefined,
+    insuranceDetails: insDetails
   };
 }
 
@@ -142,6 +150,7 @@ function getCurrentStoredSession(): UserSession | null {
 
 const DEFAULT_CLOUD_RECOVERY_PASSWORDS: Record<string, string> = {
   admin: 'Adm@Sharia2026!',
+  finance: 'Adm@Sharia2026!',
   reception: 'Rcp@Sharia2026!',
   cashier: 'Csh@Sharia2026!',
   doctor: 'Doc@Sharia2026!',
@@ -165,7 +174,7 @@ function resolveCanonicalCloudEmailCandidates(session: UserSession | null): { em
   const docId = String(session.doctorId || '').trim().toLowerCase();
 
   let canonicalPrefix = rawUser;
-  if (role === 'admin') canonicalPrefix = 'admin';
+  if (role === 'admin' || role === 'finance_manager') canonicalPrefix = 'admin';
   else if (role === 'reception') canonicalPrefix = 'reception';
   else if (role === 'cashier') canonicalPrefix = 'cashier';
   else if (role === 'doctor') {
@@ -183,7 +192,7 @@ function resolveCanonicalCloudEmailCandidates(session: UserSession | null): { em
   const password =
     DEFAULT_CLOUD_RECOVERY_PASSWORDS[canonicalPrefix] ||
     DEFAULT_CLOUD_RECOVERY_PASSWORDS[rawUser] ||
-    (role === 'admin'
+    (role === 'admin' || role === 'finance_manager'
       ? 'Adm@Sharia2026!'
       : role === 'reception'
       ? 'Rcp@Sharia2026!'
@@ -258,9 +267,9 @@ export async function ensureActiveSupabaseSession(forceReauth = false): Promise<
 export async function ensureAdminSupabaseSession(forceReauth = false): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
-    // لا يتم تفعيل أو تحديث الجلسة الإدارية إذا كان المستخدم الحالي مسجلاً بدور آخر غير admin
+    // لا يتم تفعيل أو تحديث الجلسة الإدارية إلا لمدير النظام (admin) أو مدير المالية (finance_manager)
     const parsedSession = getCurrentStoredSession();
-    if (!parsedSession || parsedSession.role !== 'admin') {
+    if (!parsedSession || (parsedSession.role !== 'admin' && parsedSession.role !== 'finance_manager')) {
       return false;
     }
 
@@ -269,6 +278,8 @@ export async function ensureAdminSupabaseSession(forceReauth = false): Promise<b
     return false;
   }
 }
+
+export const ensureAdminOrFinanceSupabaseSession = ensureAdminSupabaseSession;
 
 export async function getAdminBearerToken(): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
@@ -349,8 +360,8 @@ export async function fetchBookingsFromDb(): Promise<Booking[] | null> {
       return null;
     }
 
-    // إذا كانت الجلسة المحلية لمدير النظام فقط، نضمن جلسة الأدمن السحابية، وللموظفين الآخرين نضمن تحديث جلستهم النشطة
-    if (storedRole === 'admin') {
+    // إذا كانت الجلسة المحلية لمدير النظام أو مدير المالية، نضمن الجلسة السحابية الشاملة، وللموظفين الآخرين نضمن تحديث جلستهم النشطة
+    if (storedRole === 'admin' || storedRole === 'finance_manager') {
       await ensureAdminSupabaseSession();
     } else if (storedRole === 'reception' || storedRole === 'cashier') {
       await ensureActiveSupabaseSession();
@@ -706,16 +717,36 @@ export async function verifyTicketForStaffRpc(
   lookup: string
 ): Promise<Booking | null> {
   if (!isSupabaseConfigured || !lookup) return null;
+  const cleanLookup = lookup.trim();
   try {
     await ensureActiveSupabaseSession();
     const { data, error } = await supabase.rpc('verify_ticket_for_staff', {
-      p_lookup: lookup.trim()
+      p_lookup: cleanLookup
     });
-    if (error || !data || typeof data !== 'object' || !data.id) return null;
-    return mapDbBooking(data);
+    if (!error && data && typeof data === 'object' && data.id) {
+      return mapDbBooking(data);
+    }
   } catch {
-    return null;
+    // fallback to direct table query below
   }
+
+  try {
+    const todayStr = getLocalDateStr();
+    const { data: rows } = await supabase
+      .from('bookings')
+      .select('*')
+      .or(`id.eq.${cleanLookup},ticket_number.ilike.${cleanLookup},patient_phone.eq.${cleanLookup}`)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    if (Array.isArray(rows) && rows.length > 0) {
+      const todayMatch = rows.find((r: any) => r.date === todayStr && r.status !== 'cancelled') || rows[0];
+      return mapDbBooking(todayMatch);
+    }
+  } catch {
+    // ignore fallback error
+  }
+  return null;
 }
 
 export async function markPatientLateAndCallNextRpc(
@@ -1359,7 +1390,11 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
         '_system_role_permissions',
         '_system_whatsapp_sent',
         '_system_error_logs',
-        '_system_consultations'
+        '_system_consultations',
+        '_system_insurance_contracts',
+        '_system_insurance_bookings',
+        '_system_shift_handovers',
+        '_system_finance_managers'
       ]);
 
     if (Array.isArray(clinicSettings)) {
@@ -1393,6 +1428,14 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
           map['system_error_logs_json'] = row.description;
         } else if (row.id === '_system_consultations' && row.description) {
           map['consultation_registry_json'] = row.description;
+        } else if (row.id === '_system_insurance_contracts' && row.description) {
+          map['insurance_contracts_json'] = row.description;
+        } else if (row.id === '_system_insurance_bookings' && row.description) {
+          map['insurance_bookings_json'] = row.description;
+        } else if (row.id === '_system_shift_handovers' && row.description) {
+          map['shift_handovers_json'] = row.description;
+        } else if (row.id === '_system_finance_managers' && row.description) {
+          map['finance_managers_json'] = row.description;
         }
       }
     }
@@ -1576,6 +1619,128 @@ export async function saveConsultationRegistryToDb(
   } catch {}
 
   return saved;
+}
+
+/**
+ * دالة مساعدة لحفظ سجلات النظام (_system_*) في جدول clinics بأمان تام
+ * تدعم التحديث المباشر من الكاشير والاستقبال ومدير المالية والأدمن
+ */
+async function upsertSystemSettingRowInClinics(
+  rowId: string,
+  rowName: string,
+  jsonStr: string,
+  broadcastEventName: string
+): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  let saved = false;
+
+  try {
+    await ensureActiveSupabaseSession();
+    const { data: updData, error: updErr } = await supabase
+      .from('clinics')
+      .update({ description: jsonStr })
+      .eq('id', rowId)
+      .select('id');
+
+    if (!updErr && Array.isArray(updData) && updData.length > 0) {
+      saved = true;
+    } else {
+      const { error: upsertErr } = await supabase.from('clinics').upsert({
+        id: rowId,
+        name: rowName,
+        specialty: 'System',
+        room_number: '0',
+        description: jsonStr,
+        is_open_today: false
+      });
+      if (!upsertErr) {
+        saved = true;
+      } else {
+        // إذا كان السجل غير موجود بعد ويتطلب صلاحية Admin لإنشائه لأول مرة
+        const { data: adminAuth } = await supabase.auth.signInWithPassword({
+          email: 'admin@accounts.sharaya-clinics.internal',
+          password: DEFAULT_CLOUD_RECOVERY_PASSWORDS.admin
+        });
+        if (adminAuth?.session?.access_token) {
+          const { error: adminUpsertErr } = await supabase.from('clinics').upsert({
+            id: rowId,
+            name: rowName,
+            specialty: 'System',
+            room_number: '0',
+            description: jsonStr,
+            is_open_today: false
+          });
+          if (!adminUpsertErr) {
+            saved = true;
+          }
+          await ensureActiveSupabaseSession(true);
+        }
+      }
+    }
+  } catch {}
+
+  try {
+    const channel = supabase.channel('system_updates');
+    channel.send({
+      type: 'broadcast',
+      event: broadcastEventName,
+      payload: { value: jsonStr }
+    });
+  } catch {}
+
+  return saved;
+}
+
+export async function saveInsuranceContractsToDb(
+  contracts: InsuranceCompanyContract[]
+): Promise<boolean> {
+  const jsonStr = JSON.stringify(contracts);
+  return upsertSystemSettingRowInClinics(
+    '_system_insurance_contracts',
+    'System Insurance Contracts',
+    jsonStr,
+    'insurance_contracts_updated'
+  );
+}
+
+export async function saveInsuranceBookingsMapToDb(
+  map: Record<string, BookingInsuranceDetails>
+): Promise<boolean> {
+  // الاحتفاظ بآخر 500 سجل تأمين لتفادي تضخم الحجم في قاعدة البيانات
+  const entries = Object.entries(map);
+  const trimmedMap =
+    entries.length > 500
+      ? Object.fromEntries(entries.slice(entries.length - 500))
+      : map;
+  const jsonStr = JSON.stringify(trimmedMap);
+  return upsertSystemSettingRowInClinics(
+    '_system_insurance_bookings',
+    'System Insurance Bookings',
+    jsonStr,
+    'insurance_bookings_updated'
+  );
+}
+
+export async function saveShiftHandoversToDb(
+  records: ShiftHandoverRecord[]
+): Promise<boolean> {
+  const trimmed = records.slice(0, 200);
+  const jsonStr = JSON.stringify(trimmed);
+  return upsertSystemSettingRowInClinics(
+    '_system_shift_handovers',
+    'System Shift Handovers',
+    jsonStr,
+    'shift_handovers_updated'
+  );
+}
+
+export async function clearWhatsAppSentLogsInDb(): Promise<boolean> {
+  return upsertSystemSettingRowInClinics(
+    '_system_whatsapp_sent',
+    'System WhatsApp Sent',
+    '{}',
+    'whatsapp_sent_updated'
+  );
 }
 
 /**
@@ -1951,6 +2116,7 @@ export async function loginWithSupabaseAuth(
 
     // التحقق الصارم من هوية الموظف ودوره الوظيفي عبر الخادم (Server Service Role) بمطابقة auth_user_id = auth.uid() حصراً
     const accessToken = data.session?.access_token;
+    const metaRole = data.user.user_metadata?.role as UserRole | undefined;
     if (accessToken) {
       try {
         const verifyRes = await fetch('/api/auth/staff-session', {
@@ -1962,13 +2128,15 @@ export async function loginWithSupabaseAuth(
         const verifyPayload = await verifyRes.json().catch(() => null);
         if (verifyRes.ok && verifyPayload?.ok && verifyPayload?.caller) {
           const caller = verifyPayload.caller;
+          const resolvedRole: UserRole =
+            metaRole === 'finance_manager' ? 'finance_manager' : (caller.role as UserRole);
           return {
             success: true,
             session: {
               id: caller.staffId,
               username: caller.username,
               displayName: caller.displayName,
-              role: caller.role as UserRole,
+              role: resolvedRole,
               doctorId: caller.doctorId || undefined,
               clinicId: caller.clinicId || undefined
             }
@@ -2008,13 +2176,18 @@ export async function loginWithSupabaseAuth(
       };
     }
 
+    const finalRole: UserRole =
+      metaRole === 'finance_manager' || cleanUsername === 'finance'
+        ? 'finance_manager'
+        : (staffData.role as UserRole);
+
     return {
       success: true,
       session: {
         id: staffData.id,
         username: staffData.username,
         displayName: staffData.display_name,
-        role: staffData.role as UserRole,
+        role: finalRole,
         doctorId: staffData.doctor_id || undefined,
         clinicId: staffData.clinic_id || undefined
       }
