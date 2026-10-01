@@ -1,4 +1,4 @@
-import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission, SystemErrorLog, SystemErrorSource } from '../types';
+import { Clinic, Doctor, Booking, UserSession, StaffAccount, DailyScheduleState, RolePermissionsMap, PermissionDefinition, UserRole, SystemPermission, SystemErrorLog, SystemErrorSource, ConsultationRegistryState, ConsultationStamp } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
 
@@ -21,6 +21,7 @@ const STORAGE_KEYS = {
   DELETED_BOOKINGS: 'sharaya_deleted_bookings_v2',
   ERROR_LOGS: 'sharaya_system_error_logs_v1',
   PENDING_ERROR_LOGS: 'sharaya_pending_error_logs_v1',
+  CONSULTATION_REGISTRY: 'sharaya_consultation_registry_v1',
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
@@ -55,6 +56,7 @@ if (typeof window !== 'undefined') {
 
 export const DEFAULT_SUPPORT_INFO_TEXT = 'فريق الاستقبال في خدمتكم يومياً من 9:00 صباحاً حتى 10:00 مساءً للرد على كافة التساؤلات.';
 export const DEFAULT_OFFICIAL_WORKING_HOURS = 'يومياً من 9:00 ص حتى 10:00 م';
+export const DEFAULT_CONSULTATION_WINDOW_DAYS = 10;
 
 export const AVAILABLE_PERMISSIONS: PermissionDefinition[] = [
   {
@@ -1077,9 +1079,15 @@ export function recordLocalSystemError(input: {
  */
 export function clearAppCacheAndReload(): void {
   try {
-    // إزالة مفاتيح التخزين المؤقت للتطبيق مع الاحتفاظ بسجل الأخطاء لمراجعته في لوحة التحكم
+    // إزالة مفاتيح التخزين المؤقت للتطبيق مع الاحتفاظ بسجل الأخطاء وسجل الاستشارات النشطة
     Object.entries(STORAGE_KEYS).forEach(([keyName, storageKey]) => {
-      if (keyName === 'ERROR_LOGS' || keyName === 'PENDING_ERROR_LOGS' || keyName === 'SESSION') return;
+      if (
+        keyName === 'ERROR_LOGS' ||
+        keyName === 'PENDING_ERROR_LOGS' ||
+        keyName === 'SESSION' ||
+        keyName === 'CONSULTATION_REGISTRY'
+      )
+        return;
       try {
         localStorage.removeItem(storageKey);
       } catch (e) {}
@@ -1107,4 +1115,172 @@ export function clearAppCacheAndReload(): void {
     window.location.reload();
   }, 100);
 }
+
+// ==================== سجل الاستشارات المجانية ذاتي المسح (Auto-Pruning Consultation Registry) ====================
+
+function getTodayCairoIsoDate(): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date());
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  } catch {}
+  return new Date().toISOString().split('T')[0];
+}
+
+export function calculateDaysBetweenDates(examDateStr: string, currentDateStr?: string): number {
+  const refToday = (currentDateStr || getTodayCairoIsoDate()).split('T')[0];
+  const cleanExam = String(examDateStr || '').split('T')[0];
+  const [y1, m1, d1] = cleanExam.split('-').map(Number);
+  const [y2, m2, d2] = refToday.split('-').map(Number);
+  if (!y1 || !m1 || !d1 || !y2 || !m2 || !d2) return 9999;
+  const utc1 = Date.UTC(y1, m1 - 1, d1);
+  const utc2 = Date.UTC(y2, m2 - 1, d2);
+  return Math.floor((utc2 - utc1) / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * تنظيف تلقائي لأي بصمة استشارة تجاوزت عدد الأيام المسموحة حتى لا تستهلك أي مساحة
+ */
+export function pruneConsultationRegistry(
+  raw: Partial<ConsultationRegistryState> | null | undefined,
+  todayStr?: string
+): ConsultationRegistryState {
+  const refToday = todayStr || getTodayCairoIsoDate();
+  const rawDays = Number(raw?.windowDays);
+  const windowDays =
+    Number.isFinite(rawDays) && rawDays >= 1 && rawDays <= 90
+      ? Math.round(rawDays)
+      : DEFAULT_CONSULTATION_WINDOW_DAYS;
+
+  const cleanClinicWindows: Record<string, number> = {};
+  if (raw?.clinicWindows && typeof raw.clinicWindows === 'object') {
+    for (const [cid, val] of Object.entries(raw.clinicWindows)) {
+      const n = Number(val);
+      if (cid && Number.isFinite(n) && n >= 1 && n <= 90) {
+        cleanClinicWindows[cid] = Math.round(n);
+      }
+    }
+  }
+
+  const rawStamps = Array.isArray(raw?.stamps) ? raw!.stamps : [];
+  const dedupMap = new Map<string, ConsultationStamp>();
+
+  for (const item of rawStamps) {
+    if (!item || typeof item !== 'object') continue;
+    const cleanPhone = String(item.phone || '').replace(/\D/g, '');
+    const cleanClinicId = String(item.clinicId || '').trim();
+    const cleanExamDate = String(item.examDate || '').split('T')[0];
+    if (cleanPhone.length < 10 || !cleanClinicId || !cleanExamDate) continue;
+
+    const effectiveWindow = cleanClinicWindows[cleanClinicId] || windowDays;
+    const daysAgo = calculateDaysBetweenDates(cleanExamDate, refToday);
+    // إذا تجاوزت المدة المحددة (أو تاريخ غير منطقي)، تُحذف تلقائياً فوراً
+    if (daysAgo < 0 || daysAgo > effectiveWindow) continue;
+
+    const key = `${cleanPhone}__${cleanClinicId}`;
+    const existing = dedupMap.get(key);
+    const cleanPatientName = typeof item.patientName === 'string' ? item.patientName.trim() : undefined;
+    if (!existing || cleanExamDate >= existing.examDate) {
+      dedupMap.set(key, {
+        phone: cleanPhone,
+        patientName: cleanPatientName || existing?.patientName,
+        clinicId: cleanClinicId,
+        examDate: cleanExamDate,
+        updatedAt: item.updatedAt || new Date().toISOString(),
+      });
+    }
+  }
+
+  const rawIds = Array.isArray(raw?.consultationBookingIds) ? raw!.consultationBookingIds : [];
+  const cleanBookingIds = Array.from(
+    new Set(rawIds.map((id) => String(id || '').trim()).filter(Boolean))
+  ).slice(-250);
+
+  return {
+    windowDays,
+    clinicWindows: cleanClinicWindows,
+    stamps: Array.from(dedupMap.values()),
+    consultationBookingIds: cleanBookingIds,
+  };
+}
+
+export function getStoredConsultationRegistry(todayStr?: string): ConsultationRegistryState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.CONSULTATION_REGISTRY);
+    if (!raw) {
+      return {
+        windowDays: DEFAULT_CONSULTATION_WINDOW_DAYS,
+        stamps: [],
+        consultationBookingIds: [],
+      };
+    }
+    const parsed = JSON.parse(raw);
+    const pruned = pruneConsultationRegistry(parsed, todayStr);
+    return pruned;
+  } catch {
+    return {
+      windowDays: DEFAULT_CONSULTATION_WINDOW_DAYS,
+      stamps: [],
+      consultationBookingIds: [],
+    };
+  }
+}
+
+export function saveConsultationRegistry(
+  registry: ConsultationRegistryState,
+  todayStr?: string
+): ConsultationRegistryState {
+  const pruned = pruneConsultationRegistry(registry, todayStr);
+  try {
+    localStorage.setItem(STORAGE_KEYS.CONSULTATION_REGISTRY, JSON.stringify(pruned));
+  } catch {}
+  return pruned;
+}
+
+export function checkPatientConsultationEligibility(
+  phone: string,
+  clinicId: string,
+  registry: ConsultationRegistryState,
+  todayStr?: string
+): {
+  eligible: boolean;
+  examDate?: string;
+  daysAgo?: number;
+  remainingDays?: number;
+  patientName?: string;
+} {
+  const cleanPhone = String(phone || '').replace(/\D/g, '');
+  const cleanClinicId = String(clinicId || '').trim();
+  if (cleanPhone.length < 10 || !cleanClinicId) {
+    return { eligible: false };
+  }
+  const refToday = todayStr || getTodayCairoIsoDate();
+  const pruned = pruneConsultationRegistry(registry, refToday);
+  const match = pruned.stamps.find(
+    (s) => s.phone === cleanPhone && s.clinicId === cleanClinicId
+  );
+  if (!match) {
+    return { eligible: false };
+  }
+  const effectiveWindow = pruned.clinicWindows?.[cleanClinicId] || pruned.windowDays;
+  const daysAgo = calculateDaysBetweenDates(match.examDate, refToday);
+  if (daysAgo < 0 || daysAgo > effectiveWindow) {
+    return { eligible: false };
+  }
+  return {
+    eligible: true,
+    examDate: match.examDate,
+    daysAgo,
+    remainingDays: Math.max(0, effectiveWindow - daysAgo),
+    patientName: match.patientName,
+  };
+}
+
 

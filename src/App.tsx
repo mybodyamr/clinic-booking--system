@@ -63,7 +63,7 @@ const AppContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-dvh w-full overflow-x-clip bg-[#F7FAF8] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
+    <div className="min-h-dvh w-full overflow-x-clip bg-[#F8FBF9] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300">
       
       {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
       <OfflineBanner />
@@ -72,7 +72,7 @@ const AppContent: React.FC = () => {
       <Navbar />
 
       {/* المحتوى الرئيسي للشاشة الحالية — متجاوب مع الهواتف، الأجهزة اللوحية، وشاشات الكمبيوتر العريضة */}
-      <main className="flex-1 w-full max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-7 lg:py-8">
+      <main className="relative z-10 flex-1 w-full max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-7 lg:py-8">
         <AnimatePresence mode="wait">
           <motion.div
             key={currentView}
@@ -88,7 +88,7 @@ const AppContent: React.FC = () => {
       </main>
 
       {/* التذييل الطبي المؤسسي الهادئ والكلاسيكي (يدعم الوضع النهاري والليلي وحواف آيفون الآمنة) */}
-      <footer className="no-print border-t border-slate-200/80 dark:border-white/10 bg-white dark:bg-[#040B09] py-5 sm:py-6 pb-safe text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
+      <footer className="relative z-10 no-print border-t border-slate-200/80 dark:border-white/10 bg-white/95 dark:bg-[#040B09]/95 backdrop-blur-md py-5 sm:py-6 pb-safe text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
         <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 text-center sm:text-right">
           <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-3">
             <div className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs shrink-0">

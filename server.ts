@@ -753,6 +753,31 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         } else {
           finalClinicId = doctorRow.clinic_id || null;
         }
+      } else if (validRole === 'reception') {
+        const candidateClinicId = typeof rawClinicId === 'string' ? rawClinicId.trim() : '';
+        if (candidateClinicId) {
+          if (!isValidServerEntityId(candidateClinicId) || candidateClinicId.startsWith('_system')) {
+            res.status(400).json({
+              ok: false,
+              error: 'معرف العيادة المحددة لموظف الاستقبال غير صالح',
+            });
+            return;
+          }
+          const { data: clinicRow, error: clinicErr } = await adminClient
+            .from('clinics')
+            .select('id, name')
+            .eq('id', candidateClinicId)
+            .maybeSingle();
+
+          if (clinicErr || !clinicRow || String(clinicRow.id).startsWith('_system')) {
+            res.status(400).json({
+              ok: false,
+              error: 'العيادة المحددة لموظف الاستقبال غير موجودة في قاعدة البيانات',
+            });
+            return;
+          }
+          finalClinicId = clinicRow.id;
+        }
       }
 
       // ز) التحقق من عدم تكرار username في staff_accounts
@@ -3195,19 +3220,20 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           const bookingId = typeof req.body?.p_booking_id === 'string' ? req.body.p_booking_id.trim() : '';
           const paymentType = typeof req.body?.p_payment_type === 'string' ? req.body.p_payment_type.trim() : '';
 
-          if (!bookingId || !['cash', 'insurance', 'charity_exempt'].includes(paymentType)) {
+          if (!bookingId || !['cash', 'insurance', 'charity_exempt', 'consultation'].includes(paymentType)) {
             res.status(400).json({ message: 'بيانات تأكيد الدفع غير صالحة' });
             return;
           }
 
           const adminClient = getBridgeDbClient(authenticatedUserJwt);
-          const newPaymentStatus = paymentType === 'charity_exempt' ? 'exempt' : 'paid';
+          const dbPaymentType = paymentType === 'consultation' ? 'charity_exempt' : paymentType;
+          const newPaymentStatus = dbPaymentType === 'charity_exempt' ? 'exempt' : 'paid';
           const nowIso = new Date().toISOString();
 
           if (!hasRealServiceRole) {
             const { data: rpcPaid, error: rpcErr } = await adminClient.rpc('confirm_payment', {
               p_booking_id: bookingId,
-              p_payment_type: paymentType,
+              p_payment_type: dbPaymentType,
             });
             if (!rpcErr && rpcPaid) {
               res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -3220,7 +3246,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             .from('bookings')
             .update({
               payment_status: newPaymentStatus,
-              payment_method: paymentType,
+              payment_method: dbPaymentType,
               paid_at: nowIso,
             })
             .eq('id', bookingId)
@@ -3812,7 +3838,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               return true;
             }
             if (
-              rowId === '_system_whatsapp_sent' &&
+              (rowId === '_system_whatsapp_sent' || rowId === '_system_consultations') &&
               (!verifiedCallerRole || !['admin', 'reception', 'cashier'].includes(verifiedCallerRole))
             ) {
               return true;
@@ -4024,7 +4050,10 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               const bodyKeys = Object.keys(bodyObj);
               const allowedDelegatedClinicKeys = new Set(['is_open_today', 'price']);
               const isErrorOrWhatsappLog =
-                bodyObj.id === '_system_error_logs' || bodyObj.id === '_system_whatsapp_sent';
+                bodyObj.id === '_system_error_logs' ||
+                bodyObj.id === '_system_whatsapp_sent' ||
+                bodyObj.id === '_system_consultations' ||
+                subPath.includes('_system_consultations');
               const idFilter = targetUrlObj.searchParams.get('id') || '';
               const targetClinicId = idFilter.startsWith('eq.') ? idFilter.slice(3).trim() : '';
               const hasValidTargetClinicId = isValidServerEntityId(targetClinicId) && !targetClinicId.startsWith('_system');

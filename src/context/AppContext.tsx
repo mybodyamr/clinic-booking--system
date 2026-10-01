@@ -17,7 +17,8 @@ import {
   RolePermissionsMap,
   StaffAccount,
   SystemErrorLog,
-  SystemErrorSource
+  SystemErrorSource,
+  ConsultationRegistryState
 } from '../types';
 import { 
   getStoredClinics, 
@@ -65,7 +66,11 @@ import {
   saveErrorLogs,
   getPendingErrorLogs,
   savePendingErrorLogs,
-  recordLocalSystemError
+  recordLocalSystemError,
+  getStoredConsultationRegistry,
+  saveConsultationRegistry,
+  pruneConsultationRegistry,
+  checkPatientConsultationEligibility
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
@@ -110,7 +115,8 @@ import {
   adminChangeStaffPassword,
   deleteBookingsBeforeDateFromDb,
   deleteBookingFromDb,
-  reportClientErrorToDb
+  reportClientErrorToDb,
+  saveConsultationRegistryToDb
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -161,6 +167,21 @@ interface AppContextType {
   updateSupportInfoText: (text: string) => Promise<boolean>;
   officialWorkingHours: string;
   updateOfficialWorkingHours: (text: string) => Promise<boolean>;
+  consultationRegistry: ConsultationRegistryState;
+  consultationWindowDays: number;
+  activeConsultationStampsCount: number;
+  updateConsultationWindowDays: (days: number) => Promise<boolean>;
+  updateConsultationSettings: (defaultDays: number, clinicWindows?: Record<string, number>) => Promise<boolean>;
+  checkConsultationEligibility: (
+    phone: string,
+    clinicId: string
+  ) => {
+    eligible: boolean;
+    examDate?: string;
+    daysAgo?: number;
+    remainingDays?: number;
+    daysRemaining?: number;
+  };
   getActiveClinicsForBooking: () => { clinic: Clinic; assignedDoctor?: Doctor }[];
   createBooking: (data: {
     patientName: string;
@@ -260,6 +281,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // مواعيد العمل الرسمية بالصفحة الرئيسية (قابلة للتعديل من قبل الأدمن ومربوطة بقاعدة البيانات)
   const [officialWorkingHours, setOfficialWorkingHours] = useState<string>(getStoredOfficialWorkingHours);
+
+  // سجل الاستشارات المجانية ذاتي المسح (المستقل عن أرشيف الحجوزات)
+  const [consultationRegistry, setConsultationRegistry] = useState<ConsultationRegistryState>(
+    getStoredConsultationRegistry
+  );
 
   // قائمة حسابات الكادر والمستخدمين الديناميكية
   const [staffAccounts, setStaffAccounts] = useState<StaffAccount[]>(getStoredStaffAccounts);
@@ -424,6 +450,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } catch {}
         }
+        if (dbSettings && dbSettings['consultation_registry_json']) {
+          try {
+            const parsedReg = JSON.parse(dbSettings['consultation_registry_json']);
+            if (parsedReg && typeof parsedReg === 'object') {
+              const pruned = saveConsultationRegistry(parsedReg, todayStr);
+              setConsultationRegistry(pruned);
+              if (pruned.consultationBookingIds.length > 0) {
+                setBookings(prev => {
+                  const next = prev.map(b =>
+                    pruned.consultationBookingIds.includes(b.id)
+                      ? { ...b, paymentMethod: 'consultation' as PaymentMethod, fee: 0 }
+                      : b
+                  );
+                  saveBookings(next);
+                  return next;
+                });
+              }
+            }
+          } catch {}
+        }
 
         // دفع أي أخطاء محلية معلقة لم يتم رفعها بعد إلى قاعدة البيانات السحابية
         const pendingErrors = getPendingErrorLogs();
@@ -456,9 +502,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               setActiveView('landing');
             } else if (
               currentStored.role !== matchedStaff.role ||
-              currentStored.id !== matchedStaff.id
+              currentStored.id !== matchedStaff.id ||
+              (currentStored.clinicId || '') !== (matchedStaff.clinicId || '') ||
+              currentStored.displayName !== matchedStaff.displayName
             ) {
-              // تصحيح أي محاولة لتزوير الصلاحية (Role Escalation) عبر sessionStorage في الكونسول
+              // تصحيح أي محاولة لتزوير الصلاحية أو تحديث العيادة المخصصة للموظف فوراً
               const correctedSession: UserSession = {
                 id: matchedStaff.id,
                 username: matchedStaff.username,
@@ -544,9 +592,55 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (freshStaff && freshStaff.length > 0 && isMounted) {
             setStaffAccounts(freshStaff);
             saveStaffAccounts(freshStaff);
+            const activeStored = getStoredSession();
+            if (activeStored) {
+              const matched = freshStaff.find(
+                s => s.id === activeStored.id || s.username.toLowerCase() === activeStored.username.toLowerCase()
+              );
+              if (
+                matched &&
+                ((activeStored.clinicId || '') !== (matched.clinicId || '') ||
+                  activeStored.displayName !== matched.displayName ||
+                  activeStored.role !== matched.role)
+              ) {
+                const updatedSession: UserSession = {
+                  ...activeStored,
+                  displayName: matched.displayName,
+                  role: matched.role,
+                  doctorId: matched.doctorId,
+                  clinicId: matched.clinicId
+                };
+                setCurrentUser(updatedSession);
+                saveSession(updatedSession);
+              }
+            }
           }
         } catch {
           // ignore
+        }
+      })
+      .on('broadcast', { event: 'consultation_registry_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (parsed && typeof parsed === 'object') {
+              const pruned = saveConsultationRegistry(parsed);
+              setConsultationRegistry(pruned);
+              if (pruned.consultationBookingIds.length > 0) {
+                setBookings(prev => {
+                  const next = prev.map(b =>
+                    pruned.consultationBookingIds.includes(b.id)
+                      ? { ...b, paymentMethod: 'consultation' as PaymentMethod, fee: 0 }
+                      : b
+                  );
+                  saveBookings(next);
+                  return next;
+                });
+              }
+            }
+          } catch {}
         }
       })
       .on('broadcast', { event: 'doctors_updated' }, async () => {
@@ -666,6 +760,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (freshSettings['official_working_hours_text']) {
               setOfficialWorkingHours(freshSettings['official_working_hours_text']);
               saveOfficialWorkingHours(freshSettings['official_working_hours_text']);
+            }
+            if (freshSettings['consultation_registry_json']) {
+              try {
+                const parsedReg = JSON.parse(freshSettings['consultation_registry_json']);
+                if (parsedReg && typeof parsedReg === 'object') {
+                  const pruned = saveConsultationRegistry(parsedReg);
+                  setConsultationRegistry(pruned);
+                }
+              } catch {}
             }
           }
         } catch {}
@@ -790,6 +893,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 if (JSON.stringify(prev) !== JSON.stringify(parsedPerms)) {
                   saveRolePermissions(parsedPerms);
                   return parsedPerms;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
+
+        if (
+          freshSettings?.['consultation_registry_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const parsedReg = JSON.parse(freshSettings['consultation_registry_json']);
+            if (parsedReg && typeof parsedReg === 'object') {
+              const pruned = pruneConsultationRegistry(parsedReg, currentToday);
+              setConsultationRegistry(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(pruned)) {
+                  saveConsultationRegistry(pruned, currentToday);
+                  return pruned;
                 }
                 return prev;
               });
@@ -1188,6 +1311,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       finalDoctorId = matchedDoc.id;
       finalClinicId = input.clinicId || matchedDoc.clinicId || undefined;
+    } else if (input.role === 'reception') {
+      const cleanReqClinicId = input.clinicId ? input.clinicId.trim() : '';
+      if (cleanReqClinicId) {
+        const matchedClinic = clinics.find(c => c.id === cleanReqClinicId);
+        if (matchedClinic) {
+          finalClinicId = matchedClinic.id;
+        }
+      }
     }
 
     if (isSupabaseConfigured) {
@@ -1428,7 +1559,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? (updates.doctorId !== undefined ? (updates.doctorId || undefined) : target.doctorId)
         : undefined;
     let effectiveClinicId: string | undefined =
-      effectiveRole === 'doctor'
+      effectiveRole === 'doctor' || effectiveRole === 'reception'
         ? (updates.clinicId !== undefined ? (updates.clinicId || undefined) : target.clinicId)
         : undefined;
 
@@ -1465,7 +1596,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         displayName: updates.displayName,
         role: effectiveRole,
         doctorId: effectiveRole === 'doctor' ? (effectiveDoctorId || null) : null,
-        clinicId: effectiveRole === 'doctor' ? (effectiveClinicId || null) : null,
+        clinicId:
+          effectiveRole === 'doctor' || effectiveRole === 'reception'
+            ? (effectiveClinicId || null)
+            : null,
         recoveryEmail: updates.recoveryEmail,
         password: updates.password
       });
@@ -1517,6 +1651,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setStaffAccounts(updatedList);
     saveStaffAccounts(updatedList);
+
+    if (
+      currentUser &&
+      (currentUser.id === id || currentUser.username.toLowerCase() === cleanUsername)
+    ) {
+      const matchedSelf = updatedList.find(s => s.id === id);
+      if (matchedSelf) {
+        const updatedSelfSession: UserSession = {
+          ...currentUser,
+          username: matchedSelf.username,
+          displayName: matchedSelf.displayName,
+          role: matchedSelf.role,
+          doctorId: matchedSelf.doctorId,
+          clinicId: matchedSelf.clinicId
+        };
+        setCurrentUser(updatedSelfSession);
+        saveSession(updatedSelfSession);
+      }
+    }
+
     addToast({
       type: 'success',
       title: 'تم تحديث بيانات الحساب',
@@ -1842,13 +1996,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return false;
     }
 
-    if ((paymentStatus === 'exempt' || method === 'charity_exempt') && !hasPermission(currentUser.role, 'manage_patient_exemptions')) {
+    if (method === 'charity_exempt' && !hasPermission(currentUser.role, 'manage_patient_exemptions')) {
       addToast({
         type: 'error',
         title: 'غير مصرح بالإعفاء',
         message: 'ليست لديك صلاحية منح الإعفاءات الخيرية.'
       });
       return false;
+    }
+
+    const targetBooking = bookings.find(b => b.id === bookingId);
+    const effectivePaymentStatus: PaymentStatus =
+      method === 'consultation' || method === 'charity_exempt' ? 'exempt' : paymentStatus;
+
+    lastMutationAtRef.current = Date.now();
+    lastSettingsSaveAtRef.current = Date.now();
+
+    // تحديث سجل الاستشارات المجانية ذاتي المسح (المستقل عن أرشيف الحجوزات)
+    if (targetBooking) {
+      const cleanPhone = String(targetBooking.patientPhone || '').replace(/\D/g, '');
+      const todayStr = getLocalDateStr(new Date());
+      const nowIso = new Date().toISOString();
+
+      if (cleanPhone.length >= 10 && targetBooking.clinicId) {
+        if (method === 'cash' || method === 'insurance') {
+          // كشف جديد مدفوع: تسجيل بصمة استشارة مجانية صالحة لعدد الأيام المحدد
+          const nextStamps = [
+            ...consultationRegistry.stamps.filter(
+              s => !(s.phone === cleanPhone && s.clinicId === targetBooking.clinicId)
+            ),
+            {
+              phone: cleanPhone,
+              patientName: targetBooking.patientName,
+              clinicId: targetBooking.clinicId,
+              examDate: targetBooking.date || todayStr,
+              updatedAt: nowIso
+            }
+          ];
+          const nextReg = saveConsultationRegistry(
+            {
+              ...consultationRegistry,
+              stamps: nextStamps,
+              consultationBookingIds: consultationRegistry.consultationBookingIds.filter(
+                id => id !== bookingId
+              )
+            },
+            todayStr
+          );
+          setConsultationRegistry(nextReg);
+          if (isSupabaseConfigured) {
+            saveConsultationRegistryToDb(nextReg);
+          }
+        } else if (method === 'consultation') {
+          // دخول استشارة مجانية: حذف بصمة الاستشارة لهذا المريض في هذه العيادة فوراً وتلقائياً
+          const nextStamps = consultationRegistry.stamps.filter(
+            s => !(s.phone === cleanPhone && s.clinicId === targetBooking.clinicId)
+          );
+          const nextIds = Array.from(
+            new Set([...consultationRegistry.consultationBookingIds, bookingId])
+          );
+          const nextReg = saveConsultationRegistry(
+            {
+              ...consultationRegistry,
+              stamps: nextStamps,
+              consultationBookingIds: nextIds
+            },
+            todayStr
+          );
+          setConsultationRegistry(nextReg);
+          if (isSupabaseConfigured) {
+            saveConsultationRegistryToDb(nextReg);
+          }
+        }
+      }
     }
 
     if (isSupabaseConfigured) {
@@ -1865,8 +2085,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (b.id === bookingId) {
           return {
             ...b,
-            paymentStatus,
+            paymentStatus: effectivePaymentStatus,
             paymentMethod: method,
+            fee: method === 'consultation' ? 0 : b.fee,
             paidAt: paidAtNow
           };
         }
@@ -1882,8 +2103,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     addToast({
       type: 'success',
-      title: 'تم تحديث حالة السداد',
-      message: paymentStatus === 'paid' ? 'تم تسجيل الدفع بالخزينة وإصدار إيصال السداد.' : 'تم تسجيل الإعفاء الخيري.'
+      title:
+        method === 'consultation'
+          ? 'تم اعتماد الاستشارة المجانية'
+          : 'تم تحديث حالة السداد',
+      message:
+        method === 'consultation'
+          ? 'تم تسجيل دخول المريض كاستشارة مجانية (إعادة كشف) وحذف أحقية الاستشارة تلقائياً.'
+          : effectivePaymentStatus === 'paid'
+          ? 'تم تسجيل الدفع بالخزينة وإصدار إيصال السداد.'
+          : 'تم تسجيل الإعفاء الخيري.'
     });
     return true;
   };
@@ -3246,6 +3475,87 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
+  const updateConsultationWindowDays = async (days: number): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل مدة الاستشارة المجانية مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
+    const validDays = Math.max(1, Math.min(90, Math.round(Number(days) || 14)));
+    const todayStr = getLocalDateStr(new Date());
+    lastSettingsSaveAtRef.current = Date.now();
+    const updatedReg = saveConsultationRegistry(
+      {
+        ...consultationRegistry,
+        windowDays: validDays
+      },
+      todayStr
+    );
+    setConsultationRegistry(updatedReg);
+
+    if (isSupabaseConfigured) {
+      await saveConsultationRegistryToDb(updatedReg);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم حفظ مدة الاستشارة المجانية',
+      message: `تم تحديد فترة الاستشارة المجانية بـ (${validDays} يوماً) وتطهير أي سجلات منتهية تلقائياً.`
+    });
+    return true;
+  };
+
+  const updateConsultationSettings = async (
+    defaultDays: number,
+    clinicWindows?: Record<string, number>
+  ): Promise<boolean> => {
+    if (currentUser?.role !== 'admin') {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تعديل مدة الاستشارة المجانية مخصص لمدير النظام فقط.'
+      });
+      return false;
+    }
+    const validDays = Math.max(1, Math.min(90, Math.round(Number(defaultDays) || 14)));
+    const todayStr = getLocalDateStr(new Date());
+    lastSettingsSaveAtRef.current = Date.now();
+    const updatedReg = saveConsultationRegistry(
+      {
+        ...consultationRegistry,
+        windowDays: validDays,
+        clinicWindows: clinicWindows !== undefined ? clinicWindows : consultationRegistry.clinicWindows
+      },
+      todayStr
+    );
+    setConsultationRegistry(updatedReg);
+
+    if (isSupabaseConfigured) {
+      await saveConsultationRegistryToDb(updatedReg);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم حفظ إعدادات الاستشارة المجانية',
+      message: `تم تحديد فترة الاستشارة المجانية بـ (${validDays} يوماً) وتطهير أي سجلات منتهية تلقائياً.`
+    });
+    return true;
+  };
+
+  const checkConsultationEligibility = (phone: string, clinicId: string) => {
+    const todayStr = getLocalDateStr(new Date());
+    const res = checkPatientConsultationEligibility(phone, clinicId, consultationRegistry, todayStr);
+    return {
+      ...res,
+      daysRemaining: res.remainingDays
+    };
+  };
+
   /**
    * العيادات المتاحة للحجز للمريض:
    * تعتمد بشكل صارم على الركائز الأربعة المطلوبة:
@@ -3522,6 +3832,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateSupportInfoText,
         officialWorkingHours,
         updateOfficialWorkingHours,
+        consultationRegistry,
+        consultationWindowDays: consultationRegistry.windowDays,
+        activeConsultationStampsCount: consultationRegistry.stamps.length,
+        updateConsultationWindowDays,
+        updateConsultationSettings,
+        checkConsultationEligibility,
         getActiveClinicsForBooking,
         createBooking,
         updateBookingStatus,

@@ -54,9 +54,23 @@ export const ReceptionView: React.FC = () => {
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'queue' | 'new-booking' | 'scanner' | 'doctors' | 'daily-clinics' | 'clinic-fees' | 'financial-reports'>('queue');
-  const [selectedClinicFilter, setSelectedClinicFilter] = useState<string>('all');
+  const assignedReceptionClinicId = (currentUser?.role === 'reception' && currentUser?.clinicId)
+    ? currentUser.clinicId
+    : null;
+  const assignedReceptionClinicObj = assignedReceptionClinicId
+    ? clinics.find(c => c.id === assignedReceptionClinicId) || null
+    : null;
+  const visibleClinics = assignedReceptionClinicObj ? [assignedReceptionClinicObj] : clinics;
+  const [selectedClinicFilter, setSelectedClinicFilter] = useState<string>(assignedReceptionClinicId || 'all');
   const [statusFilter, setStatusFilter] = useState<string>('waiting');
   const [searchQuery, setSearchQuery] = useState('');
+
+  React.useEffect(() => {
+    if (assignedReceptionClinicId) {
+      setSelectedClinicFilter(assignedReceptionClinicId);
+      setWalkinClinicId(assignedReceptionClinicId);
+    }
+  }, [assignedReceptionClinicId]);
 
   // حالة النافذة المنبثقة للتعامل مع المريض المتأخر
   const [lateActionBooking, setLateActionBooking] = useState<Booking | null>(null);
@@ -74,10 +88,12 @@ export const ReceptionView: React.FC = () => {
 
   const todayStr = getLocalDateStr();
 
-  // قاعدة صارمة: يظهر في طابور الاستقبال فقط المرضى الذين تم تأكيد سدادهم (دفع نقدي / تأمين) أو إعفاؤهم خيرياً في تاريخ اليوم
+  // قاعدة صارمة: يظهر في طابور الاستقبال فقط المرضى الذين تم تأكيد سدادهم (دفع نقدي / تأمين / استشارة) أو إعفاؤهم خيرياً في تاريخ اليوم
   // وترتيب الطابور يكون حسب وقت تسجيل السداد / الإعفاء (أول من سدد يدخل أولاً)
+  // وإذا كان موظف الاستقبال مخصصاً لعيادة محددة من قِبل الإدارة، يقتصر العرض على عيادته المخصصة
   const confirmedBookings = bookings.filter(b => {
-    return (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt') && b.date === todayStr;
+    const matchAssignedClinic = !assignedReceptionClinicId || b.clinicId === assignedReceptionClinicId;
+    return matchAssignedClinic && (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt') && b.date === todayStr;
   });
 
   const filteredBookings = confirmedBookings
@@ -191,7 +207,7 @@ export const ReceptionView: React.FC = () => {
       clinicId: walkinClinicId,
       doctorId: doc.id,
       date: todayStr,
-      timeSlot: 'حجز فوري بالاستقبال',
+      timeSlot: doc.scheduleHours || cln.workingHours || '9:00 ص - 5:00 م',
       fee: cln.fee || 30,
       notes: walkinNotes ? `حجز مباشر بالاستقبال - ${walkinNotes}` : 'حجز مباشر بالاستقبال'
     });
@@ -296,16 +312,28 @@ export const ReceptionView: React.FC = () => {
       {/* رأس شاشة الاستقبال والتبويبات */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white dark:bg-slate-800 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="w-8 h-8 rounded-lg bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 flex items-center justify-center font-bold">
               <UserCheck className="w-5 h-5" />
             </span>
             <h1 className="text-xl font-bold text-slate-900 dark:text-white">
               منصة إدارة شؤون الاستقبال وطابور العيادات
             </h1>
+            {assignedReceptionClinicObj ? (
+              <span className="px-3 py-1 rounded-full text-xs font-extrabold bg-emerald-700 text-white shadow-2xs flex items-center gap-1.5">
+                <Stethoscope className="w-3.5 h-3.5" />
+                <span>مخصص لعيادة: {assignedReceptionClinicObj.name}</span>
+              </span>
+            ) : (
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 border border-slate-300 dark:border-slate-600">
+                استقبال عام — جميع العيادات
+              </span>
+            )}
           </div>
           <p className="text-xs text-slate-600 dark:text-slate-300 mt-1">
-            تسجيل الحضور، مسح التذاكر بالـ QR، وإدارة المتأخرين وانسيابية المرضى أمام العيادات
+            {assignedReceptionClinicObj
+              ? `إدارة طابور ونداء المرضى وحجز الحالات لعيادة (${assignedReceptionClinicObj.name})`
+              : 'تسجيل الحضور، مسح التذاكر بالـ QR، وإدارة المتأخرين وانسيابية المرضى أمام العيادات'}
           </p>
         </div>
 
@@ -443,8 +471,8 @@ export const ReceptionView: React.FC = () => {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {(selectedClinicFilter === 'all'
-                ? clinics
-                : clinics.filter(c => c.id === selectedClinicFilter)
+                ? visibleClinics
+                : visibleClinics.filter(c => c.id === selectedClinicFilter)
               ).map(clinic => {
                 const clinicConfirmed = confirmedBookings
                   .filter(b => b.clinicId === clinic.id && b.status !== 'cancelled')
@@ -556,11 +584,12 @@ export const ReceptionView: React.FC = () => {
             <div>
               <select
                 value={selectedClinicFilter}
+                disabled={!!assignedReceptionClinicObj}
                 onChange={(e) => setSelectedClinicFilter(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white font-medium"
+                className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white font-medium disabled:opacity-80"
               >
-                <option value="all">جميع العيادات التخصصية</option>
-                {clinics.map(c => (
+                {!assignedReceptionClinicObj && <option value="all">جميع العيادات التخصصية</option>}
+                {visibleClinics.map(c => (
                   <option key={c.id} value={c.id}>{c.name}</option>
                 ))}
               </select>
@@ -639,8 +668,16 @@ export const ReceptionView: React.FC = () => {
                             : 'ملغي'}
                         </span>
 
-                        <span className="text-[10px] bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
-                          {b.paymentStatus === 'paid' ? `مسدد (${b.fee} ج.م)` : 'إعفاء خيري'}
+                        <span className={`text-[10px] px-2 py-0.5 rounded border ${
+                          b.paymentMethod === 'consultation'
+                            ? 'bg-teal-50 dark:bg-teal-900/40 text-teal-800 dark:text-teal-300 border-teal-200 dark:border-teal-800 font-bold'
+                            : 'bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800'
+                        }`}>
+                          {b.paymentStatus === 'paid'
+                            ? `مسدد (${b.fee} ج.م)`
+                            : b.paymentMethod === 'consultation'
+                            ? 'استشارة مجانية ✓'
+                            : 'إعفاء خيري'}
                         </span>
 
                         {b.status === 'waiting' && clinicTurnOrderMap[b.id] && (
@@ -783,10 +820,11 @@ export const ReceptionView: React.FC = () => {
                 <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">العيادة التخصصية:</label>
                 <select
                   value={walkinClinicId}
+                  disabled={!!assignedReceptionClinicObj}
                   onChange={(e) => setWalkinClinicId(e.target.value)}
-                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white font-medium"
+                  className="w-full px-3 py-2 text-xs rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white font-medium disabled:opacity-80"
                 >
-                  {clinics.map(c => (
+                  {visibleClinics.map(c => (
                     <option key={c.id} value={c.id}>{c.name} ({c.fee} ج.م)</option>
                   ))}
                 </select>
@@ -923,8 +961,8 @@ export const ReceptionView: React.FC = () => {
                 <div>الطبيب: <strong>{scanResult.doctorName}</strong></div>
                 <div>
                   السداد:{' '}
-                  <strong className={scanResult.paymentStatus === 'paid' ? 'text-emerald-600' : 'text-amber-600'}>
-                    {scanResult.paymentStatus === 'paid' ? 'مسدد' : scanResult.paymentStatus === 'exempt' ? 'معفى خيري' : 'بانتظار السداد'}
+                  <strong className={scanResult.paymentStatus === 'paid' ? 'text-emerald-600' : scanResult.paymentMethod === 'consultation' ? 'text-teal-600' : 'text-amber-600'}>
+                    {scanResult.paymentStatus === 'paid' ? 'مسدد' : scanResult.paymentMethod === 'consultation' ? 'استشارة مجانية' : scanResult.paymentStatus === 'exempt' ? 'معفى خيري' : 'بانتظار السداد'}
                   </strong>
                 </div>
               </div>

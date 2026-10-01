@@ -8,7 +8,8 @@ import {
   FileText, 
   Ticket, 
   AlertCircle,
-  ExternalLink
+  ExternalLink,
+  Stethoscope
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { maskPhoneNumber } from '../services/storage';
@@ -22,6 +23,8 @@ export const PatientHistoryModal: React.FC = () => {
     patientHistoryPhone, 
     setPatientHistoryPhone,
     bookings,
+    clinics,
+    checkConsultationEligibility,
     navigate,
     setSelectedTicket,
     currentUser
@@ -42,6 +45,17 @@ export const PatientHistoryModal: React.FC = () => {
   const localMatchingBookings = bookings.filter(b => 
     searchInput.trim() ? b.patientPhone.replace(/\s+/g, '') === searchInput.trim().replace(/\s+/g, '') : false
   );
+
+  const activeConsultationsForPhone = React.useMemo(() => {
+    const cleanPhone = searchInput.trim().replace(/\s+/g, '');
+    if (!cleanPhone || cleanPhone.length < 8) return [];
+    return clinics
+      .map(c => {
+        const elig = checkConsultationEligibility(cleanPhone, c.id);
+        return elig.eligible ? { clinic: c, ...elig } : null;
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [searchInput, clinics, checkConsultationEligibility]);
 
   const patientBookings = React.useMemo(() => {
     if (!rpcHistoryBookings) return localMatchingBookings;
@@ -138,10 +152,32 @@ export const PatientHistoryModal: React.FC = () => {
               </div>
             )}
 
-            {searched && patientBookings.length === 0 && (
+            {searched && activeConsultationsForPhone.length > 0 && (
+              <div className="p-4 rounded-xl bg-teal-50 dark:bg-teal-950/70 border border-teal-300 dark:border-teal-700 space-y-2">
+                <div className="flex items-center gap-2 text-teal-900 dark:text-teal-200 font-bold text-xs">
+                  <Stethoscope className="w-4 h-4 text-teal-600 shrink-0" />
+                  <span>هذا المريض لديه استشارة مجانية سارية حالياً ({activeConsultationsForPhone.length}):</span>
+                </div>
+                <div className="space-y-1.5">
+                  {activeConsultationsForPhone.map(item => (
+                    <div
+                      key={item.clinic.id}
+                      className="px-3 py-2 rounded-lg bg-white/90 dark:bg-slate-900/90 border border-teal-200 dark:border-teal-800 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <span className="font-bold text-slate-900 dark:text-white">{item.clinic.name}</span>
+                      <span className="text-teal-800 dark:text-teal-300 font-semibold">
+                        تاريخ الكشف: {item.examDate} • متبقي {item.daysRemaining} يوم
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {searched && patientBookings.length === 0 && activeConsultationsForPhone.length === 0 && (
               <div className="text-center py-10 text-slate-500 dark:text-slate-400">
                 <AlertCircle className="w-12 h-12 mx-auto mb-3 text-amber-500 opacity-60" />
-                <p className="font-bold text-slate-800 dark:text-slate-200">لا توجد حجوزات مسجلة بهذا الرقم</p>
+                <p className="font-bold text-slate-800 dark:text-slate-200">لا توجد حجوزات أو استشارات سارية مسجلة بهذا الرقم</p>
                 <p className="text-xs text-slate-600 dark:text-slate-400 mt-1">تأكد من كتابة الرقم بشكل صحيح أو قم بإنشاء حجز جديد للعيادة</p>
               </div>
             )}

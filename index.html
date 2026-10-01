@@ -42,7 +42,7 @@
           if ('caches' in window) {
             window.caches.keys().then(function(keys) {
               keys.forEach(function(key) {
-                if (key !== 'sharaya-clinics-v9') {
+                if (key !== 'sharaya-clinics-v13') {
                   window.caches.delete(key);
                 } else {
                   window.caches.open(key).then(function(cache) {
@@ -58,8 +58,8 @@
               });
             });
           }
-          if (localStorage.getItem('sharaya_sw_purge_v9') !== 'done') {
-            localStorage.setItem('sharaya_sw_purge_v9', 'done');
+          if (localStorage.getItem('sharaya_sw_purge_v10') !== 'done') {
+            localStorage.setItem('sharaya_sw_purge_v10', 'done');
             localStorage.removeItem('sharaya_clinics_v2');
             localStorage.removeItem('sharaya_doctors_v2');
             localStorage.removeItem('sharaya_bookings_v2');

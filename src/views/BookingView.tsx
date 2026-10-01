@@ -19,7 +19,8 @@ import {
   Activity,
   Lock,
   Info,
-  HelpCircle
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { validateEgyptianPhone, validateTripleName } from '../services/storage';
@@ -32,7 +33,14 @@ import {
 import heroHospitalImg from '../assets/images/hospital_doctor_hero_1790597353764.jpg';
 
 export const BookingView: React.FC = () => {
-  const { createBooking, navigate, bookings, getActiveClinicsForBooking, checkClinicAvailabilityStatus } = useApp();
+  const {
+    createBooking,
+    navigate,
+    bookings,
+    getActiveClinicsForBooking,
+    checkClinicAvailabilityStatus,
+    officialWorkingHours
+  } = useApp();
 
   const activeClinicsWithDoctors = getActiveClinicsForBooking();
 
@@ -51,9 +59,18 @@ export const BookingView: React.FC = () => {
   });
   const [patientName, setPatientName] = useState('');
   const [patientPhone, setPatientPhone] = useState('');
-  const [timeSlot, setTimeSlot] = useState('04:30 عصراً');
+  const [showUpcomingSchedule, setShowUpcomingSchedule] = useState(false);
   const [errors, setErrors] = useState<{ [key: string]: string }>({});
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const formatDoctorDisplayName = (rawName?: string) => {
+    if (!rawName) return '';
+    const trimmed = rawName.trim();
+    if (trimmed.startsWith('د.') || trimmed.startsWith('د/') || trimmed.startsWith('د ')) {
+      return trimmed;
+    }
+    return `د. ${trimmed}`;
+  };
 
   // تحديث العيادة المختارة تلقائياً إذا تغيرت العيادات النشطة أو اعتذر الطبيب
   React.useEffect(() => {
@@ -69,6 +86,13 @@ export const BookingView: React.FC = () => {
   const currentSelection = activeClinicsWithDoctors.find(item => item.clinic.id === selectedClinicId);
   const selectedClinic = currentSelection?.clinic;
   const selectedDoctor = currentSelection?.assignedDoctor;
+
+  // الميعاد الفعلي المحدد للطبيب أو العيادة تلقائياً (دون تدخل أو اختيار عشوائي من المريض)
+  const effectiveWorkingHours =
+    selectedDoctor?.scheduleHours?.trim() ||
+    selectedClinic?.workingHours?.trim() ||
+    officialWorkingHours?.trim() ||
+    '9:00 ص - 5:00 م';
 
   // استخراج جدول حضور وتواجد الطبيب للأيام القادمة
   const upcomingDoctorSchedule = selectedDoctor 
@@ -139,7 +163,7 @@ export const BookingView: React.FC = () => {
       clinicId: selectedClinicId,
       doctorId: selectedDoctor!.id,
       date: actualTodayStr,
-      timeSlot,
+      timeSlot: effectiveWorkingHours,
       fee: selectedClinic?.fee || 30
     });
 
@@ -255,7 +279,7 @@ export const BookingView: React.FC = () => {
                       {assignedDoctor && (
                         <div className="mt-2.5 pt-2 border-t border-slate-200/60 dark:border-slate-700/60 text-xs text-emerald-800 dark:text-emerald-300 font-bold flex items-center gap-1.5">
                           <Stethoscope className="w-3.5 h-3.5 shrink-0" />
-                          <span>د. {assignedDoctor.name}</span>
+                          <span>{formatDoctorDisplayName(assignedDoctor.name)}</span>
                         </div>
                       )}
                     </div>
@@ -266,8 +290,8 @@ export const BookingView: React.FC = () => {
           )}
         </div>
 
-        {/* الخطوة 2: اختيار الطبيب والموعد */}
-        <div className="bg-white dark:bg-slate-800 rounded-2xl p-6 border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
+        {/* الخطوة 2: بطاقة الطبيب المدمجة وموعد العيادة المعتمد */}
+        <div className="bg-white dark:bg-slate-800 rounded-2xl p-5 sm:p-6 border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
               <span className="w-6 h-6 rounded-full bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-xs flex items-center justify-center font-bold">2</span>
@@ -278,265 +302,166 @@ export const BookingView: React.FC = () => {
             </div>
           </div>
 
-          {/* الطبيب المعالج المسؤول اليوم عن العيادة */}
-          <div className="space-y-3">
-            <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-              الطبيب المعالج المسؤول اليوم:
-            </label>
-            {selectedDoctor ? (
-              <div className="p-4 rounded-xl border border-emerald-600/70 bg-emerald-50/40 dark:bg-emerald-950/40 ring-1 ring-emerald-500/20 text-right">
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 flex items-center justify-center font-bold">
-                      <Stethoscope className="w-5 h-5" />
+          {selectedDoctor ? (
+            <div className="p-4 rounded-xl border border-emerald-600/60 bg-emerald-50/30 dark:bg-emerald-950/30 space-y-3.5 text-right">
+              {/* بيانات الطبيب الأساسية */}
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 flex items-center justify-center font-bold shrink-0">
+                    <Stethoscope className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">
+                      {formatDoctorDisplayName(selectedDoctor.name)}
                     </div>
-                    <div>
-                      <div className="font-bold text-sm sm:text-base text-slate-900 dark:text-white">د. {selectedDoctor.name}</div>
-                      <div className="text-xs text-slate-600 dark:text-slate-300">{selectedDoctor.title} • {selectedClinic?.name}</div>
+                    <div className="text-xs text-slate-600 dark:text-slate-300">
+                      {selectedDoctor.title} • {selectedClinic?.name}
                     </div>
                   </div>
-                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 dark:bg-emerald-900 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700">
-                    الطبيب المكلف اليوم
+                </div>
+                <span className="text-[11px] font-bold text-emerald-800 dark:text-emerald-300 shrink-0">
+                  الطبيب المكلف اليوم ✓
+                </span>
+              </div>
+
+              {/* التاريخ الفعلي + ميعاد عمل العيادة في شبكة مدمجة واحدة */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-emerald-200/60 dark:border-emerald-800/60">
+                <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold flex items-center gap-1">
+                      <Calendar className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span>تاريخ الكشف (اليوم الفعلي)</span>
+                    </div>
+                    <div className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white mt-0.5">
+                      {formatArabicFullDate(new Date())}
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 shrink-0">
+                    اليوم ✅
                   </span>
                 </div>
-                <div className="text-xs text-slate-600 dark:text-slate-300 flex items-center gap-2 mt-2 pt-2 border-t border-slate-200 dark:border-slate-700/60">
-                  <Clock className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>فترة التواجد والعمل: {selectedDoctor.scheduleHours}</span>
-                </div>
-                {selectedDoctor.scheduleDays && selectedDoctor.scheduleDays.length > 0 && (
-                  <div className="text-xs text-slate-600 dark:text-slate-300 flex items-center gap-2 mt-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>أيام العمل الأسبوعية المعتمدة: {selectedDoctor.scheduleDays.join('، ')}</span>
-                  </div>
-                )}
 
-                {/* بطاقة ورسالة ترحيبية توضيحية لسياسة مواعيد الحجز */}
-                <div className="mt-4 p-3 rounded-xl bg-gradient-to-r from-emerald-50 via-teal-50/60 to-emerald-50 dark:from-emerald-950/40 dark:via-teal-950/30 dark:to-emerald-950/40 border border-emerald-200/80 dark:border-emerald-800/70 shadow-xs">
-                  <div className="flex items-start gap-2.5">
-                    <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs mt-0.5">
-                      <Sparkles className="w-4 h-4" />
+                <div className="p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400 font-semibold flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                      <span>مواعيد عمل العيادة اليوم</span>
                     </div>
-                    <div className="flex-1 text-right">
-                      <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1">
-                        <h4 className="text-xs font-bold text-emerald-950 dark:text-emerald-200 flex items-center gap-1.5">
-                          <span>أهلاً ومرحباً بكم في العيادات التخصصية</span>
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-200/70 dark:bg-emerald-800 text-emerald-900 dark:text-emerald-100 font-semibold">
-                            إرشاد المواعيد
-                          </span>
-                        </h4>
-                        <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
-                          اليوم الحالي: {formatArabicFullDate(new Date())}
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-emerald-800/90 dark:text-emerald-300/90 leading-relaxed">
-                        نحيطكم علماً بأن <strong>الحجز الفعلي واستخراج التذكرة متاح حصرياً لليوم الحالي</strong>، بينما تُعرض بقية الأيام في جدول الطبيب أدناه <strong>للعلم المسبق فقط بمواعيد وأيام حضوره</strong>، وسيتم فتح حجز كل موعد تلقائياً في صباح نفس اليوم فور حلول تاريخه الفعلي.
-                      </p>
+                    <div className="font-bold text-xs sm:text-sm text-slate-900 dark:text-white mt-0.5" dir="rtl">
+                      {effectiveWorkingHours}
                     </div>
                   </div>
+                  <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 shrink-0">
+                    ميعاد معتمد ⏰
+                  </span>
+                </div>
+              </div>
+
+              {/* التوجيه الذكي للدور + زر عرض جدول الأسبوع القابل للطي */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 text-xs">
+                <div className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <Info className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>
+                    رقم دورك المتوقع: <strong className="font-mono text-emerald-800 dark:text-emerald-300">#{currentClinicBookingsCount + 1}</strong> — الدخول بأسبقية تأكيد التذكرة في الخزينة.
+                  </span>
                 </div>
 
-                {/* جدول أيام حضور وتواجد الطبيب (الأيام القادمة) */}
-                <div className="mt-3.5 pt-3 border-t border-emerald-200/60 dark:border-emerald-800/60 space-y-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-white">
-                      <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span>جدول مواعيد حضور وتواجد الطبيب بالعيادة (الأيام القادمة):</span>
-                    </div>
+                <button
+                  type="button"
+                  onClick={() => setShowUpcomingSchedule(prev => !prev)}
+                  className="self-start sm:self-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white dark:bg-slate-900 hover:bg-emerald-50 dark:hover:bg-slate-800 text-emerald-800 dark:text-emerald-300 border border-emerald-300/80 dark:border-emerald-700 text-[11px] font-bold transition-colors cursor-pointer shrink-0"
+                >
+                  <Calendar className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>{showUpcomingSchedule ? 'إخفاء جدول أيام الطبيب' : 'عرض جدول أيام الطبيب القادمة'}</span>
+                  {showUpcomingSchedule ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+              </div>
 
-                    {/* زر وتلميح (Tooltip) إرشادي تفاعلي بجانب الجدول */}
-                    <div className="relative group self-start sm:self-auto">
-                      <button
-                        type="button"
-                        aria-label="تلميح توضيحي لجدول المواعيد"
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300/80 dark:border-emerald-700 text-[11px] font-bold hover:bg-emerald-100 dark:hover:bg-emerald-900/60 transition cursor-help shadow-2xs"
-                      >
-                        <HelpCircle className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                        <span>تلميح: نظام حجز المواعيد</span>
-                      </button>
-
-                      {/* نافذة التلميح المنبثقة عند التمرير (Tooltip Card) */}
-                      <div className="absolute z-40 bottom-full sm:bottom-auto sm:top-full mt-1.5 mb-1.5 left-0 sm:left-auto sm:right-0 w-64 sm:w-72 max-w-[calc(100vw-2.5rem)] p-3 bg-slate-900/95 backdrop-blur-md text-white text-[11px] rounded-xl shadow-xl pointer-events-none opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-all duration-200 leading-relaxed text-right border border-slate-700">
-                        <div className="font-bold text-emerald-400 mb-1 flex items-center gap-1.5">
-                          <Info className="w-4 h-4 shrink-0" />
-                          <span>توضيح هام للمرضى:</span>
-                        </div>
-                        <ul className="space-y-1.5 text-slate-200 text-[10.5px]">
-                          <li className="flex items-start gap-1.5">
-                            <span className="text-emerald-400 font-bold shrink-0">✅</span>
-                            <span><strong>اليوم الحالي:</strong> متاح للحجز فوراً حتى استيفاء السعة اليومية.</span>
-                          </li>
-                          <li className="flex items-start gap-1.5">
-                            <span className="text-amber-400 font-bold shrink-0">🔒</span>
-                            <span><strong>الأيام القادمة:</strong> تظهر لمعرفة جدول حضور الطبيب مقدماً فقط، ويُفتح حجزها تلقائياً صباح كل يوم.</span>
-                          </li>
-                        </ul>
-                        <div className="text-[10px] text-slate-400 mt-2 pt-1.5 border-t border-slate-700/80">
-                          نظام مستشفى وعيادات متكامل يضمن العدالة ومنع الحجوزات الوهمية المسبقة.
-                        </div>
-                      </div>
-                    </div>
+              {/* جدول الـ 7 أيام القادمة (يفتح فقط عند الطلب لعدم تكديس الشاشة) */}
+              {showUpcomingSchedule && (
+                <div className="pt-3 border-t border-emerald-200/60 dark:border-emerald-800/60 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600 dark:text-slate-300">
+                    <span>
+                      أيام تواجد الطبيب المعتمدة: <strong>{selectedDoctor.scheduleDays?.join('، ') || 'يومياً'}</strong>
+                    </span>
+                    <span className="text-emerald-800 dark:text-emerald-300 font-semibold">
+                      * الحجز متاح لليوم الحالي فقط ويُفتح تلقائياً صباح كل يوم عمل
+                    </span>
                   </div>
 
-                  {/* قائمة كروت الأيام القادمة مع تلميحات لكل يوم */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
                     {upcomingDoctorSchedule.map((item) => {
                       const isToday = item.isToday;
                       const isScheduled = item.isScheduled;
 
-                      // نص التلميح المخصص لكل بطاقة
-                      const cardTooltip = isToday
-                        ? item.badgeType === 'available'
-                          ? '✅ اليوم الحالي: متاح للحجز الآن واستخراج تذكرة الكشف'
-                          : `⚠️ اليوم الحالي: ${item.statusText}`
-                        : isScheduled
-                        ? `🔒 للعلم فقط: الطبيب متواجد بالعيادة يوم ${item.dayName} (${item.dayMonthStr}). الحجز مقفل حالياً ويُفتح تلقائياً في نفس اليوم.`
-                        : `✕ إجازة: الطبيب غير متواجد بالعيادة يوم ${item.dayName}`;
-
                       return (
                         <div
                           key={item.dateStr}
-                          title={cardTooltip}
-                          className={`relative group p-2.5 rounded-xl border text-right transition-all flex flex-col justify-between cursor-help ${
+                          className={`p-2.5 rounded-xl border text-right flex flex-col justify-between ${
                             isToday
                               ? item.badgeType === 'available'
-                                ? 'border-emerald-500 bg-emerald-500/10 dark:bg-emerald-950/60 ring-2 ring-emerald-500/30 shadow-xs'
+                                ? 'border-emerald-500 bg-emerald-500/10 dark:bg-emerald-950/60 ring-1 ring-emerald-500/30'
                                 : 'border-amber-400 bg-amber-500/10 dark:bg-amber-950/40'
                               : isScheduled
-                              ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-2xs hover:border-emerald-400/60'
+                              ? 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800'
                               : 'border-slate-200/50 dark:border-slate-800/80 bg-slate-100/50 dark:bg-slate-900/30 opacity-60'
                           }`}
                         >
-                          {/* التلميح التفاعلي الصغير عند الوقوف فوق الكارت */}
-                          <div className="absolute z-30 bottom-full mb-1.5 right-1/2 translate-x-1/2 w-44 p-2 bg-slate-900/95 text-white text-[10px] rounded-lg shadow-lg pointer-events-none opacity-0 group-hover:opacity-100 transition-opacity duration-150 text-center leading-tight border border-slate-700">
-                            {cardTooltip}
-                            <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900/95"></div>
-                          </div>
-
                           <div>
-                            <div className="flex items-center justify-between mb-1">
+                            <div className="flex items-center justify-between mb-0.5">
                               <span className="font-bold text-[11px] text-slate-900 dark:text-white">
                                 {item.dayName}
                               </span>
-                              {isToday ? (
-                                <span className="px-1.5 py-0.2 rounded text-[9px] font-black bg-emerald-600 text-white shadow-2xs">
+                              {isToday && (
+                                <span className="text-[9px] font-black text-emerald-700 dark:text-emerald-300">
                                   اليوم
-                                </span>
-                              ) : isScheduled ? (
-                                <span className="px-1 py-0.2 rounded text-[8.5px] font-bold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/60">
-                                  للعلم فقط
-                                </span>
-                              ) : (
-                                <span className="text-[10px] text-slate-400 font-medium">
-                                  {item.dayMonthStr}
                                 </span>
                               )}
                             </div>
-                            <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                            <div className="text-[11px] font-bold text-slate-600 dark:text-slate-300">
                               {item.dayMonthStr}
                             </div>
                           </div>
 
-                          <div className="mt-2 pt-1.5 border-t border-slate-200/60 dark:border-slate-700/60 text-[10px]">
+                          <div className="mt-1.5 pt-1 border-t border-slate-200/60 dark:border-slate-700/60 text-[10px]">
                             {isToday ? (
                               item.badgeType === 'available' ? (
-                                <div className="font-bold text-emerald-800 dark:text-emerald-300 flex items-center gap-1">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                                  <span>متاح للحجز ✅</span>
-                                </div>
+                                <span className="font-bold text-emerald-800 dark:text-emerald-300">متاح للحجز ✅</span>
                               ) : (
-                                <div className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1">
-                                  <AlertCircle className="w-3 h-3 text-amber-600 shrink-0" />
-                                  <span className="truncate">{item.statusText}</span>
-                                </div>
+                                <span className="font-bold text-amber-800 dark:text-amber-300 truncate block">{item.statusText}</span>
                               )
                             ) : isScheduled ? (
-                              <div className="font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1">
-                                <Lock className="w-3 h-3 text-amber-600 shrink-0" />
-                                <div className="leading-tight">
-                                  <div className="font-bold text-[10px] text-slate-800 dark:text-slate-200">متواجد بالعيادة</div>
-                                  <div className="text-[9px] text-amber-700 dark:text-amber-400 font-semibold">للعلم بجدوله فقط</div>
-                                </div>
-                              </div>
+                              <span className="font-semibold text-amber-700 dark:text-amber-400 flex items-center gap-1">
+                                <Lock className="w-2.5 h-2.5 shrink-0" />
+                                <span>للعلم بجدوله</span>
+                              </span>
                             ) : (
-                              <div className="text-slate-600 dark:text-slate-400 text-[10px]">
-                                ✕ إجازة الطبيب
-                              </div>
+                              <span className="text-slate-500 dark:text-slate-400">✕ إجازة</span>
                             )}
                           </div>
                         </div>
                       );
                     })}
                   </div>
-
-                  {/* تنبيه إرشادي للمريض يوضح مواعيد فتح الحجز */}
-                  <div className="p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-[11px] text-slate-600 dark:text-slate-300 flex items-start gap-2">
-                    <Info className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-                    <span className="leading-relaxed">
-                      <strong>تذكير بجدول الطبيب:</strong> الحجز الإلكتروني متاح حصراً لليوم الحالي ({formatArabicFullDate(new Date())}). الأيام القادمة المجدولة للطبيب معروضة للاطلاع المسبق على جدول حضوره، ويتم فتح حجزها تلقائياً مع بداية كل يوم وفقاً للتاريخ الفعلي.
-                    </span>
-                  </div>
                 </div>
-              </div>
-            ) : (
-              <div className="p-4 text-xs text-slate-500 bg-slate-50 dark:bg-slate-700/30 rounded-xl border border-slate-200 dark:border-slate-700">
-                يرجى اختيار العيادة أعلاه لعرض الطبيب المكلف.
-              </div>
-            )}
+              )}
+            </div>
+          ) : (
+            <div className="p-4 text-xs text-slate-500 bg-slate-50 dark:bg-slate-700/30 rounded-xl border border-slate-200 dark:border-slate-700">
+              يرجى اختيار العيادة أعلاه لعرض الطبيب المكلف.
+            </div>
+          )}
 
-            {/* تنبيه توافر العيادة الصارم بناءً على الركائز الأربعة */}
-            {availabilityStatus && !availabilityStatus.allowed && (
-              <div className="p-3.5 bg-rose-50 dark:bg-rose-950/60 rounded-xl border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2.5">
-                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                <div>
-                  <strong className="block mb-0.5">الحجز غير متاح في هذا التاريخ أو التوقيت:</strong>
-                  <span>{availabilityStatus.reason}</span>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* التاريخ الفعلي وفترة الحضور */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                <Calendar className="w-4 h-4 text-emerald-600" />
-                <span>تاريخ الكشف الفعلي (حجز اليوم الحالي فقط):</span>
-              </label>
-              <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 flex items-center justify-between">
-                <div>
-                  <div className="font-bold text-sm text-slate-900 dark:text-white">
-                    {formatArabicFullDate(new Date())}
-                  </div>
-                  <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold mt-0.5 flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>حجز مباشر لليوم الفعلي الحالي</span>
-                  </div>
-                </div>
-                <span className="px-2.5 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 text-xs font-bold border border-emerald-300 dark:border-emerald-800">
-                  اليوم الفعلي ✅
-                </span>
+          {/* تنبيه توافر العيادة الصارم بناءً على الركائز الأربعة */}
+          {availabilityStatus && !availabilityStatus.allowed && (
+            <div className="p-3.5 bg-rose-50 dark:bg-rose-950/60 rounded-xl border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div>
+                <strong className="block mb-0.5">الحجز غير متاح في هذا التاريخ أو التوقيت:</strong>
+                <span>{availabilityStatus.reason}</span>
               </div>
             </div>
-
-            <div>
-              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5 flex items-center gap-1.5">
-                <Clock className="w-4 h-4 text-emerald-600" />
-                <span>الفترة الزمنية المفضلة للحضور بالعيادة:</span>
-              </label>
-              <select
-                value={timeSlot}
-                onChange={(e) => setTimeSlot(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white text-sm focus:ring-2 focus:ring-emerald-500 font-medium"
-              >
-                <option value="01:30 ظهراً">01:30 ظهراً - فترة مبكرة</option>
-                <option value="03:00 عصراً">03:00 عصراً</option>
-                <option value="04:30 عصراً">04:30 عصراً</option>
-                <option value="06:00 مساءً">06:00 مساءً</option>
-                <option value="07:30 مساءً">07:30 مساءً</option>
-                <option value="09:00 مساءً">09:00 مساءً - فترة مسائية</option>
-              </select>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* الخطوة 3: بيانات المريض الشخصية */}
@@ -606,6 +531,8 @@ export const BookingView: React.FC = () => {
             </div>
             <div className="text-xs text-emerald-200/80 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>التاريخ: {formatArabicFullDate(new Date())}</span>
+              <span>•</span>
+              <span>مواعيد العيادة: {effectiveWorkingHours}</span>
               <span>•</span>
               <span>رسوم الكشف: {selectedClinic?.fee} ج.م</span>
               <span>•</span>

@@ -6,7 +6,22 @@ export type BookingStatus = 'waiting' | 'in-progress' | 'completed' | 'cancelled
 
 export type PaymentStatus = 'paid' | 'unpaid' | 'exempt';
 
-export type PaymentMethod = 'cash' | 'insurance' | 'charity_exempt';
+export type PaymentMethod = 'cash' | 'insurance' | 'charity_exempt' | 'consultation';
+
+export interface ConsultationStamp {
+  phone: string;
+  patientName?: string;
+  clinicId: string;
+  examDate: string;
+  updatedAt: string;
+}
+
+export interface ConsultationRegistryState {
+  windowDays: number;
+  clinicWindows?: Record<string, number>;
+  stamps: ConsultationStamp[];
+  consultationBookingIds: string[];
+}
 
 export interface Clinic {
   id: string;

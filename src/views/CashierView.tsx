@@ -56,7 +56,9 @@ export const CashierView: React.FC = () => {
     getActiveClinicsForBooking,
     checkClinicAvailabilityStatus,
     navigate,
-    setSelectedTicket
+    setSelectedTicket,
+    checkConsultationEligibility,
+    consultationRegistry
   } = useApp();
   const [activeTab, setActiveTab] = useState<'unpaid' | 'paid' | 'financial-reports' | 'clinic-fees' | 'daily-clinics'>('unpaid');
   const [searchQuery, setSearchQuery] = useState('');
@@ -105,7 +107,7 @@ export const CashierView: React.FC = () => {
   const [walkInClinicId, setWalkInClinicId] = useState<string>(activeClinicsWithDoctors[0]?.clinic.id || '');
   const [walkInName, setWalkInName] = useState('');
   const [walkInPhone, setWalkInPhone] = useState('');
-  const [walkInPaymentMode, setWalkInPaymentMode] = useState<'cash' | 'insurance' | 'charity_exempt' | 'unpaid'>('cash');
+  const [walkInPaymentMode, setWalkInPaymentMode] = useState<'cash' | 'insurance' | 'charity_exempt' | 'consultation' | 'unpaid'>('cash');
   const [walkInError, setWalkInError] = useState('');
   const [isWalkInSubmitting, setIsWalkInSubmitting] = useState(false);
   const [walkInCreatedBooking, setWalkInCreatedBooking] = useState<Booking | null>(null);
@@ -119,6 +121,186 @@ export const CashierView: React.FC = () => {
       setWalkInClinicId('');
     }
   }, [activeClinicsWithDoctors, walkInClinicId]);
+
+  // حالة نافذة الاستشارات المجانية المخصصة (فحص فوري بالاسم ورقم الهاتف وإدخال للطابور)
+  const [isConsultationModalOpen, setIsConsultationModalOpen] = useState(false);
+  const [consultPatientName, setConsultPatientName] = useState('');
+  const [consultPatientPhone, setConsultPatientPhone] = useState('');
+  const [consultError, setConsultError] = useState('');
+  const [isConsultSubmitting, setIsConsultSubmitting] = useState(false);
+  const [consultCreatedBooking, setConsultCreatedBooking] = useState<Booking | null>(null);
+
+  const handleResetConsultationModal = () => {
+    setConsultPatientName('');
+    setConsultPatientPhone('');
+    setConsultError('');
+    setIsConsultSubmitting(false);
+    setConsultCreatedBooking(null);
+  };
+
+  // البحث الذكي عن المريض واستشاراته المتاحة بمجرد كتابة رقم الهاتف أو الاسم
+  const cleanConsultPhone = consultPatientPhone.replace(/\D/g, '');
+  const cleanConsultNameQuery = consultPatientName.trim().toLowerCase();
+
+  // اقتراحات المرضى المطابقين للاسم (في حال كتب الكاشير الاسم أولاً قبل الرقم)
+  const matchingPatientsByName = React.useMemo(() => {
+    if (cleanConsultNameQuery.length < 2) return [];
+    const map = new Map<string, { name: string; phone: string }>();
+
+    for (const stamp of consultationRegistry.stamps) {
+      if (stamp.patientName && stamp.patientName.toLowerCase().includes(cleanConsultNameQuery)) {
+        map.set(stamp.phone, { name: stamp.patientName, phone: stamp.phone });
+      }
+    }
+    for (const b of bookings) {
+      const pPhone = b.patientPhone.replace(/\D/g, '');
+      if (pPhone.length >= 10 && b.patientName.toLowerCase().includes(cleanConsultNameQuery)) {
+        if (!map.has(pPhone)) {
+          map.set(pPhone, { name: b.patientName, phone: pPhone });
+        }
+      }
+    }
+    return Array.from(map.values()).slice(0, 5);
+  }, [cleanConsultNameQuery, consultationRegistry.stamps, bookings]);
+
+  // إذا كتب الكاشير رقم الهاتف، نبحث عن اسم المريض المسجل مسبقاً لعرضه أو تعبئته
+  const detectedPatientNameFromPhone = React.useMemo(() => {
+    if (cleanConsultPhone.length < 10) return '';
+    const fromStamp = consultationRegistry.stamps.find(
+      s => s.phone === cleanConsultPhone && s.patientName
+    )?.patientName;
+    if (fromStamp) return fromStamp;
+    const fromBooking = bookings.find(
+      b => b.patientPhone.replace(/\D/g, '') === cleanConsultPhone
+    )?.patientName;
+    return fromBooking || '';
+  }, [cleanConsultPhone, consultationRegistry.stamps, bookings]);
+
+  // تحديد الرقم الفعلي المراد فحص استشاراته (سواء كتبه الكاشير مباشرة أو تطابق مع الاسم المكتوب)
+  const effectiveLookupPhone = React.useMemo(() => {
+    if (cleanConsultPhone.length >= 10) return cleanConsultPhone;
+    if (matchingPatientsByName.length === 1) return matchingPatientsByName[0].phone;
+    return '';
+  }, [cleanConsultPhone, matchingPatientsByName]);
+
+  // قائمة العيادات التي للمريض فيها استشارة مجانية سارية الآن
+  const eligibleConsultationClinics = React.useMemo(() => {
+    if (!effectiveLookupPhone || effectiveLookupPhone.length < 10) return [];
+    return clinics
+      .map(clinic => {
+        const elig = checkConsultationEligibility(effectiveLookupPhone, clinic.id);
+        if (!elig.eligible) return null;
+        const activePair = activeClinicsWithDoctors.find(item => item.clinic.id === clinic.id);
+        const fallbackDoc = doctors.find(d => d.clinicId === clinic.id);
+        const existingUnpaidToday = bookings.find(
+          b =>
+            b.date === getLocalDateStr() &&
+            b.clinicId === clinic.id &&
+            b.patientPhone.replace(/\D/g, '') === effectiveLookupPhone &&
+            b.status !== 'cancelled' &&
+            b.paymentStatus === 'unpaid'
+        );
+        return {
+          clinic,
+          assignedDoctor: activePair?.assignedDoctor || fallbackDoc || null,
+          isOpenToday: Boolean(activePair),
+          examDate: elig.examDate || '',
+          daysRemaining: elig.daysRemaining ?? 0,
+          existingUnpaidToday
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
+  }, [effectiveLookupPhone, clinics, checkConsultationEligibility, activeClinicsWithDoctors, doctors, bookings]);
+
+  // تفعيل وإصدار تذكرة الاستشارة المجانية لعيادة محددة بضغطة واحدة
+  const handleActivateClinicConsultation = async (clinicId: string) => {
+    setConsultError('');
+    const targetPhone = effectiveLookupPhone || cleanConsultPhone;
+    const finalName = (consultPatientName.trim() || detectedPatientNameFromPhone).trim();
+
+    const nameCheck = validateTripleName(finalName);
+    if (!nameCheck.valid) {
+      setConsultError(nameCheck.error || 'يرجى كتابة اسم المريض ثلاثياً لتسجيل تذكرة الاستشارة.');
+      return;
+    }
+
+    const phoneCheck = validateEgyptianPhone(targetPhone);
+    if (!phoneCheck.valid) {
+      setConsultError(phoneCheck.error || 'يرجى إدخال رقم هاتف صحيح للمريض.');
+      return;
+    }
+
+    // 1. إذا كان للمريض حجز اليوم غير مسدد في نفس العيادة، نؤكده فوراً كاستشارة مجانية (٠ ج.م)
+    const existingUnpaid = bookings.find(
+      b =>
+        b.date === todayStr &&
+        b.clinicId === clinicId &&
+        b.patientPhone.replace(/\D/g, '') === targetPhone &&
+        b.status !== 'cancelled' &&
+        b.paymentStatus === 'unpaid'
+    );
+
+    if (existingUnpaid) {
+      const ok = updatePaymentStatus(existingUnpaid.id, 'exempt', 'consultation');
+      if (ok) {
+        const updatedBooking: Booking = {
+          ...existingUnpaid,
+          paymentStatus: 'exempt',
+          paymentMethod: 'consultation',
+          fee: 0,
+          paidAt: new Date().toISOString()
+        };
+        setConsultCreatedBooking(updatedBooking);
+        setActiveTab('paid');
+      }
+      return;
+    }
+
+    // 2. إذا حضر المريض مباشرة للكاشير بدون حجز اليوم، ننشئ له تذكرة استشارة مجانية ونعتمدها فوراً
+    const selectedPair = activeClinicsWithDoctors.find(item => item.clinic.id === clinicId);
+    const fallbackClinic = clinics.find(c => c.id === clinicId);
+    const fallbackDoctor = selectedPair?.assignedDoctor || doctors.find(d => d.clinicId === clinicId);
+
+    if (!fallbackClinic || !fallbackDoctor) {
+      setConsultError('هذه العيادة لا يوجد بها طبيب مسجل حالياً.');
+      return;
+    }
+
+    const avail = checkClinicAvailabilityStatus(fallbackClinic.id, fallbackDoctor.id, todayStr);
+    if (avail && !avail.allowed) {
+      setConsultError(avail.reason || 'العيادة المختارة غير متاحة لاستقبال حالات اليوم.');
+      return;
+    }
+
+    setIsConsultSubmitting(true);
+    const res = await createBooking({
+      patientName: finalName,
+      patientPhone: targetPhone,
+      clinicId: fallbackClinic.id,
+      doctorId: fallbackDoctor.id,
+      date: todayStr,
+      timeSlot: fallbackDoctor.scheduleHours || fallbackClinic.workingHours || '9:00 ص - 5:00 م',
+      fee: 0,
+      notes: 'دخول استشارة مجانية معتمدة من الخزينة'
+    });
+    setIsConsultSubmitting(false);
+
+    if (!res.success || !res.booking) {
+      setConsultError(res.error || 'تعذر إصدار تذكرة الاستشارة حالياً.');
+      return;
+    }
+
+    const ok = updatePaymentStatus(res.booking.id, 'exempt', 'consultation');
+    const finalBooking: Booking = {
+      ...res.booking,
+      paymentStatus: ok ? 'exempt' : res.booking.paymentStatus,
+      paymentMethod: ok ? 'consultation' : res.booking.paymentMethod,
+      fee: 0,
+      paidAt: new Date().toISOString()
+    };
+    setActiveTab('paid');
+    setConsultCreatedBooking(finalBooking);
+  };
 
   // حالة قارئ الباركود ومسح تذاكر الخزينة
   const [isScannerOpen, setIsScannerOpen] = useState(false);
@@ -222,7 +404,8 @@ export const CashierView: React.FC = () => {
     .reduce((acc, b) => acc + b.fee, 0);
 
   const insuranceCount = paidBookings.filter(b => b.paymentMethod === 'insurance').length;
-  const charityExemptCount = paidBookings.filter(b => b.paymentStatus === 'exempt').length;
+  const consultationCount = paidBookings.filter(b => b.paymentMethod === 'consultation').length;
+  const charityExemptCount = paidBookings.filter(b => b.paymentStatus === 'exempt' && b.paymentMethod !== 'consultation').length;
 
   const currentList = activeTab === 'unpaid' ? unpaidBookings : paidBookings;
 
@@ -383,7 +566,7 @@ export const CashierView: React.FC = () => {
       clinicId: selectedPair.clinic.id,
       doctorId: selectedPair.assignedDoctor.id,
       date: todayStr,
-      timeSlot: 'حجز حضوري بالخزينة',
+      timeSlot: selectedPair.assignedDoctor.scheduleHours || selectedPair.clinic.workingHours || '9:00 ص - 5:00 م',
       fee: selectedPair.clinic.fee || 50,
       notes: 'حجز حضوري مباشر عن طريق الكاشير'
     });
@@ -396,13 +579,14 @@ export const CashierView: React.FC = () => {
 
     let finalBooking: Booking = res.booking;
     if (walkInPaymentMode !== 'unpaid' && canConfirmPayments) {
-      const targetStatus: PaymentStatus = walkInPaymentMode === 'charity_exempt' ? 'exempt' : 'paid';
+      const targetStatus: PaymentStatus = (walkInPaymentMode === 'charity_exempt' || walkInPaymentMode === 'consultation') ? 'exempt' : 'paid';
       const ok = updatePaymentStatus(res.booking.id, targetStatus, walkInPaymentMode);
       if (ok) {
         finalBooking = {
           ...res.booking,
           paymentStatus: targetStatus,
           paymentMethod: walkInPaymentMode,
+          fee: walkInPaymentMode === 'consultation' ? 0 : res.booking.fee,
           paidAt: new Date().toISOString()
         };
         setActiveTab('paid');
@@ -433,7 +617,7 @@ export const CashierView: React.FC = () => {
 👨‍⚕️ الطبيب: ${b.doctorName}
 📅 الموعد: ${b.date} (${b.timeSlot})
 🔢 رقم دورك بالطابور: #${b.queuePosition}
-💵 رسوم الكشف: ${b.paymentStatus === 'exempt' ? 'معفى خيري' : b.fee + ' ج.م'}
+💵 رسوم الكشف: ${b.paymentMethod === 'consultation' ? 'استشارة مجانية (٠ ج.م)' : b.paymentStatus === 'exempt' ? 'معفى خيري' : b.fee + ' ج.م'}
 
 نسعد بخدمتكم في عيادات الجمعية الشرعية ونتمنى لكم دوام الصحة والعافية.`;
 
@@ -473,6 +657,19 @@ export const CashierView: React.FC = () => {
             >
               <FileText className="w-4 h-4 text-emerald-700 dark:text-emerald-400" />
               <span>سجل المريض</span>
+            </button>
+
+            {/* زر مخصص لفحص وتسجيل الاستشارات المجانية بالاسم ورقم الهاتف */}
+            <button
+              onClick={() => {
+                handleResetConsultationModal();
+                setIsConsultationModalOpen(true);
+              }}
+              className="inline-flex items-center gap-1.5 bg-teal-700 hover:bg-teal-800 text-white px-3.5 py-2 rounded-lg font-bold text-xs border border-teal-600 shadow-2xs transition-colors cursor-pointer"
+              title="فحص فوري بالاسم ورقم الهاتف لمعرفة العيادات المتاح للمريض فيها استشارة مجانية وتأكيد دخوله"
+            >
+              <Stethoscope className="w-4 h-4 text-teal-200" />
+              <span>الاستشارات المجانية</span>
             </button>
 
             {/* زر حجز مباشر لمريض حضوري من عند الكاشير (بدون هاتف ذكي) */}
@@ -566,23 +763,28 @@ export const CashierView: React.FC = () => {
         </div>
 
         {/* شريط الإحصائيات المالية الموحد (Tabular Ledger) */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-200 dark:divide-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
-          <div className="p-4 sm:px-6 flex items-baseline justify-between">
+        <div className="grid grid-cols-2 sm:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x sm:divide-x-reverse divide-slate-200 dark:divide-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
+          <div className="p-4 sm:px-5 flex items-baseline justify-between">
             <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">تحصيل نقدي بالخزينة</span>
             <span className="text-lg font-extrabold text-slate-900 dark:text-white font-mono">{cashRevenue} ج.م</span>
           </div>
 
-          <div className="p-4 sm:px-6 flex items-baseline justify-between">
+          <div className="p-4 sm:px-5 flex items-baseline justify-between">
             <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">حالات تأمين طبي</span>
             <span className="text-lg font-extrabold text-slate-900 dark:text-white font-mono">{insuranceCount}</span>
           </div>
 
-          <div className="p-4 sm:px-6 flex items-baseline justify-between">
+          <div className="p-4 sm:px-5 flex items-baseline justify-between">
+            <span className="text-xs font-semibold text-teal-700 dark:text-teal-400">استشارات مجانية</span>
+            <span className="text-lg font-extrabold text-teal-800 dark:text-teal-300 font-mono">{consultationCount}</span>
+          </div>
+
+          <div className="p-4 sm:px-5 flex items-baseline justify-between">
             <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">إعفاءات تكافل خيري</span>
             <span className="text-lg font-extrabold text-slate-900 dark:text-white font-mono">{charityExemptCount}</span>
           </div>
 
-          <div className="p-4 sm:px-6 flex items-baseline justify-between">
+          <div className="p-4 sm:px-5 flex items-baseline justify-between col-span-2 sm:col-span-1">
             <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">إجمالي المؤكد بالطابور</span>
             <span className="text-lg font-extrabold text-emerald-800 dark:text-emerald-400 font-mono">{paidBookings.length}</span>
           </div>
@@ -641,7 +843,11 @@ export const CashierView: React.FC = () => {
               </div>
             ) : (
               <div className="divide-y divide-slate-100 dark:divide-slate-800">
-                {filteredList.map(b => (
+                {filteredList.map(b => {
+                  const consultationEligibility = b.paymentStatus === 'unpaid'
+                    ? checkConsultationEligibility(b.patientPhone, b.clinicId)
+                    : null;
+                  return (
                   <div
                     key={b.id}
                     className="p-4 hover:bg-slate-50/70 dark:hover:bg-slate-750 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3.5 md:gap-4 text-xs"
@@ -656,21 +862,31 @@ export const CashierView: React.FC = () => {
                           ({maskPhoneNumber(b.patientPhone)})
                         </span>
                         <span className="font-bold text-emerald-800 dark:text-emerald-300 sm:mr-2">
-                          رسوم الكشف: {b.fee} ج.م
+                          رسوم الكشف: {b.paymentMethod === 'consultation' ? '٠ ج.م (استشارة)' : `${b.fee} ج.م`}
                         </span>
                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                           b.paymentStatus === 'paid'
                             ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                            : b.paymentMethod === 'consultation'
+                            ? 'bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300 border border-teal-300 dark:border-teal-700'
                             : b.paymentStatus === 'exempt'
                             ? 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                             : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                         }`}>
                           {b.paymentStatus === 'paid' 
                             ? (b.paymentMethod === 'insurance' ? 'تأمين طبي' : 'مسدد نقداً') 
+                            : b.paymentMethod === 'consultation'
+                            ? 'استشارة مجانية ✓'
                             : b.paymentStatus === 'exempt' 
                             ? 'إعفاء خيري' 
                             : 'بانتظار التأكيد'}
                         </span>
+                        {consultationEligibility?.eligible && (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-teal-100 dark:bg-teal-950/90 text-teal-800 dark:text-teal-200 border border-teal-400 dark:border-teal-700 flex items-center gap-1 shadow-2xs">
+                            <Stethoscope className="w-3 h-3 text-teal-700 dark:text-teal-300" />
+                            <span>مستحق لاستشارة مجانية (كشف: {consultationEligibility.examDate} • متبقي {consultationEligibility.daysRemaining} يوم)</span>
+                          </span>
+                        )}
                       </div>
 
                       <div className="text-slate-600 dark:text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
@@ -737,7 +953,25 @@ export const CashierView: React.FC = () => {
                               <span>تأمين</span>
                             </button>
 
-                            {/* 3) إعفاء خيري */}
+                            {/* 3) استشارة مجانية (ذاتية المسح بعد الدخول) */}
+                            <button
+                              onClick={() => handleProcessPayment(b.id, 'exempt', 'consultation')}
+                              className={`px-3 py-2 rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-all ${
+                                consultationEligibility?.eligible
+                                  ? 'bg-teal-600 hover:bg-teal-700 text-white ring-2 ring-teal-400/50 shadow-sm'
+                                  : 'bg-teal-50 dark:bg-teal-950/60 hover:bg-teal-600 text-teal-800 dark:text-teal-200 hover:text-white border border-teal-300 dark:border-teal-800'
+                              }`}
+                              title={
+                                consultationEligibility?.eligible
+                                  ? `المريض مستحق لاستشارة مجانية (كشف يوم ${consultationEligibility.examDate}) — سيتم مسح الختم تلقائياً فور الدخول`
+                                  : 'دخول استشارة مجانية (٠ ج.م) — يتم مسح ختم الاستشارة تلقائياً فور الاستخدام'
+                              }
+                            >
+                              <Stethoscope className="w-3.5 h-3.5" />
+                              <span>{consultationEligibility?.eligible ? 'استشارة مجانية ✓ (٠ ج.م)' : 'استشارة (٠ ج.م)'}</span>
+                            </button>
+
+                            {/* 4) إعفاء خيري */}
                             <button
                               onClick={() => handleProcessPayment(b.id, 'exempt', 'charity_exempt')}
                               className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold text-xs flex items-center gap-1.5 cursor-pointer"
@@ -776,7 +1010,8 @@ export const CashierView: React.FC = () => {
                       )}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -805,9 +1040,9 @@ export const CashierView: React.FC = () => {
                   'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
                   'العيادة': sanitizeSpreadsheetCell(b.clinicName),
                   'الطبيب': sanitizeSpreadsheetCell(b.doctorName),
-                  'قيمة الكشف (ج.م)': b.fee,
-                  'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'بانتظار السداد',
-                  'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'charity_exempt' ? 'إعفاء خيري' : '-'
+                  'قيمة الكشف (ج.م)': b.paymentMethod === 'consultation' ? 0 : b.fee,
+                  'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'بانتظار السداد',
+                  'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentMethod === 'charity_exempt' ? 'إعفاء خيري' : '-'
                 }));
                 const ws = XLSX.utils.json_to_sheet(rows);
                 const wb = XLSX.utils.book_new();
@@ -821,7 +1056,7 @@ export const CashierView: React.FC = () => {
             </button>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
             <div className="p-4 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800">
               <div className="text-xs text-slate-500">إجمالي التحصيل النقدي الفعلي</div>
               <div className="text-2xl font-extrabold text-emerald-800 dark:text-emerald-300 font-mono mt-1">
@@ -832,6 +1067,12 @@ export const CashierView: React.FC = () => {
               <div className="text-xs text-slate-500">عدد حالات التأمين الطبي</div>
               <div className="text-2xl font-extrabold text-blue-800 dark:text-blue-300 font-mono mt-1">
                 {insuranceCount} حالة
+              </div>
+            </div>
+            <div className="p-4 rounded-2xl bg-teal-50/60 dark:bg-teal-950/30 border border-teal-200 dark:border-teal-800">
+              <div className="text-xs text-slate-500">عدد حالات الاستشارة المجانية</div>
+              <div className="text-2xl font-extrabold text-teal-800 dark:text-teal-300 font-mono mt-1">
+                {consultationCount} حالة
               </div>
             </div>
             <div className="p-4 rounded-2xl bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800">
@@ -1030,6 +1271,290 @@ export const CashierView: React.FC = () => {
         </div>
       )}
 
+      {/* نافذة الاستشارات المجانية المخصصة (فحص فوري بالاسم ورقم الهاتف وتأكيد الدخول) */}
+      <AnimatePresence>
+        {isConsultationModalOpen && (
+          <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 15 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 15 }}
+              className="bg-white dark:bg-slate-800 w-full max-w-xl rounded-3xl border border-teal-200 dark:border-teal-800 shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
+            >
+              {/* رأس النافذة */}
+              <div className="p-4 sm:p-5 border-b border-teal-100 dark:border-slate-700 flex items-center justify-between bg-teal-50/80 dark:bg-slate-850">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-teal-600 text-white flex items-center justify-center shadow-xs">
+                    <Stethoscope className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-900 dark:text-white">
+                      بوابة فحص وتأكيد الاستشارات المجانية
+                    </h3>
+                    <p className="text-[11px] text-slate-600 dark:text-slate-400">
+                      اكتب اسم المريض ورقم تليفونه ليظهر لك فوراً العيادات المتاح له فيها استشارة مجانية
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIsConsultationModalOpen(false)}
+                  className="w-8 h-8 rounded-xl bg-white dark:bg-slate-700 hover:bg-slate-100 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300 flex items-center justify-center transition-colors cursor-pointer"
+                  title="إغلاق"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-5 overflow-y-auto space-y-4">
+                {!consultCreatedBooking ? (
+                  <div className="space-y-4">
+                    {consultError && (
+                      <div className="p-3 rounded-xl bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800 text-rose-800 dark:text-rose-200 text-xs flex items-center gap-2">
+                        <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
+                        <span>{consultError}</span>
+                      </div>
+                    )}
+
+                    {/* حقلا إدخال اسم المريض ورقم الهاتف */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                          1. اسم المريض:
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={consultPatientName}
+                            onChange={(e) => {
+                              setConsultPatientName(e.target.value);
+                              setConsultError('');
+                            }}
+                            placeholder={detectedPatientNameFromPhone || 'اكتب اسم المريض ثلاثياً...'}
+                            className="w-full pl-3 pr-9 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white focus:ring-2 focus:ring-teal-500"
+                          />
+                          <User className="w-4 h-4 text-slate-400 absolute right-3 top-3" />
+                        </div>
+                        {detectedPatientNameFromPhone && !consultPatientName && (
+                          <button
+                            type="button"
+                            onClick={() => setConsultPatientName(detectedPatientNameFromPhone)}
+                            className="text-[11px] font-bold text-teal-700 dark:text-teal-300 hover:underline cursor-pointer"
+                          >
+                            الاسم المسجل لهذا الرقم: {detectedPatientNameFromPhone} (اضغط للتعبئة)
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                          2. رقم تليفون المريض:
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="tel"
+                            dir="ltr"
+                            autoFocus
+                            value={consultPatientPhone}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setConsultPatientPhone(val);
+                              setConsultError('');
+                              const clean = val.replace(/\D/g, '');
+                              if (clean.length >= 10 && !consultPatientName.trim()) {
+                                const foundName =
+                                  consultationRegistry.stamps.find(s => s.phone === clean && s.patientName)?.patientName ||
+                                  bookings.find(b => b.patientPhone.replace(/\D/g, '') === clean)?.patientName;
+                                if (foundName) setConsultPatientName(foundName);
+                              }
+                            }}
+                            placeholder="010xxxxxxxx"
+                            className="w-full pl-3 pr-9 py-2.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-right text-slate-900 dark:text-white focus:ring-2 focus:ring-teal-500"
+                          />
+                          <Phone className="w-4 h-4 text-slate-400 absolute right-3 top-3" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* اقتراحات سريعة إذا بحث الكاشير بالاسم أولاً */}
+                    {cleanConsultPhone.length < 10 && matchingPatientsByName.length > 0 && (
+                      <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-700 space-y-2">
+                        <div className="text-[11px] font-bold text-slate-600 dark:text-slate-400">
+                          مرضى مطابقون للاسم المكتوب (اضغط لاختيار المريض وفحص استشاراته):
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {matchingPatientsByName.map(p => (
+                            <button
+                              key={p.phone}
+                              type="button"
+                              onClick={() => {
+                                setConsultPatientName(p.name);
+                                setConsultPatientPhone(p.phone);
+                              }}
+                              className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-teal-300 dark:border-teal-700 hover:bg-teal-50 text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2 cursor-pointer transition-colors"
+                            >
+                              <span>{p.name}</span>
+                              <span className="font-mono text-teal-700 dark:text-teal-300">({p.phone})</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* نتيجة الفحص الفوري للعيادات المتاح للمريض فيها استشارة */}
+                    {!effectiveLookupPhone ? (
+                      <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-dashed border-slate-300 dark:border-slate-700 text-center space-y-2">
+                        <Stethoscope className="w-8 h-8 text-teal-600/60 mx-auto" />
+                        <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                          اكتب رقم هاتف المريض (أو اسمه) في الأعلى
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          سيقوم النظام فوراً بعرض جميع العيادات التي للمريض فيها استشارة مجانية سارية مع عدد الأيام المتبقية.
+                        </p>
+                      </div>
+                    ) : eligibleConsultationClinics.length > 0 ? (
+                      <div className="p-4 rounded-2xl bg-teal-50/90 dark:bg-teal-950/60 border-2 border-teal-500/70 space-y-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-2 text-teal-950 dark:text-teal-100 font-extrabold text-xs sm:text-sm">
+                            <CheckCircle2 className="w-5 h-5 text-teal-600 shrink-0" />
+                            <span>
+                              هذا المريض له استشارة مجانية سارية في ({eligibleConsultationClinics.length}) عيادة:
+                            </span>
+                          </div>
+                          <span className="text-[11px] font-mono font-bold text-teal-800 dark:text-teal-300">
+                            {effectiveLookupPhone}
+                          </span>
+                        </div>
+
+                        <div className="space-y-2.5">
+                          {eligibleConsultationClinics.map(item => (
+                            <div
+                              key={item.clinic.id}
+                              className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-teal-200 dark:border-teal-800 shadow-2xs flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-extrabold text-sm text-slate-900 dark:text-white">
+                                    {item.clinic.name}
+                                  </span>
+                                  <span className="text-[11px] font-bold text-teal-700 dark:text-teal-300">
+                                    • متبقي {item.daysRemaining} يوم
+                                  </span>
+                                </div>
+                                <div className="text-xs text-slate-600 dark:text-slate-400 flex flex-wrap gap-x-3 gap-y-1">
+                                  <span>تاريخ الكشف السابق: <strong>{item.examDate}</strong></span>
+                                  {item.assignedDoctor && (
+                                    <span>الطبيب: <strong>{item.assignedDoctor.name}</strong></span>
+                                  )}
+                                </div>
+                                {item.existingUnpaidToday && (
+                                  <div className="text-[11px] font-bold text-amber-700 dark:text-amber-300">
+                                    لديه تذكرة محجوزة اليوم ({item.existingUnpaidToday.ticketNumber}) بانتظار التأكيد
+                                  </div>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                disabled={isConsultSubmitting}
+                                onClick={() => handleActivateClinicConsultation(item.clinic.id)}
+                                className="px-4 py-2.5 bg-teal-600 hover:bg-teal-700 disabled:opacity-50 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 shadow-xs transition-all shrink-0 cursor-pointer"
+                              >
+                                <Stethoscope className="w-4 h-4" />
+                                <span>
+                                  {item.existingUnpaidToday
+                                    ? 'تأكيد تذكرته كاستشارة (٠ ج.م)'
+                                    : 'دخول استشارة وإصدار تذكرة (٠ ج.م)'}
+                                </span>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+
+                        <p className="text-[11px] text-teal-800 dark:text-teal-300 font-medium">
+                          * بمجرد الضغط على زر دخول الاستشارة، يُدرج المريض في طابور الاستقبال مجاناً (٠ ج.م) ويُمسح ختم الاستشارة لهذه العيادة تلقائياً.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="p-5 rounded-2xl bg-amber-50/80 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-center space-y-2">
+                        <AlertTriangle className="w-7 h-7 text-amber-600 mx-auto" />
+                        <div className="text-xs sm:text-sm font-extrabold text-amber-950 dark:text-amber-200">
+                          لا توجد استشارة مجانية سارية لهذا الرقم ({effectiveLookupPhone}) في أي عيادة حالياً
+                        </div>
+                        <p className="text-[11px] text-amber-800 dark:text-amber-300">
+                          إما أن المريض لم يسبق له الكشف خلال فترة الاستشارة المحددة ({consultationRegistry.windowDays} يوم)، أو أنه دخل الاستشارة المجانية بالفعل وتم مسحها تلقائياً.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  /* بطاقة نجاح تفعيل وإصدار تذكرة الاستشارة المجانية */
+                  <div className="space-y-4">
+                    <div className="p-5 rounded-2xl bg-teal-50 dark:bg-teal-950/70 border border-teal-200 dark:border-teal-800 text-center space-y-2">
+                      <CheckCircle2 className="w-10 h-10 text-teal-600 mx-auto" />
+                      <h4 className="font-extrabold text-base text-slate-900 dark:text-white">
+                        تم تسجيل الاستشارة المجانية للمريض ({consultCreatedBooking.patientName}) بنجاح!
+                      </h4>
+                      <p className="text-xs text-teal-800 dark:text-teal-300">
+                        تم إدراج المريض فوراً في طابور انتظار ({consultCreatedBooking.clinicName}) بقيمة ٠ ج.م، وتم مسح ختم الاستشارة تلقائياً.
+                      </p>
+
+                      <div className="inline-flex items-center gap-4 bg-white dark:bg-slate-900 px-6 py-3 rounded-2xl border-2 border-teal-600 mt-2">
+                        <div>
+                          <div className="text-[10px] text-slate-500 font-bold">رقم التذكرة</div>
+                          <div className="text-xl font-black font-mono text-teal-700 dark:text-teal-400">
+                            {consultCreatedBooking.ticketNumber}
+                          </div>
+                        </div>
+                        <div className="h-8 w-px bg-slate-200 dark:bg-slate-700" />
+                        <div>
+                          <div className="text-[10px] text-slate-500 font-bold">رقم الدور بالطابور</div>
+                          <div className="text-2xl font-black font-mono text-slate-900 dark:text-white">
+                            #{consultCreatedBooking.queuePosition}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePrintReceipt(consultCreatedBooking)}
+                        className="py-2.5 px-3 bg-teal-700 hover:bg-teal-800 text-white rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <Printer className="w-4 h-4" />
+                        <span>طباعة إيصال الاستشارة</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedTicket(consultCreatedBooking);
+                          setIsConsultationModalOpen(false);
+                          navigate('ticket', consultCreatedBooking.id);
+                        }}
+                        className="py-2.5 px-3 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 text-slate-800 dark:text-slate-200 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <QrCode className="w-4 h-4 text-teal-600" />
+                        <span>عرض بطاقة التذكرة</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleResetConsultationModal}
+                        className="py-2.5 px-3 bg-teal-100 dark:bg-teal-950/80 hover:bg-teal-200 text-teal-900 dark:text-teal-200 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <RotateCcw className="w-4 h-4" />
+                        <span>فحص مريض آخر</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* نافذة حجز وتحصيل فوري لمريض حضوري عند الكاشير (بدون هاتف ذكي) */}
       <AnimatePresence>
         {isWalkInModalOpen && (
@@ -1170,59 +1695,98 @@ export const CashierView: React.FC = () => {
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
                         4. طريقة السداد وتفعيل الدور في الاستقبال:
                       </label>
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
-                        <button
-                          type="button"
-                          onClick={() => setWalkInPaymentMode('cash')}
-                          className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
-                            walkInPaymentMode === 'cash'
-                              ? 'border-emerald-600 bg-emerald-600 text-white shadow-xs'
-                              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          <Coins className="w-4 h-4" />
-                          <span>دفع نقدي فوري</span>
-                        </button>
+                      {(() => {
+                        const walkInElig = (walkInPhone && walkInClinicId)
+                          ? checkConsultationEligibility(walkInPhone, walkInClinicId)
+                          : null;
+                        return (
+                          <>
+                            {walkInElig?.eligible && (
+                              <div className="p-2.5 rounded-xl bg-teal-50 dark:bg-teal-950/70 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-xs flex items-center justify-between gap-2 mb-2">
+                                <div className="flex items-center gap-1.5 font-bold">
+                                  <Stethoscope className="w-4 h-4 text-teal-600 shrink-0" />
+                                  <span>هذا المريض له استشارة مجانية متاحة في هذه العيادة (كشف يوم {walkInElig.examDate} • متبقي {walkInElig.daysRemaining} يوم)</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => setWalkInPaymentMode('consultation')}
+                                  className="px-2.5 py-1 rounded-lg bg-teal-600 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+                                >
+                                  اختيار استشارة
+                                </button>
+                              </div>
+                            )}
+                            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
+                              <button
+                                type="button"
+                                onClick={() => setWalkInPaymentMode('cash')}
+                                className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
+                                  walkInPaymentMode === 'cash'
+                                    ? 'border-emerald-600 bg-emerald-600 text-white shadow-xs'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <Coins className="w-4 h-4" />
+                                <span>دفع نقدي فوري</span>
+                              </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setWalkInPaymentMode('insurance')}
-                          className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
-                            walkInPaymentMode === 'insurance'
-                              ? 'border-blue-600 bg-blue-600 text-white shadow-xs'
-                              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          <ShieldCheck className="w-4 h-4" />
-                          <span>تأمين طبي</span>
-                        </button>
+                              <button
+                                type="button"
+                                onClick={() => setWalkInPaymentMode('insurance')}
+                                className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
+                                  walkInPaymentMode === 'insurance'
+                                    ? 'border-blue-600 bg-blue-600 text-white shadow-xs'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <ShieldCheck className="w-4 h-4" />
+                                <span>تأمين طبي</span>
+                              </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setWalkInPaymentMode('charity_exempt')}
-                          className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
-                            walkInPaymentMode === 'charity_exempt'
-                              ? 'border-amber-600 bg-amber-600 text-white shadow-xs'
-                              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          <HeartHandshake className="w-4 h-4" />
-                          <span>إعفاء خيري</span>
-                        </button>
+                              <button
+                                type="button"
+                                onClick={() => setWalkInPaymentMode('consultation')}
+                                className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
+                                  walkInPaymentMode === 'consultation'
+                                    ? 'border-teal-600 bg-teal-600 text-white shadow-xs'
+                                    : walkInElig?.eligible
+                                    ? 'border-teal-400 bg-teal-50 dark:bg-teal-950/60 text-teal-800 dark:text-teal-200 ring-2 ring-teal-400/40'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <Stethoscope className="w-4 h-4" />
+                                <span>{walkInElig?.eligible ? 'استشارة مجانية ✓' : 'استشارة (٠ ج.م)'}</span>
+                              </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setWalkInPaymentMode('unpaid')}
-                          className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
-                            walkInPaymentMode === 'unpaid'
-                              ? 'border-slate-700 bg-slate-800 text-white shadow-xs'
-                              : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
-                          }`}
-                        >
-                          <Clock className="w-4 h-4" />
-                          <span>حجز فقط (بدون دفع)</span>
-                        </button>
-                      </div>
+                              <button
+                                type="button"
+                                onClick={() => setWalkInPaymentMode('charity_exempt')}
+                                className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all ${
+                                  walkInPaymentMode === 'charity_exempt'
+                                    ? 'border-amber-600 bg-amber-600 text-white shadow-xs'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <HeartHandshake className="w-4 h-4" />
+                                <span>إعفاء خيري</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => setWalkInPaymentMode('unpaid')}
+                                className={`p-2.5 rounded-xl border font-bold flex flex-col items-center gap-1 cursor-pointer transition-all col-span-2 sm:col-span-1 ${
+                                  walkInPaymentMode === 'unpaid'
+                                    ? 'border-slate-700 bg-slate-800 text-white shadow-xs'
+                                    : 'border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-slate-700 dark:text-slate-300'
+                                }`}
+                              >
+                                <Clock className="w-4 h-4" />
+                                <span>حجز فقط (بدون دفع)</span>
+                              </button>
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
 
                     <div className="pt-2 flex items-center gap-2">
@@ -1482,11 +2046,20 @@ export const CashierView: React.FC = () => {
                     {/* أزرار اعتماد السداد الفوري أو عرض حالة الدفع إذا كان مسدداً */}
                     {scannedBooking.paymentStatus === 'unpaid' ? (
                       <div className="space-y-2">
+                        {(() => {
+                          const scanElig = checkConsultationEligibility(scannedBooking.patientPhone, scannedBooking.clinicId);
+                          return scanElig.eligible ? (
+                            <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/80 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-xs font-bold flex items-center gap-2">
+                              <Stethoscope className="w-4 h-4 text-teal-600 shrink-0" />
+                              <span>مستحق لاستشارة مجانية (كشف سابق يوم {scanElig.examDate} • متبقي {scanElig.daysRemaining} يوم) — يُمسح الختم تلقائياً بعد الدخول.</span>
+                            </div>
+                          ) : null;
+                        })()}
                         <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
                           اختر طريقة السداد لتسجيل الدفع وإدراج المريض فوراً في طابور انتظار الاستقبال:
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                           {/* دفع نقدي */}
                           <button
                             onClick={() => handleScanPayment('paid', 'cash')}
@@ -1505,6 +2078,16 @@ export const CashierView: React.FC = () => {
                             <ShieldCheck className="w-5 h-5 text-blue-200" />
                             <span>تأمين طبي</span>
                             <span className="text-[10px] opacity-90">خصم جهات / نقابات</span>
+                          </button>
+
+                          {/* استشارة مجانية */}
+                          <button
+                            onClick={() => handleScanPayment('exempt', 'consultation')}
+                            className="p-3 bg-teal-600 hover:bg-teal-700 active:scale-98 text-white rounded-xl font-bold text-xs flex flex-col items-center justify-center gap-1.5 shadow-xs transition-all cursor-pointer"
+                          >
+                            <Stethoscope className="w-5 h-5 text-teal-200" />
+                            <span>استشارة مجانية</span>
+                            <span className="text-[10px] opacity-90">٠ ج.م (مسح تلقائي للختم)</span>
                           </button>
 
                           {/* إعفاء خيري */}
@@ -1528,7 +2111,7 @@ export const CashierView: React.FC = () => {
                               تم تأكيد السداد بنجاح — المريض مدرج الآن في طابور انتظار عيادة {scannedBooking.clinicName}!
                             </div>
                             <div className="text-[11px] text-emerald-800 dark:text-emerald-300">
-                              طريقة السداد: {scannedBooking.paymentMethod === 'insurance' ? 'تأمين طبي' : scannedBooking.paymentStatus === 'exempt' ? 'إعفاء خيري' : 'دفع نقدي'}
+                              طريقة السداد: {scannedBooking.paymentMethod === 'insurance' ? 'تأمين طبي' : scannedBooking.paymentMethod === 'consultation' ? 'استشارة مجانية (٠ ج.م)' : scannedBooking.paymentStatus === 'exempt' ? 'إعفاء خيري' : 'دفع نقدي'}
                             </div>
                           </div>
                         </div>
@@ -1701,8 +2284,8 @@ export const CashierView: React.FC = () => {
             <div>اسم المريض: <strong>{selectedReceiptBooking.patientName}</strong></div>
             <div>العيادة: <strong>{selectedReceiptBooking.clinicName}</strong></div>
             <div>الطبيب: <strong>{selectedReceiptBooking.doctorName}</strong></div>
-            <div>المبلغ المسدد: <strong>{selectedReceiptBooking.paymentStatus === 'exempt' ? '0 (إعفاء خيري)' : `${selectedReceiptBooking.fee} ج.م`}</strong></div>
-            <div>طريقة الدفع: <strong>{selectedReceiptBooking.paymentMethod === 'cash' ? 'دفع نقدي' : selectedReceiptBooking.paymentMethod === 'insurance' ? 'تأمين طبي' : 'إعفاء خيري'}</strong></div>
+            <div>المبلغ المسدد: <strong>{selectedReceiptBooking.paymentMethod === 'consultation' ? '0 ج.م (استشارة مجانية)' : selectedReceiptBooking.paymentStatus === 'exempt' ? '0 (إعفاء خيري)' : `${selectedReceiptBooking.fee} ج.م`}</strong></div>
+            <div>طريقة الدفع: <strong>{selectedReceiptBooking.paymentMethod === 'cash' ? 'دفع نقدي' : selectedReceiptBooking.paymentMethod === 'insurance' ? 'تأمين طبي' : selectedReceiptBooking.paymentMethod === 'consultation' ? 'استشارة مجانية' : 'إعفاء خيري'}</strong></div>
             <div>تاريخ السداد: {new Date().toLocaleDateString('ar-EG')} - {new Date().toLocaleTimeString('ar-EG')}</div>
           </div>
           <div className="text-center pt-4 border-t-2 border-black text-xs">

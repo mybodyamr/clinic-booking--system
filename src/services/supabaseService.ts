@@ -8,7 +8,9 @@ import {
   unmarkClinicDeletedLocally,
   markDoctorDeletedLocally,
   unmarkDoctorDeletedLocally,
-  markBookingDeletedLocally
+  markBookingDeletedLocally,
+  getStoredConsultationRegistry,
+  pruneConsultationRegistry
 } from './storage';
 import { 
   Clinic, 
@@ -23,7 +25,8 @@ import {
   PaymentStatus,
   PaymentMethod,
   UserRole,
-  SystemErrorLog
+  SystemErrorLog,
+  ConsultationRegistryState
 } from '../types';
 
 // ==========================================
@@ -70,6 +73,12 @@ export function mapDbDoctor(row: any): Doctor {
 }
 
 export function mapDbBooking(row: any): Booking {
+  const isConsultationBooking =
+    row?.payment_method === 'consultation' ||
+    getStoredConsultationRegistry().consultationBookingIds.includes(String(row?.id || ''));
+  const rawMethod = isConsultationBooking
+    ? ('consultation' as PaymentMethod)
+    : (row.payment_method as PaymentMethod | undefined);
   return {
     id: row.id,
     ticketNumber: row.ticket_number,
@@ -84,8 +93,8 @@ export function mapDbBooking(row: any): Booking {
     queuePosition: Number(row.queue_position || 1),
     status: row.status as BookingStatus,
     paymentStatus: row.payment_status as PaymentStatus,
-    paymentMethod: row.payment_method as PaymentMethod | undefined,
-    fee: Number(row.fee || 0),
+    paymentMethod: rawMethod,
+    fee: isConsultationBooking ? 0 : Number(row.fee || 0),
     notes: row.notes || undefined,
     doctorDiagnosis: row.doctor_diagnosis || undefined,
     createdAt: row.created_at || new Date().toISOString(),
@@ -586,16 +595,23 @@ export async function confirmPaymentRpc(
   }
   try {
     await ensureActiveSupabaseSession();
+    const rpcPaymentType = paymentType === 'consultation' ? 'charity_exempt' : paymentType;
     const { data, error } = await supabase.rpc('confirm_payment', {
       p_booking_id: bookingId.trim(),
-      p_payment_type: paymentType
+      p_payment_type: rpcPaymentType
     });
 
     if (error) {
       return { success: false, error: error.message };
     }
 
-    return { success: true, data: mapDbBooking(data) };
+    const mapped = mapDbBooking(data);
+    if (paymentType === 'consultation') {
+      mapped.paymentMethod = 'consultation';
+      mapped.fee = 0;
+    }
+
+    return { success: true, data: mapped };
   } catch (err: any) {
     return { success: false, error: err.message || 'فشل تأكيد الدفع' };
   }
@@ -1342,7 +1358,8 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
         '_system_working_hours',
         '_system_role_permissions',
         '_system_whatsapp_sent',
-        '_system_error_logs'
+        '_system_error_logs',
+        '_system_consultations'
       ]);
 
     if (Array.isArray(clinicSettings)) {
@@ -1374,6 +1391,8 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
           map['whatsapp_sent_ids'] = row.description;
         } else if (row.id === '_system_error_logs' && row.description) {
           map['system_error_logs_json'] = row.description;
+        } else if (row.id === '_system_consultations' && row.description) {
+          map['consultation_registry_json'] = row.description;
         }
       }
     }
@@ -1511,6 +1530,55 @@ export async function saveSettingToDb(key: string, value: string): Promise<boole
 }
 
 /**
+ * حفظ سجل الاستشارات المجانية ذاتي المسح في قاعدة البيانات السحابية وبثه لحظياً
+ * يعمل لكل من الأدمن والكاشير والاستقبال عبر صلاحية تحديث سجل _system_consultations
+ */
+export async function saveConsultationRegistryToDb(
+  registry: ConsultationRegistryState
+): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  const pruned = pruneConsultationRegistry(registry);
+  const jsonStr = JSON.stringify(pruned);
+  let saved = false;
+
+  try {
+    await ensureActiveSupabaseSession();
+    const { data: updData, error: updErr } = await supabase
+      .from('clinics')
+      .update({ description: jsonStr })
+      .eq('id', '_system_consultations')
+      .select('id');
+
+    if (!updErr && Array.isArray(updData) && updData.length > 0) {
+      saved = true;
+    } else {
+      const { error: upsertErr } = await supabase.from('clinics').upsert({
+        id: '_system_consultations',
+        name: 'System Consultations',
+        specialty: 'System',
+        room_number: '0',
+        description: jsonStr,
+        is_open_today: false
+      });
+      if (!upsertErr) {
+        saved = true;
+      }
+    }
+  } catch {}
+
+  try {
+    const channel = supabase.channel('system_updates');
+    channel.send({
+      type: 'broadcast',
+      event: 'consultation_registry_updated',
+      payload: { value: jsonStr }
+    });
+  } catch {}
+
+  return saved;
+}
+
+/**
  * إرسال خطأ نظام من أي جهاز (مريض أو موظف أو شاشة عرض) إلى قاعدة البيانات وبثه لحظياً للوحة تحكم الأدمن
  */
 export async function reportClientErrorToDb(errorLog: SystemErrorLog): Promise<boolean> {
@@ -1630,7 +1698,10 @@ export async function createStaffAccountInDb(input: {
         displayName: input.displayName.trim(),
         role: input.role,
         doctorId: input.role === 'doctor' ? (input.doctorId || null) : null,
-        clinicId: input.role === 'doctor' ? (input.clinicId || null) : null,
+        clinicId:
+          input.role === 'doctor' || input.role === 'reception'
+            ? (input.clinicId || null)
+            : null,
         recoveryEmail: input.recoveryEmail ? input.recoveryEmail.trim().toLowerCase() : null
       })
     });

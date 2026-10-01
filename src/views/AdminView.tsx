@@ -79,7 +79,9 @@ export const AdminView: React.FC = () => {
     resolveAllErrorLogs,
     deleteErrorLog,
     clearAllErrorLogs,
-    syncErrorLogsNow
+    syncErrorLogsNow,
+    consultationRegistry,
+    updateConsultationSettings
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'overview' | 'daily-schedule' | 'clinics' | 'doctors' | 'permissions' | 'reports' | 'error-logs'>('overview');
@@ -311,6 +313,26 @@ export const AdminView: React.FC = () => {
   const [workingHoursDraft, setWorkingHoursDraft] = useState(officialWorkingHours);
   const [isSavingWorkingHours, setIsSavingWorkingHours] = useState(false);
 
+  // حالة إعدادات مدة الاستشارة المجانية (Self-Erasing Consultation Registry)
+  const [tempConsultDefaultDays, setTempConsultDefaultDays] = useState<number>(
+    consultationRegistry?.windowDays || 14
+  );
+  const [tempConsultClinicDays, setTempConsultClinicDays] = useState<Record<string, number>>(
+    consultationRegistry?.clinicWindows || {}
+  );
+  const [isSavingConsultSettings, setIsSavingConsultSettings] = useState(false);
+
+  useEffect(() => {
+    setTempConsultDefaultDays(consultationRegistry?.windowDays || 14);
+    setTempConsultClinicDays(consultationRegistry?.clinicWindows || {});
+  }, [consultationRegistry?.windowDays, consultationRegistry?.clinicWindows]);
+
+  const handleSaveConsultationConfig = async () => {
+    setIsSavingConsultSettings(true);
+    await updateConsultationSettings(tempConsultDefaultDays, tempConsultClinicDays);
+    setIsSavingConsultSettings(false);
+  };
+
   // تحديث مسودة النص عند ورود تحديثات فورية عبر Realtime أو مزامنة الخادم
   useEffect(() => {
     setSupportTextDraft(supportInfoText);
@@ -400,10 +422,10 @@ export const AdminView: React.FC = () => {
         'التاريخ': sanitizeSpreadsheetCell(b.date),
         'الفترة': sanitizeSpreadsheetCell(b.timeSlot),
         'رقم الدور': b.queuePosition,
-        'قيمة الكشف': b.fee,
+        'قيمة الكشف': b.paymentMethod === 'consultation' ? 0 : b.fee,
         'حالة الكشف': b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي',
-        'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد',
-        'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'charity_exempt' ? 'تكافل خيري' : 'غير مسدد',
+        'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد',
+        'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentMethod === 'charity_exempt' ? 'تكافل خيري' : 'غير مسدد',
         'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || '-')
       }));
 
@@ -1569,6 +1591,131 @@ export const AdminView: React.FC = () => {
             </div>
           </div>
 
+          {/* البطاقة 2.5: إعدادات الاستشارة المجانية ونظام الختم الذاتي المسح (Self-Erasing Consultation Registry) */}
+          <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-teal-200 dark:border-teal-800/80 shadow-xs space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-700/70 pb-4">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Stethoscope className="w-5 h-5 text-teal-600 dark:text-teal-400" />
+                  <h3 className="font-bold text-base text-slate-900 dark:text-white">
+                    نظام الاستشارة المجانية ومهلة الأيام (Self-Erasing Consultation System)
+                  </h3>
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-teal-100 dark:bg-teal-950 text-teal-800 dark:text-teal-300 border border-teal-300 dark:border-teal-700">
+                    أختام الاستشارة النشطة حالياً: {Object.keys(consultationRegistry?.stamps || {}).length} مريض
+                  </span>
+                </div>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  حدد عدد أيام الاستشارة المجانية المسموحة بعد الكشف (مثل 7 أو 10 أو 14 يوماً). يُحفظ ختم الاستشارة بشكل مستقل تماماً عن أرشيف الحجوزات، ويُمسح تلقائياً بمجرد دخول المريض للاستشارة أو بعد انتهاء المهلة المحددة.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSaveConsultationConfig}
+                disabled={isSavingConsultSettings}
+                className="px-4 py-2.5 bg-teal-700 hover:bg-teal-800 disabled:opacity-60 text-white font-bold text-xs rounded-xl transition-all shadow-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-auto shrink-0"
+              >
+                {isSavingConsultSettings ? (
+                  <RefreshCw className="w-4 h-4 animate-spin text-teal-200" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 text-teal-200" />
+                )}
+                <span>{isSavingConsultSettings ? 'جاري الحفظ...' : 'حفظ مهلة الاستشارة'}</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
+              <div className="p-4 rounded-2xl bg-teal-50/50 dark:bg-teal-950/30 border border-teal-200/80 dark:border-teal-800/70 space-y-3">
+                <label className="block text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                  المهلة الافتراضية للاستشارة المجانية لجميع العيادات (بالأيام):
+                </label>
+                <div className="flex flex-wrap items-center gap-2">
+                  {[7, 8, 10, 12, 14, 15, 21, 30].map(days => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => setTempConsultDefaultDays(days)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                        tempConsultDefaultDays === days
+                          ? 'bg-teal-700 text-white border-teal-700 shadow-2xs'
+                          : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:border-teal-400'
+                      }`}
+                    >
+                      {days} يوم
+                    </button>
+                  ))}
+                  <div className="flex items-center gap-1.5 mr-auto">
+                    <span className="text-[11px] font-bold text-slate-500">أو رقم مخصص:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={90}
+                      value={tempConsultDefaultDays}
+                      onChange={(e) => setTempConsultDefaultDays(Math.max(1, Math.min(90, Number(e.target.value) || 14)))}
+                      className="w-20 px-2.5 py-1.5 rounded-xl border border-teal-400 dark:border-teal-700 bg-white dark:bg-slate-900 text-xs font-mono font-extrabold text-center text-slate-900 dark:text-white"
+                    />
+                  </div>
+                </div>
+                <div className="text-[11px] text-teal-800 dark:text-teal-300 space-y-1 pt-1">
+                  <div>• <strong>مسح فوري عند الاستخدام:</strong> أول ما المريض يدخل استشارة خلال المدة المحددة يُحذف ختم الاستشارة تلقائياً ولا يتكرر.</div>
+                  <div>• <strong>مسح تلقائي بعد انتهاء المدة:</strong> أي ختم يتجاوز ({tempConsultDefaultDays} يوم) يُزال تلقائياً من قاعدة البيانات.</div>
+                  <div>• <strong>مستقل عن الأرشيف:</strong> مسح سجل الحجوزات السابقة من الأرشيف لا يؤثر إطلاقاً على المرضى المستحقين للاستشارة.</div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-extrabold text-slate-800 dark:text-slate-200">
+                    تخصيص مهلة استشارة مختلفة لعيادة معينة (اختياري):
+                  </label>
+                  {Object.keys(tempConsultClinicDays).length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setTempConsultClinicDays({})}
+                      className="text-[11px] text-rose-600 dark:text-rose-400 font-bold hover:underline cursor-pointer"
+                    >
+                      توحيد الكل على الافتراضي ({tempConsultDefaultDays} يوم)
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+                  {clinics.map(c => {
+                    const customVal = tempConsultClinicDays[c.id];
+                    return (
+                      <div key={c.id} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs">
+                        <span className="font-bold text-slate-800 dark:text-slate-200 truncate">{c.name}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <input
+                            type="number"
+                            min={1}
+                            max={90}
+                            placeholder={`${tempConsultDefaultDays}`}
+                            value={customVal !== undefined ? customVal : ''}
+                            onChange={(e) => {
+                              const val = e.target.value.trim();
+                              if (!val) {
+                                const next = { ...tempConsultClinicDays };
+                                delete next[c.id];
+                                setTempConsultClinicDays(next);
+                              } else {
+                                setTempConsultClinicDays({
+                                  ...tempConsultClinicDays,
+                                  [c.id]: Math.max(1, Math.min(90, Number(val) || tempConsultDefaultDays))
+                                });
+                              }
+                            }}
+                            className="w-14 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-center font-mono font-bold text-xs"
+                          />
+                          <span className="text-[10px] text-slate-400">يوم</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* البطاقة 3: إدارة كلمات المرور وتأمين حسابات الكادر الطبي والإداري */}
           <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1594,7 +1741,7 @@ export const AdminView: React.FC = () => {
                     setCreateStaffDisplayName('');
                     setCreateStaffRole('reception');
                     setCreateStaffDoctorId(firstDoc?.id || '');
-                    setCreateStaffClinicId(firstDoc?.clinicId || clinics[0]?.id || '');
+                    setCreateStaffClinicId('');
                     setCreateStaffEmail('');
                     setShowCreateStaffModal(true);
                   }}
@@ -1673,6 +1820,27 @@ export const AdminView: React.FC = () => {
                         </div>
                       )}
 
+                      {acc.role === 'reception' && (
+                        <div className="pt-1 space-y-1">
+                          <label className="block text-[10px] font-extrabold text-amber-800 dark:text-amber-300">
+                            العيادة المكلف بها (تغيير الدور فوراً):
+                          </label>
+                          <select
+                            value={acc.clinicId || ''}
+                            onChange={async (e) => {
+                              const newClinicId = e.target.value;
+                              await updateStaffAccount(acc.id, { clinicId: newClinicId });
+                            }}
+                            className="w-full px-2 py-1.5 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/40 text-[11px] font-bold text-slate-900 dark:text-white cursor-pointer"
+                          >
+                            <option value="">جميع العيادات (استقبال عام)</option>
+                            {clinics.map(c => (
+                              <option key={c.id} value={c.id}>مخصص لـ: {c.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 pt-1 truncate">
                         <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
                         <span className="truncate">{acc.recoveryEmail || 'لم يُحدد بريد استعادة'}</span>
@@ -1702,7 +1870,11 @@ export const AdminView: React.FC = () => {
                             setStaffEditDisplayName(acc.displayName);
                             setStaffEditRole(acc.role);
                             setStaffEditDoctorId(acc.doctorId || doctors[0]?.id || '');
-                            setStaffEditClinicId(acc.clinicId || doctors.find(d => d.id === acc.doctorId)?.clinicId || clinics[0]?.id || '');
+                            setStaffEditClinicId(
+                              acc.role === 'reception'
+                                ? (acc.clinicId || '')
+                                : (acc.clinicId || doctors.find(d => d.id === acc.doctorId)?.clinicId || clinics[0]?.id || '')
+                            );
                             setStaffEditEmail(acc.recoveryEmail || '');
                             setStaffEditPassword('');
                           }}
@@ -1868,7 +2040,7 @@ export const AdminView: React.FC = () => {
                         <span>{b.clinicName}</span>
                         <span>{b.doctorName}</span>
                         <span>{b.date} ({b.timeSlot})</span>
-                        <span>رسوم: {b.fee} ج.م ({b.paymentStatus === 'paid' ? 'مسدد' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد'})</span>
+                        <span>رسوم: {b.paymentMethod === 'consultation' ? '٠ ج.م (استشارة مجانية)' : `${b.fee} ج.م`} ({b.paymentStatus === 'paid' ? 'مسدد' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد'})</span>
                       </div>
                     </div>
 
@@ -2928,7 +3100,12 @@ export const AdminView: React.FC = () => {
                   displayName: createStaffDisplayName,
                   role: createStaffRole,
                   doctorId: createStaffRole === 'doctor' ? createStaffDoctorId : null,
-                  clinicId: createStaffRole === 'doctor' ? createStaffClinicId : null,
+                  clinicId:
+                    createStaffRole === 'doctor'
+                      ? createStaffClinicId
+                      : createStaffRole === 'reception'
+                      ? (createStaffClinicId || null)
+                      : null,
                   recoveryEmail: createStaffEmail || undefined
                 });
                 setIsCreatingStaff(false);
@@ -2992,7 +3169,9 @@ export const AdminView: React.FC = () => {
                   onChange={(e) => {
                     const nextRole = e.target.value as UserRole;
                     setCreateStaffRole(nextRole);
-                    if (nextRole === 'doctor' && !createStaffDoctorId && doctors[0]) {
+                    if (nextRole === 'reception') {
+                      setCreateStaffClinicId('');
+                    } else if (nextRole === 'doctor' && !createStaffDoctorId && doctors[0]) {
                       setCreateStaffDoctorId(doctors[0].id);
                       setCreateStaffClinicId(doctors[0].clinicId);
                     }
@@ -3005,6 +3184,27 @@ export const AdminView: React.FC = () => {
                   <option value="admin">مدير المنظومة (admin)</option>
                 </select>
               </div>
+
+              {createStaffRole === 'reception' && (
+                <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
+                  <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
+                    تخصيص موظف الاستقبال لعيادة محددة (أو جميع العيادات):
+                  </label>
+                  <select
+                    value={createStaffClinicId}
+                    onChange={(e) => setCreateStaffClinicId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                  >
+                    <option value="">جميع العيادات (استقبال عام)</option>
+                    {clinics.map(c => (
+                      <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
+                    ))}
+                  </select>
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                    يمكنك تغيير العيادة المخصصة لموظف الاستقبال في أي وقت بضغطة واحدة من بطاقة حسابه.
+                  </p>
+                </div>
+              )}
 
               {createStaffRole === 'doctor' && (
                 <div className="p-3 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/70 space-y-2.5">
@@ -3153,7 +3353,12 @@ export const AdminView: React.FC = () => {
                   displayName: staffEditDisplayName,
                   role: staffEditRole,
                   doctorId: staffEditRole === 'doctor' ? staffEditDoctorId : null,
-                  clinicId: staffEditRole === 'doctor' ? staffEditClinicId : null,
+                  clinicId:
+                    staffEditRole === 'doctor'
+                      ? staffEditClinicId
+                      : staffEditRole === 'reception'
+                      ? (staffEditClinicId || null)
+                      : null,
                   recoveryEmail: staffEditEmail,
                   password: staffEditPassword || undefined
                 });
@@ -3202,7 +3407,9 @@ export const AdminView: React.FC = () => {
                   onChange={(e) => {
                     const nextRole = e.target.value as UserRole;
                     setStaffEditRole(nextRole);
-                    if (nextRole === 'doctor' && !staffEditDoctorId && doctors[0]) {
+                    if (nextRole === 'reception') {
+                      setStaffEditClinicId('');
+                    } else if (nextRole === 'doctor' && !staffEditDoctorId && doctors[0]) {
                       setStaffEditDoctorId(doctors[0].id);
                       setStaffEditClinicId(doctors[0].clinicId);
                     }
@@ -3215,6 +3422,24 @@ export const AdminView: React.FC = () => {
                   <option value="admin">مدير المنظومة (admin)</option>
                 </select>
               </div>
+
+              {staffEditRole === 'reception' && (
+                <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
+                  <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
+                    العيادة المخصصة لموظف الاستقبال (تغيير الدور لأي عيادة):
+                  </label>
+                  <select
+                    value={staffEditClinicId}
+                    onChange={(e) => setStaffEditClinicId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                  >
+                    <option value="">جميع العيادات (استقبال عام)</option>
+                    {clinics.map(c => (
+                      <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               {staffEditRole === 'doctor' && (
                 <div className="p-3 rounded-2xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/70 space-y-2">
