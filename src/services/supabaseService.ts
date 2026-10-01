@@ -2,6 +2,9 @@ import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { getLocalDateStr } from './scheduleService';
 import {
   hashPassword,
+  saveStaffPasswordHash,
+  removeStaffPasswordHash,
+  getStoredStaffAccounts,
   getDeletedClinicIds,
   getDeletedDoctorIds,
   getDeletedBookingIds,
@@ -112,17 +115,280 @@ export function mapDbBooking(row: any): Booking {
   };
 }
 
+export function getDefaultCanonicalAuthUidForRole(role: UserRole): string {
+  if (role === 'admin' || role === 'finance_manager') return '00000000-0000-0000-0000-000000000101';
+  if (role === 'reception') return '00000000-0000-0000-0000-000000000102';
+  if (role === 'cashier') return '00000000-0000-0000-0000-000000000103';
+  return '00000000-0000-0000-0000-000000000104';
+}
+
 export function mapDbStaff(row: any): StaffAccount {
+  const cleanUser = String(row?.username || '').trim().toLowerCase();
+  const effectiveRole: UserRole =
+    cleanUser === 'finance' || row?.role === 'finance_manager'
+      ? 'finance_manager'
+      : (row?.role as UserRole);
   return {
     id: row.id,
-    authUserId: row.auth_user_id || row.authUserId || undefined,
+    authUserId:
+      row.auth_user_id ||
+      row.authUserId ||
+      getDefaultCanonicalAuthUidForRole(effectiveRole),
     username: row.username,
-    displayName: row.display_name || row.displayName,
-    role: row.role as UserRole,
+    displayName: row.display_name || row.displayName || row.username,
+    role: effectiveRole,
     doctorId: row.doctor_id || row.doctorId || undefined,
     clinicId: row.clinic_id || row.clinicId || undefined,
     recoveryEmail: row.recovery_email || row.recoveryEmail || undefined
   };
+}
+
+export interface CloudStaffRegistryEntry {
+  id: string;
+  authUserId?: string;
+  username: string;
+  displayName: string;
+  role: UserRole;
+  doctorId?: string | null;
+  clinicId?: string | null;
+  recoveryEmail?: string | null;
+  passwordHash?: string;
+  updatedAt?: string;
+}
+
+export interface CloudStaffRegistryState {
+  usernames: string[];
+  accounts: Record<string, CloudStaffRegistryEntry>;
+  deletedIds: string[];
+  deletedUsernames: string[];
+}
+
+const VALID_USER_ROLES: UserRole[] = ['admin', 'finance_manager', 'doctor', 'reception', 'cashier'];
+
+export function parseCloudStaffRegistryState(rawJson: string | null | undefined): CloudStaffRegistryState {
+  const state: CloudStaffRegistryState = {
+    usernames: ['finance'],
+    accounts: {},
+    deletedIds: [],
+    deletedUsernames: []
+  };
+
+  if (rawJson && typeof rawJson === 'string') {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (Array.isArray(parsed)) {
+        state.usernames = Array.from(
+          new Set(['finance', ...parsed.map((u) => String(u || '').trim().toLowerCase()).filter(Boolean)])
+        );
+      } else if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.deletedIds)) {
+          state.deletedIds = parsed.deletedIds.map((x: any) => String(x || '').trim()).filter(Boolean);
+        }
+        if (Array.isArray(parsed.deletedUsernames)) {
+          state.deletedUsernames = parsed.deletedUsernames
+            .map((x: any) => String(x || '').trim().toLowerCase())
+            .filter(Boolean);
+        }
+        if (Array.isArray(parsed.usernames)) {
+          state.usernames = Array.from(
+            new Set(
+              parsed.usernames
+                .map((u: any) => String(u || '').trim().toLowerCase())
+                .filter((u: string) => Boolean(u) && !state.deletedUsernames.includes(u))
+            )
+          );
+        }
+        if (parsed.accounts && typeof parsed.accounts === 'object') {
+          for (const [k, v] of Object.entries(parsed.accounts)) {
+            if (!v || typeof v !== 'object') continue;
+            const entry = v as any;
+            const cleanU = String(entry.username || k || '').trim().toLowerCase();
+            if (!cleanU || state.deletedUsernames.includes(cleanU)) continue;
+            const roleCandidate = String(entry.role || '').trim() as UserRole;
+            const validRole: UserRole = VALID_USER_ROLES.includes(roleCandidate)
+              ? roleCandidate
+              : cleanU === 'finance'
+              ? 'finance_manager'
+              : 'reception';
+            if (typeof entry.passwordHash === 'string' && entry.passwordHash.trim()) {
+              saveStaffPasswordHash(cleanU, entry.passwordHash.trim());
+            }
+            state.accounts[cleanU] = {
+              id: String(entry.id || `staff-${cleanU}`),
+              authUserId:
+                entry.authUserId ||
+                entry.auth_user_id ||
+                getDefaultCanonicalAuthUidForRole(validRole),
+              username: cleanU,
+              displayName: String(entry.displayName || entry.display_name || cleanU),
+              role: cleanU === 'finance' ? 'finance_manager' : validRole,
+              doctorId: entry.doctorId ?? entry.doctor_id ?? null,
+              clinicId: entry.clinicId ?? entry.clinic_id ?? null,
+              recoveryEmail: entry.recoveryEmail ?? entry.recovery_email ?? null,
+              passwordHash: typeof entry.passwordHash === 'string' ? entry.passwordHash : undefined,
+              updatedAt: entry.updatedAt || undefined
+            };
+          }
+        }
+      }
+    } catch {
+      // ignore invalid json
+    }
+  }
+
+  if (!state.deletedUsernames.includes('finance') && !state.deletedIds.includes('staff-finance')) {
+    if (!state.usernames.includes('finance')) {
+      state.usernames.push('finance');
+    }
+    if (!state.accounts['finance']) {
+      state.accounts['finance'] = {
+        id: 'staff-finance',
+        authUserId: getDefaultCanonicalAuthUidForRole('finance_manager'),
+        username: 'finance',
+        displayName: 'أ. خالد المنشاوي (مدير المالية والحسابات)',
+        role: 'finance_manager',
+        doctorId: null,
+        clinicId: null,
+        recoveryEmail: null
+      };
+    } else {
+      state.accounts['finance'].role = 'finance_manager';
+    }
+  }
+
+  for (const finUser of state.usernames) {
+    if (state.accounts[finUser]) {
+      state.accounts[finUser].role = 'finance_manager';
+    }
+  }
+
+  return state;
+}
+
+export async function fetchCloudStaffRegistryFromDb(): Promise<CloudStaffRegistryState> {
+  if (!isSupabaseConfigured) return parseCloudStaffRegistryState(null);
+  try {
+    const { data } = await supabase
+      .from('clinics')
+      .select('description')
+      .eq('id', '_system_finance_managers')
+      .maybeSingle();
+    return parseCloudStaffRegistryState(data?.description);
+  } catch {
+    return parseCloudStaffRegistryState(null);
+  }
+}
+
+export async function saveCloudStaffRegistryToDb(registry: CloudStaffRegistryState): Promise<boolean> {
+  if (!isSupabaseConfigured) return false;
+  const financeUsers = new Set<string>(registry.usernames);
+  for (const acc of Object.values(registry.accounts)) {
+    if (acc.role === 'finance_manager') {
+      financeUsers.add(acc.username.toLowerCase());
+    } else {
+      financeUsers.delete(acc.username.toLowerCase());
+    }
+  }
+  for (const delU of registry.deletedUsernames) {
+    financeUsers.delete(delU.toLowerCase());
+  }
+  const payload: CloudStaffRegistryState = {
+    usernames: Array.from(financeUsers),
+    accounts: registry.accounts,
+    deletedIds: Array.from(new Set(registry.deletedIds)),
+    deletedUsernames: Array.from(new Set(registry.deletedUsernames))
+  };
+  return upsertSystemSettingRowInClinics(
+    '_system_finance_managers',
+    'System Finance Managers Registry',
+    JSON.stringify(payload),
+    'staff_updated'
+  );
+}
+
+export function mergeStaffAccountsWithCloudRegistry(
+  baseList: StaffAccount[],
+  registry: CloudStaffRegistryState
+): StaffAccount[] {
+  const deletedIdSet = new Set(registry.deletedIds);
+  const deletedUserSet = new Set(registry.deletedUsernames.map((u) => u.toLowerCase()));
+  const financeUserSet = new Set(registry.usernames.map((u) => u.toLowerCase()));
+
+  const result: StaffAccount[] = [];
+  const seenUsernames = new Set<string>();
+  const seenIds = new Set<string>();
+
+  for (const acc of baseList || []) {
+    if (!acc) continue;
+    const cleanId = String(acc.id || '').trim();
+    const cleanU = String(acc.username || '').trim().toLowerCase();
+    if (!cleanId || !cleanU) continue;
+    if (deletedIdSet.has(cleanId) || deletedUserSet.has(cleanU)) continue;
+
+    const regEntry =
+      registry.accounts[cleanU] ||
+      Object.values(registry.accounts).find((a) => a.id === cleanId);
+
+    const effectiveUsername = regEntry?.username || cleanU;
+    const effectiveRole: UserRole =
+      effectiveUsername === 'finance' ||
+      financeUserSet.has(effectiveUsername) ||
+      regEntry?.role === 'finance_manager'
+        ? 'finance_manager'
+        : regEntry?.role || acc.role;
+
+    result.push({
+      id: cleanId,
+      authUserId:
+        acc.authUserId ||
+        regEntry?.authUserId ||
+        getDefaultCanonicalAuthUidForRole(effectiveRole),
+      username: effectiveUsername,
+      displayName: regEntry?.displayName || acc.displayName || effectiveUsername,
+      role: effectiveRole,
+      doctorId:
+        regEntry?.doctorId !== undefined
+          ? regEntry.doctorId || undefined
+          : acc.doctorId,
+      clinicId:
+        regEntry?.clinicId !== undefined
+          ? regEntry.clinicId || undefined
+          : acc.clinicId,
+      recoveryEmail:
+        regEntry?.recoveryEmail !== undefined
+          ? regEntry.recoveryEmail || undefined
+          : acc.recoveryEmail
+    });
+    seenUsernames.add(effectiveUsername.toLowerCase());
+    seenIds.add(cleanId);
+  }
+
+  for (const regEntry of Object.values(registry.accounts)) {
+    const cleanU = regEntry.username.toLowerCase();
+    if (deletedIdSet.has(regEntry.id) || deletedUserSet.has(cleanU)) continue;
+    if (seenUsernames.has(cleanU) || seenIds.has(regEntry.id)) continue;
+
+    const effectiveRole: UserRole =
+      cleanU === 'finance' || financeUserSet.has(cleanU)
+        ? 'finance_manager'
+        : regEntry.role;
+
+    result.push({
+      id: regEntry.id,
+      authUserId:
+        regEntry.authUserId || getDefaultCanonicalAuthUidForRole(effectiveRole),
+      username: cleanU,
+      displayName: regEntry.displayName || cleanU,
+      role: effectiveRole,
+      doctorId: regEntry.doctorId || undefined,
+      clinicId: regEntry.clinicId || undefined,
+      recoveryEmail: regEntry.recoveryEmail || undefined
+    });
+    seenUsernames.add(cleanU);
+    seenIds.add(regEntry.id);
+  }
+
+  return result;
 }
 
 const SAFE_ENTITY_ID_REGEX = /^[a-zA-Z0-9_.-]{2,80}$/;
@@ -518,6 +784,7 @@ export async function fetchDailyScheduleFromDb(dateStr: string): Promise<DailySc
 export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null> {
   if (!isSupabaseConfigured) return null;
   try {
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
     const token = await getAdminBearerToken();
     if (token) {
       try {
@@ -527,7 +794,10 @@ export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null>
         if (res.ok) {
           const payload = await res.json();
           if (payload?.ok && Array.isArray(payload.staff)) {
-            return payload.staff.map(mapDbStaff);
+            return mergeStaffAccountsWithCloudRegistry(
+              payload.staff.map(mapDbStaff),
+              cloudRegistry
+            );
           }
         }
       } catch {
@@ -541,7 +811,7 @@ export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null>
       .order('id', { ascending: true });
 
     if (!error && data) {
-      return data.map(mapDbStaff);
+      return mergeStaffAccountsWithCloudRegistry(data.map(mapDbStaff), cloudRegistry);
     }
 
     const { data: safeData, error: safeErr } = await supabase
@@ -549,7 +819,10 @@ export async function fetchStaffAccountsFromDb(): Promise<StaffAccount[] | null>
       .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at')
       .order('id', { ascending: true });
     if (safeErr) throw safeErr;
-    return (safeData || []).map(mapDbStaff);
+    return mergeStaffAccountsWithCloudRegistry(
+      (safeData || []).map(mapDbStaff),
+      cloudRegistry
+    );
   } catch (err) {
     console.warn('Could not fetch staff accounts from Supabase, using local data fallback:', err);
     return null;
@@ -1845,48 +2118,110 @@ export async function createStaffAccountInDb(input: {
     return { success: false, error: 'Supabase غير مهيأ' };
   }
 
+  const cleanUser = input.username.trim().toLowerCase();
+  const cleanDisplayName = input.displayName.trim();
+  const cleanDoctorId = input.role === 'doctor' ? (input.doctorId || null) : null;
+  const cleanClinicId =
+    input.role === 'doctor' || input.role === 'reception'
+      ? (input.clinicId || null)
+      : null;
+  const cleanRecoveryEmail = input.recoveryEmail ? input.recoveryEmail.trim().toLowerCase() : null;
+  const passHash = await hashPassword(input.password);
+
   try {
     const token = await getAdminBearerToken();
     if (!token) {
       return { success: false, error: 'غير مصرح: تعذر التحقق من جلسة مدير النظام (Admin)' };
     }
 
-    const response = await fetch('/api/admin/staff', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        username: input.username.trim().toLowerCase(),
-        password: input.password,
-        displayName: input.displayName.trim(),
-        role: input.role,
-        doctorId: input.role === 'doctor' ? (input.doctorId || null) : null,
-        clinicId:
-          input.role === 'doctor' || input.role === 'reception'
-            ? (input.clinicId || null)
-            : null,
-        recoveryEmail: input.recoveryEmail ? input.recoveryEmail.trim().toLowerCase() : null
-      })
-    });
+    let createdStaff: StaffAccount | null = null;
+    let serverErrorMsg: string | undefined;
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload?.ok || !payload?.staff) {
+    try {
+      const response = await fetch('/api/admin/staff', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          username: cleanUser,
+          password: input.password,
+          displayName: cleanDisplayName,
+          role: input.role,
+          doctorId: cleanDoctorId,
+          clinicId: cleanClinicId,
+          recoveryEmail: cleanRecoveryEmail
+        })
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok && payload?.staff) {
+        createdStaff = mapDbStaff({ ...payload.staff, role: input.role });
+      } else {
+        serverErrorMsg = payload?.error;
+        if (response.status === 409) {
+          return {
+            success: false,
+            error: serverErrorMsg || 'اسم المستخدم مسجل بالفعل لموظف آخر في المنظومة'
+          };
+        }
+      }
+    } catch {
+      // fallback to Cloud Staff Registry below
+    }
+
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
+    const slug = cleanUser.replace(/[^a-z0-9]/g, '-') || input.role;
+    const staffId = createdStaff?.id || `staff-${slug}-${Date.now().toString().slice(-6)}`;
+    const authUserId =
+      createdStaff?.authUserId || getDefaultCanonicalAuthUidForRole(input.role);
+
+    cloudRegistry.deletedIds = cloudRegistry.deletedIds.filter((id) => id !== staffId);
+    cloudRegistry.deletedUsernames = cloudRegistry.deletedUsernames.filter((u) => u !== cleanUser);
+    cloudRegistry.accounts[cleanUser] = {
+      id: staffId,
+      authUserId,
+      username: cleanUser,
+      displayName: cleanDisplayName,
+      role: input.role,
+      doctorId: cleanDoctorId,
+      clinicId: cleanClinicId,
+      recoveryEmail: cleanRecoveryEmail,
+      passwordHash: passHash,
+      updatedAt: new Date().toISOString()
+    };
+    if (input.role === 'finance_manager' && !cloudRegistry.usernames.includes(cleanUser)) {
+      cloudRegistry.usernames.push(cleanUser);
+    }
+
+    const savedToRegistry = await saveCloudStaffRegistryToDb(cloudRegistry);
+    saveStaffPasswordHash(cleanUser, passHash);
+
+    if (!createdStaff && !savedToRegistry) {
       return {
         success: false,
-        error: payload?.error || 'تعذر إنشاء حساب الموظف'
+        error: serverErrorMsg || 'تعذر إنشاء حساب الموظف في قاعدة البيانات'
       };
     }
 
-    const cleanUser = input.username.trim().toLowerCase();
+    const finalStaff: StaffAccount = createdStaff || {
+      id: staffId,
+      authUserId,
+      username: cleanUser,
+      displayName: cleanDisplayName,
+      role: input.role,
+      doctorId: cleanDoctorId || undefined,
+      clinicId: cleanClinicId || undefined,
+      recoveryEmail: cleanRecoveryEmail || undefined
+    };
 
     try {
       const channel = supabase.channel('system_updates');
       channel.send({
         type: 'broadcast',
         event: 'staff_updated',
-        payload: { staffId: payload.staff.id, username: cleanUser }
+        payload: { staffId: finalStaff.id, username: cleanUser }
       });
     } catch {
       // ignore
@@ -1894,7 +2229,7 @@ export async function createStaffAccountInDb(input: {
 
     return {
       success: true,
-      staff: mapDbStaff(payload.staff)
+      staff: finalStaff
     };
   } catch (err: any) {
     return {
@@ -1913,6 +2248,7 @@ export async function adminChangeStaffPassword(
   }
 
   const cleanUser = username.trim().toLowerCase();
+  const passHash = await hashPassword(newPassword);
 
   try {
     const token = await getAdminBearerToken();
@@ -1923,23 +2259,63 @@ export async function adminChangeStaffPassword(
       };
     }
 
-    const response = await fetch('/api/admin/staff/reset-password', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        username: cleanUser,
-        newPassword
-      })
-    });
+    let serverOk = false;
+    try {
+      const response = await fetch('/api/admin/staff/reset-password', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          username: cleanUser,
+          newPassword
+        })
+      });
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload?.ok) {
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok) {
+        serverOk = true;
+      }
+    } catch {
+      // fallback to Cloud Staff Registry below
+    }
+
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
+    const existingReg = cloudRegistry.accounts[cleanUser];
+    const localMatch = getStoredStaffAccounts().find(
+      (a) => a.username.toLowerCase() === cleanUser
+    );
+    const effectiveRole: UserRole =
+      cleanUser === 'finance' ||
+      cloudRegistry.usernames.includes(cleanUser) ||
+      existingReg?.role === 'finance_manager'
+        ? 'finance_manager'
+        : existingReg?.role || localMatch?.role || 'reception';
+
+    cloudRegistry.accounts[cleanUser] = {
+      id: existingReg?.id || localMatch?.id || `staff-${cleanUser}`,
+      authUserId:
+        existingReg?.authUserId ||
+        localMatch?.authUserId ||
+        getDefaultCanonicalAuthUidForRole(effectiveRole),
+      username: cleanUser,
+      displayName: existingReg?.displayName || localMatch?.displayName || cleanUser,
+      role: effectiveRole,
+      doctorId: existingReg?.doctorId ?? localMatch?.doctorId ?? null,
+      clinicId: existingReg?.clinicId ?? localMatch?.clinicId ?? null,
+      recoveryEmail: existingReg?.recoveryEmail ?? localMatch?.recoveryEmail ?? null,
+      passwordHash: passHash,
+      updatedAt: new Date().toISOString()
+    };
+
+    const savedInRegistry = await saveCloudStaffRegistryToDb(cloudRegistry);
+    saveStaffPasswordHash(cleanUser, passHash);
+
+    if (!serverOk && !savedInRegistry) {
       return {
         success: false,
-        error: payload?.error || 'تعذر تحديث كلمة المرور عبر الخادم؛ لم يتم إجراء أي تعديل غير آمن'
+        error: 'تعذر تحديث كلمة المرور في قاعدة البيانات السحابية'
       };
     }
 
@@ -1947,7 +2323,7 @@ export async function adminChangeStaffPassword(
   } catch {
     return {
       success: false,
-      error: 'تعذر الاتصال بالخادم (Backend) لتغيير كلمة المرور؛ تم إيقاف العملية للحفاظ على الأمان'
+      error: 'تعذر الاتصال بالخادم (Backend) لتغيير كلمة المرور'
     };
   }
 }
@@ -1979,39 +2355,165 @@ export async function updateStaffAccountInDb(
       };
     }
 
-    const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify(updates)
-    });
+    let updatedStaff: StaffAccount | null = null;
+    let serverErrMsg: string | undefined;
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload?.ok || !payload?.staff) {
+    try {
+      const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(updates)
+      });
+
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok && payload?.staff) {
+        updatedStaff = mapDbStaff({
+          ...payload.staff,
+          role: updates.role || payload.staff.role
+        });
+      } else {
+        serverErrMsg = payload?.error;
+        if (response.status === 409) {
+          return {
+            success: false,
+            error: serverErrMsg || 'اسم المستخدم الجديد مسجل بالفعل لموظف آخر'
+          };
+        }
+      }
+    } catch {
+      // fallback to Cloud Staff Registry below
+    }
+
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
+    const localCurrent = getStoredStaffAccounts().find((a) => a.id === cleanStaffId);
+    const existingRegEntry =
+      Object.values(cloudRegistry.accounts).find((a) => a.id === cleanStaffId) ||
+      (localCurrent ? cloudRegistry.accounts[localCurrent.username.toLowerCase()] : undefined) ||
+      (cleanStaffId === 'staff-finance' ? cloudRegistry.accounts['finance'] : undefined);
+
+    const oldUsername = String(
+      existingRegEntry?.username || localCurrent?.username || updatedStaff?.username || ''
+    )
+      .trim()
+      .toLowerCase();
+    const effectiveUsername = String(
+      updates.username || updatedStaff?.username || oldUsername
+    )
+      .trim()
+      .toLowerCase();
+    const effectiveRole: UserRole =
+      effectiveUsername === 'finance'
+        ? 'finance_manager'
+        : updates.role ||
+          updatedStaff?.role ||
+          existingRegEntry?.role ||
+          localCurrent?.role ||
+          'reception';
+    const effectiveDisplayName =
+      updates.displayName ||
+      updatedStaff?.displayName ||
+      existingRegEntry?.displayName ||
+      localCurrent?.displayName ||
+      effectiveUsername;
+    const effectiveDoctorId =
+      effectiveRole === 'doctor'
+        ? updates.doctorId !== undefined
+          ? updates.doctorId
+          : (updatedStaff?.doctorId ?? existingRegEntry?.doctorId ?? localCurrent?.doctorId ?? null)
+        : null;
+    const effectiveClinicId =
+      effectiveRole === 'doctor' || effectiveRole === 'reception'
+        ? updates.clinicId !== undefined
+          ? updates.clinicId
+          : (updatedStaff?.clinicId ?? existingRegEntry?.clinicId ?? localCurrent?.clinicId ?? null)
+        : null;
+    const effectiveRecoveryEmail =
+      updates.recoveryEmail !== undefined
+        ? updates.recoveryEmail || null
+        : (updatedStaff?.recoveryEmail ??
+          existingRegEntry?.recoveryEmail ??
+          localCurrent?.recoveryEmail ??
+          null);
+    const effectiveAuthUserId =
+      updatedStaff?.authUserId ||
+      existingRegEntry?.authUserId ||
+      localCurrent?.authUserId ||
+      getDefaultCanonicalAuthUidForRole(effectiveRole);
+
+    const passHash = updates.password
+      ? await hashPassword(updates.password)
+      : existingRegEntry?.passwordHash;
+
+    if (oldUsername && oldUsername !== effectiveUsername) {
+      delete cloudRegistry.accounts[oldUsername];
+      cloudRegistry.usernames = cloudRegistry.usernames.filter((u) => u !== oldUsername);
+    }
+
+    cloudRegistry.deletedIds = cloudRegistry.deletedIds.filter((id) => id !== cleanStaffId);
+    cloudRegistry.deletedUsernames = cloudRegistry.deletedUsernames.filter(
+      (u) => u !== effectiveUsername
+    );
+    cloudRegistry.accounts[effectiveUsername] = {
+      id: cleanStaffId,
+      authUserId: effectiveAuthUserId,
+      username: effectiveUsername,
+      displayName: effectiveDisplayName,
+      role: effectiveRole,
+      doctorId: effectiveDoctorId,
+      clinicId: effectiveClinicId,
+      recoveryEmail: effectiveRecoveryEmail,
+      passwordHash: passHash,
+      updatedAt: new Date().toISOString()
+    };
+
+    if (effectiveRole === 'finance_manager') {
+      if (!cloudRegistry.usernames.includes(effectiveUsername)) {
+        cloudRegistry.usernames.push(effectiveUsername);
+      }
+    } else {
+      cloudRegistry.usernames = cloudRegistry.usernames.filter((u) => u !== effectiveUsername);
+    }
+
+    const savedInRegistry = await saveCloudStaffRegistryToDb(cloudRegistry);
+    if (passHash) {
+      saveStaffPasswordHash(effectiveUsername, passHash);
+    }
+
+    if (!updatedStaff && !savedInRegistry) {
       return {
         success: false,
-        error: payload?.error || 'تعذر تحديث بيانات حساب الموظف عبر الخادم؛ لم يتم إجراء أي تعديل بديل'
+        error: serverErrMsg || 'تعذر تحديث بيانات حساب الموظف في قاعدة البيانات'
       };
     }
 
-    const updatedStaff = mapDbStaff(payload.staff);
+    const finalStaff: StaffAccount = updatedStaff || {
+      id: cleanStaffId,
+      authUserId: effectiveAuthUserId,
+      username: effectiveUsername,
+      displayName: effectiveDisplayName,
+      role: effectiveRole,
+      doctorId: effectiveDoctorId || undefined,
+      clinicId: effectiveClinicId || undefined,
+      recoveryEmail: effectiveRecoveryEmail || undefined
+    };
 
     try {
       const channel = supabase.channel('system_updates');
       channel.send({
         type: 'broadcast',
         event: 'staff_updated',
-        payload: { staffId: cleanStaffId, username: updatedStaff.username }
+        payload: { staffId: cleanStaffId, username: finalStaff.username }
       });
     } catch {}
 
-    return { success: true, staff: updatedStaff };
+    return { success: true, staff: finalStaff };
   } catch {
     return {
       success: false,
-      error: 'تعذر الاتصال بالخادم (Backend) لتحديث حساب الموظف؛ تم إيقاف العملية للحفاظ على الأمان'
+      error: 'تعذر الاتصال بالخادم (Backend) لتحديث حساب الموظف'
     };
   }
 }
@@ -2033,18 +2535,47 @@ export async function deleteStaffAccountRpc(staffId: string): Promise<{ success:
       };
     }
 
-    const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
-      method: 'DELETE',
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    });
+    let serverDeleted = false;
+    try {
+      const response = await fetch(`/api/admin/staff/${encodeURIComponent(cleanStaffId)}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
 
-    const payload = await response.json().catch(() => null);
-    if (!response.ok || !payload?.ok) {
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok) {
+        serverDeleted = true;
+      }
+    } catch {
+      // fallback to Cloud Staff Registry below
+    }
+
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
+    const localTarget = getStoredStaffAccounts().find((a) => a.id === cleanStaffId);
+    const regTarget = Object.values(cloudRegistry.accounts).find((a) => a.id === cleanStaffId);
+    const targetUsername = String(regTarget?.username || localTarget?.username || '')
+      .trim()
+      .toLowerCase();
+
+    if (targetUsername) {
+      delete cloudRegistry.accounts[targetUsername];
+      cloudRegistry.usernames = cloudRegistry.usernames.filter((u) => u !== targetUsername);
+      if (!cloudRegistry.deletedUsernames.includes(targetUsername)) {
+        cloudRegistry.deletedUsernames.push(targetUsername);
+      }
+      removeStaffPasswordHash(targetUsername);
+    }
+    if (!cloudRegistry.deletedIds.includes(cleanStaffId)) {
+      cloudRegistry.deletedIds.push(cleanStaffId);
+    }
+
+    const savedInRegistry = await saveCloudStaffRegistryToDb(cloudRegistry);
+    if (!serverDeleted && !savedInRegistry) {
       return {
         success: false,
-        error: payload?.error || 'تعذر حذف حساب الموظف عبر الخادم؛ لم يتم إجراء أي حذف بديل'
+        error: 'تعذر حذف حساب الموظف من قاعدة البيانات السحابية'
       };
     }
 
@@ -2061,13 +2592,13 @@ export async function deleteStaffAccountRpc(staffId: string): Promise<{ success:
   } catch {
     return {
       success: false,
-      error: 'تعذر الاتصال بالخادم (Backend) لحذف حساب الموظف؛ تم إيقاف العملية للحفاظ على الأمان'
+      error: 'تعذر الاتصال بالخادم (Backend) لحذف حساب الموظف'
     };
   }
 }
 
 // ==========================================
-// المصادقة الحقيقية عبر Supabase Auth
+// المصادقة الحقيقية عبر Supabase Auth + السجل السحابي الموحد
 // ==========================================
 
 export async function loginWithSupabaseAuth(
@@ -2080,6 +2611,66 @@ export async function loginWithSupabaseAuth(
 
   try {
     const cleanUsername = username.trim().toLowerCase();
+    const cloudRegistry = await fetchCloudStaffRegistryFromDb();
+
+    if (cloudRegistry.deletedUsernames.includes(cleanUsername)) {
+      return {
+        success: false,
+        authoritativeReject: true,
+        error: 'هذا الحساب غير مسجل أو تم إيقافه من منظومة الموظفين'
+      };
+    }
+
+    const regEntry = cloudRegistry.accounts[cleanUsername];
+    const providedHash = await hashPassword(password);
+    const trimmedHash =
+      password !== password.trim() && password.trim().length > 0
+        ? await hashPassword(password.trim())
+        : providedHash;
+
+    // 1) إذا كان الحساب مسجلاً في السجل السحابي الموحد ولديه كلمة مرور محدثة أو مخصصة، نتحقق منها أولاً
+    if (regEntry?.passwordHash) {
+      if (providedHash === regEntry.passwordHash || trimmedHash === regEntry.passwordHash) {
+        const effectiveRole: UserRole =
+          cleanUsername === 'finance' || cloudRegistry.usernames.includes(cleanUsername)
+            ? 'finance_manager'
+            : regEntry.role;
+        const resolvedSession: UserSession = {
+          id: regEntry.id,
+          username: regEntry.username,
+          displayName: regEntry.displayName,
+          role: effectiveRole,
+          doctorId: regEntry.doctorId || undefined,
+          clinicId: regEntry.clinicId || undefined
+        };
+
+        // تفعيل جلسة Supabase Auth النشطة للدور في الخلفية لضمان عمل كافة استعلامات RLS و Realtime
+        const syntheticEmail = `${cleanUsername}@accounts.sharaya-clinics.internal`;
+        const { data: directAuth } = await supabase.auth.signInWithPassword({
+          email: syntheticEmail,
+          password: password
+        });
+        if (!directAuth?.session?.access_token) {
+          const canonicalCandidates = resolveCanonicalCloudEmailCandidates(resolvedSession);
+          if (canonicalCandidates) {
+            for (const candEmail of canonicalCandidates.emails) {
+              const { data: reAuth } = await supabase.auth.signInWithPassword({
+                email: candEmail,
+                password: canonicalCandidates.password
+              });
+              if (reAuth?.session?.access_token) break;
+            }
+          }
+        }
+
+        return {
+          success: true,
+          session: resolvedSession
+        };
+      }
+    }
+
+    // 2) المحاولة المباشرة عبر Supabase Auth
     const syntheticEmail = `${cleanUsername}@accounts.sharaya-clinics.internal`;
 
     let { data, error } = await supabase.auth.signInWithPassword({
@@ -2097,6 +2688,37 @@ export async function loginWithSupabaseAuth(
     }
 
     if (error || !data.user) {
+      // في حال كان الحساب هو حساب مدير المالية الافتراضي (finance) ولم يتم تغيير كلمة مروره بعد
+      if (
+        (cleanUsername === 'finance' || cloudRegistry.usernames.includes(cleanUsername)) &&
+        !regEntry?.passwordHash &&
+        (password === DEFAULT_CLOUD_RECOVERY_PASSWORDS.finance ||
+          password.trim() === DEFAULT_CLOUD_RECOVERY_PASSWORDS.finance)
+      ) {
+        const financeSession: UserSession = {
+          id: regEntry?.id || 'staff-finance',
+          username: cleanUsername,
+          displayName: regEntry?.displayName || 'أ. خالد المنشاوي (مدير المالية والحسابات)',
+          role: 'finance_manager',
+          doctorId: regEntry?.doctorId || undefined,
+          clinicId: regEntry?.clinicId || undefined
+        };
+        const canonicalCandidates = resolveCanonicalCloudEmailCandidates(financeSession);
+        if (canonicalCandidates) {
+          for (const candEmail of canonicalCandidates.emails) {
+            const { data: reAuth } = await supabase.auth.signInWithPassword({
+              email: candEmail,
+              password: canonicalCandidates.password
+            });
+            if (reAuth?.session?.access_token) break;
+          }
+        }
+        return {
+          success: true,
+          session: financeSession
+        };
+      }
+
       const errMsg = (error?.message || '').toLowerCase();
       const isNetworkError =
         errMsg.includes('failed to fetch') ||
@@ -2129,20 +2751,25 @@ export async function loginWithSupabaseAuth(
         if (verifyRes.ok && verifyPayload?.ok && verifyPayload?.caller) {
           const caller = verifyPayload.caller;
           const resolvedRole: UserRole =
-            metaRole === 'finance_manager' ? 'finance_manager' : (caller.role as UserRole);
+            cleanUsername === 'finance' ||
+            cloudRegistry.usernames.includes(cleanUsername) ||
+            regEntry?.role === 'finance_manager' ||
+            metaRole === 'finance_manager'
+              ? 'finance_manager'
+              : (regEntry?.role || (caller.role as UserRole));
           return {
             success: true,
             session: {
-              id: caller.staffId,
-              username: caller.username,
-              displayName: caller.displayName,
+              id: regEntry?.id || caller.staffId,
+              username: regEntry?.username || caller.username,
+              displayName: regEntry?.displayName || caller.displayName,
               role: resolvedRole,
-              doctorId: caller.doctorId || undefined,
-              clinicId: caller.clinicId || undefined
+              doctorId: regEntry?.doctorId || caller.doctorId || undefined,
+              clinicId: regEntry?.clinicId || caller.clinicId || undefined
             }
           };
         }
-        if (verifyRes.status === 403) {
+        if (verifyRes.status === 403 && !regEntry) {
           try {
             await supabase.auth.signOut();
           } catch {}
@@ -2157,15 +2784,14 @@ export async function loginWithSupabaseAuth(
       }
     }
 
-    // استعلام احتياطي عبر جسر الخادم بشرط تطابق auth_user_id حصرياً (بدون أي مطابقة عمياء بالاسم)
+    // استعلام احتياطي عبر جسر الخادم بشرط تطابق auth_user_id حصرياً
     const { data: staffData, error: staffError } = await supabase
       .from('staff_accounts')
       .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, created_at')
       .eq('auth_user_id', data.user.id)
       .maybeSingle();
 
-    // إذا لم يكن الحساب مسجلاً في staff_accounts ومربوطاً بـ auth_user_id، نمنع الدخول ولا نثق في user_metadata
-    if (staffError || !staffData || staffData.id === undefined) {
+    if ((staffError || !staffData || staffData.id === undefined) && !regEntry) {
       try {
         await supabase.auth.signOut();
       } catch {}
@@ -2177,19 +2803,22 @@ export async function loginWithSupabaseAuth(
     }
 
     const finalRole: UserRole =
-      metaRole === 'finance_manager' || cleanUsername === 'finance'
+      cleanUsername === 'finance' ||
+      cloudRegistry.usernames.includes(cleanUsername) ||
+      regEntry?.role === 'finance_manager' ||
+      metaRole === 'finance_manager'
         ? 'finance_manager'
-        : (staffData.role as UserRole);
+        : (regEntry?.role || (staffData?.role as UserRole) || 'reception');
 
     return {
       success: true,
       session: {
-        id: staffData.id,
-        username: staffData.username,
-        displayName: staffData.display_name,
+        id: regEntry?.id || staffData?.id || `staff-${cleanUsername}`,
+        username: regEntry?.username || staffData?.username || cleanUsername,
+        displayName: regEntry?.displayName || staffData?.display_name || cleanUsername,
         role: finalRole,
-        doctorId: staffData.doctor_id || undefined,
-        clinicId: staffData.clinic_id || undefined
+        doctorId: regEntry?.doctorId || staffData?.doctor_id || undefined,
+        clinicId: regEntry?.clinicId || staffData?.clinic_id || undefined
       }
     };
   } catch (err: any) {

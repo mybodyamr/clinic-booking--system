@@ -1782,61 +1782,109 @@ export const AdminView: React.FC = () => {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 pt-2">
               {staffAccounts.map(acc => {
+                const effectiveRole: UserRole =
+                  acc.username.toLowerCase() === 'finance' || acc.role === 'finance_manager'
+                    ? 'finance_manager'
+                    : acc.role;
                 const getRoleMeta = (role: UserRole) => {
                   switch (role) {
                     case 'admin':
-                      return { roleName: 'مدير المنظومة', icon: LayoutDashboard, color: 'text-emerald-600', bg: 'bg-emerald-50 dark:bg-emerald-950/40' };
+                      return {
+                        roleName: 'مدير المنظومة',
+                        icon: LayoutDashboard,
+                        color: 'text-emerald-600 dark:text-emerald-400',
+                        bg: 'bg-emerald-50 dark:bg-emerald-950/40',
+                        badge: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/80 dark:text-emerald-300 border border-emerald-300/60 dark:border-emerald-800'
+                      };
                     case 'finance_manager':
-                      return { roleName: 'مدير المالية', icon: Receipt, color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-950/40' };
+                      return {
+                        roleName: 'مدير المالية',
+                        icon: Receipt,
+                        color: 'text-indigo-600 dark:text-indigo-400',
+                        bg: 'bg-indigo-50 dark:bg-indigo-950/40',
+                        badge: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/80 dark:text-indigo-300 border border-indigo-300/60 dark:border-indigo-800'
+                      };
                     case 'reception':
-                      return { roleName: 'مسؤول الاستقبال', icon: UserCheck, color: 'text-amber-600', bg: 'bg-amber-50 dark:bg-amber-950/40' };
+                      return {
+                        roleName: 'مسؤول الاستقبال',
+                        icon: UserCheck,
+                        color: 'text-amber-600 dark:text-amber-400',
+                        bg: 'bg-amber-50 dark:bg-amber-950/40',
+                        badge: 'bg-amber-100 text-amber-800 dark:bg-amber-950/80 dark:text-amber-300 border border-amber-300/60 dark:border-amber-800'
+                      };
                     case 'cashier':
-                      return { roleName: 'أمين الخزينة', icon: Receipt, color: 'text-teal-600', bg: 'bg-teal-50 dark:bg-teal-950/40' };
+                      return {
+                        roleName: 'أمين الخزينة',
+                        icon: Receipt,
+                        color: 'text-teal-600 dark:text-teal-400',
+                        bg: 'bg-teal-50 dark:bg-teal-950/40',
+                        badge: 'bg-teal-100 text-teal-800 dark:bg-teal-950/80 dark:text-teal-300 border border-teal-300/60 dark:border-teal-800'
+                      };
                     case 'doctor':
-                      return { roleName: 'طبيب العيادة', icon: Stethoscope, color: 'text-blue-600', bg: 'bg-blue-50 dark:bg-blue-950/40' };
+                      return {
+                        roleName: 'طبيب العيادة',
+                        icon: Stethoscope,
+                        color: 'text-blue-600 dark:text-blue-400',
+                        bg: 'bg-blue-50 dark:bg-blue-950/40',
+                        badge: 'bg-blue-100 text-blue-800 dark:bg-blue-950/80 dark:text-blue-300 border border-blue-300/60 dark:border-blue-800'
+                      };
                     default:
-                      return { roleName: 'موظف', icon: UserCheck, color: 'text-slate-600', bg: 'bg-slate-50 dark:bg-slate-800' };
+                      return {
+                        roleName: 'موظف',
+                        icon: UserCheck,
+                        color: 'text-slate-600 dark:text-slate-400',
+                        bg: 'bg-slate-50 dark:bg-slate-800',
+                        badge: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                      };
                   }
                 };
-                const meta = getRoleMeta(acc.role);
+                const meta = getRoleMeta(effectiveRole);
                 const IconComponent = meta.icon;
                 const isProtectedAdmin =
-                  (acc.role === 'admin' && acc.username.toLowerCase() === 'admin') ||
+                  (effectiveRole === 'admin' && acc.username.toLowerCase() === 'admin') ||
                   (currentUser && (acc.id === currentUser.id || acc.username.toLowerCase() === currentUser.username.toLowerCase()));
-                const linkedDoctor = acc.role === 'doctor' && acc.doctorId ? doctors.find(d => d.id === acc.doctorId) : undefined;
-                const linkedClinic = acc.role === 'doctor' && (acc.clinicId || linkedDoctor?.clinicId)
+                const linkedDoctor = effectiveRole === 'doctor' && acc.doctorId ? doctors.find(d => d.id === acc.doctorId) : undefined;
+                const linkedClinic = effectiveRole === 'doctor' && (acc.clinicId || linkedDoctor?.clinicId)
                   ? clinics.find(c => c.id === (acc.clinicId || linkedDoctor?.clinicId))
                   : undefined;
 
                 return (
-                  <div key={acc.id} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-all">
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-8 h-8 rounded-xl ${meta.bg} border border-slate-200/70 dark:border-slate-700/70 flex items-center justify-center`}>
+                  <div key={acc.id} className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col justify-between gap-3 hover:border-slate-300 dark:hover:border-slate-700 transition-all shadow-2xs">
+                    <div className="space-y-2.5">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className={`w-9 h-9 rounded-xl ${meta.bg} border border-slate-200/70 dark:border-slate-700/70 flex items-center justify-center shrink-0`}>
                             <IconComponent className={`w-4 h-4 ${meta.color}`} />
                           </div>
-                          <div>
-                            <span className="text-[11px] font-bold text-slate-900 dark:text-white block line-clamp-1">
+                          <div className="min-w-0">
+                            <span className="text-xs font-bold text-slate-900 dark:text-white block truncate">
                               {acc.displayName}
                             </span>
-                            <span className="text-[10px] text-slate-400 font-mono">
+                            <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono block truncate" dir="ltr">
                               @{acc.username}
                             </span>
                           </div>
                         </div>
-                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
+                        <span className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full shrink-0 ${meta.badge}`}>
                           {meta.roleName}
                         </span>
                       </div>
 
-                      {acc.role === 'doctor' && (linkedDoctor || linkedClinic) && (
-                        <div className="text-[10px] text-blue-700 dark:text-blue-300 bg-blue-50/70 dark:bg-blue-950/40 px-2 py-1 rounded-lg border border-blue-200/60 dark:border-blue-800/60 truncate">
+                      <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/60">
+                        <span className="text-[10px] font-bold text-slate-600 dark:text-slate-300">حالة المصادقة السحابية:</span>
+                        <span className="inline-flex items-center gap-1 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-400">
+                          <CheckCircle2 className="w-3 h-3 shrink-0" />
+                          <span>مفعل في Supabase</span>
+                        </span>
+                      </div>
+
+                      {effectiveRole === 'doctor' && (linkedDoctor || linkedClinic) && (
+                        <div className="text-[10px] text-blue-700 dark:text-blue-300 bg-blue-50/70 dark:bg-blue-950/40 px-2.5 py-1.5 rounded-lg border border-blue-200/60 dark:border-blue-800/60 truncate font-medium">
                           {linkedDoctor ? linkedDoctor.name : 'طبيب'} {linkedClinic ? `• ${linkedClinic.name}` : ''}
                         </div>
                       )}
 
-                      {acc.role === 'reception' && (
+                      {effectiveRole === 'reception' && (
                         <div className="pt-1 space-y-1">
                           <label className="block text-[10px] font-extrabold text-amber-800 dark:text-amber-300">
                             العيادة المكلف بها (تغيير الدور فوراً):
@@ -1857,14 +1905,36 @@ export const AdminView: React.FC = () => {
                         </div>
                       )}
 
-                      <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 pt-1 truncate">
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400 flex items-center gap-1.5 pt-0.5 truncate">
                         <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                        <span className="truncate">{acc.recoveryEmail || 'لم يُحدد بريد استعادة'}</span>
+                        <span className="truncate" dir="ltr">{acc.recoveryEmail || 'لم يُحدد بريد استعادة'}</span>
                       </div>
                     </div>
 
-                    <div className="flex items-center justify-between gap-1 pt-2 border-t border-slate-200/60 dark:border-slate-800">
-                      <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 pt-2.5 border-t border-slate-200/60 dark:border-slate-800">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingStaffForFullUpdate({ ...acc, role: effectiveRole });
+                            setStaffEditUsername(acc.username);
+                            setStaffEditDisplayName(acc.displayName);
+                            setStaffEditRole(effectiveRole);
+                            setStaffEditDoctorId(acc.doctorId || doctors[0]?.id || '');
+                            setStaffEditClinicId(
+                              effectiveRole === 'reception'
+                                ? (acc.clinicId || '')
+                                : (acc.clinicId || doctors.find(d => d.id === acc.doctorId)?.clinicId || clinics[0]?.id || '')
+                            );
+                            setStaffEditEmail(acc.recoveryEmail || '');
+                            setStaffEditPassword('');
+                          }}
+                          className="px-2.5 py-1.5 text-[11px] font-bold bg-purple-100/80 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-900/70 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          title="تعديل بيانات الحساب والدور الوظيفي وكلمة المرور"
+                        >
+                          <Edit2 className="w-3 h-3 shrink-0" />
+                          <span>تعديل</span>
+                        </button>
                         <button
                           type="button"
                           onClick={() => {
@@ -1872,33 +1942,11 @@ export const AdminView: React.FC = () => {
                             setNewStaffPassword('');
                             setShowResetPassModal(true);
                           }}
-                          className="px-2 py-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          className="px-2.5 py-1.5 text-[11px] font-bold bg-emerald-100/80 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 hover:bg-emerald-200 dark:hover:bg-emerald-900/70 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
                           title="تعيين كلمة مرور جديدة"
                         >
-                          <Lock className="w-3 h-3" />
+                          <Lock className="w-3 h-3 shrink-0" />
                           <span>الرمز</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setEditingStaffForFullUpdate(acc);
-                            setStaffEditUsername(acc.username);
-                            setStaffEditDisplayName(acc.displayName);
-                            setStaffEditRole(acc.role);
-                            setStaffEditDoctorId(acc.doctorId || doctors[0]?.id || '');
-                            setStaffEditClinicId(
-                              acc.role === 'reception'
-                                ? (acc.clinicId || '')
-                                : (acc.clinicId || doctors.find(d => d.id === acc.doctorId)?.clinicId || clinics[0]?.id || '')
-                            );
-                            setStaffEditEmail(acc.recoveryEmail || '');
-                            setStaffEditPassword('');
-                          }}
-                          className="px-2 py-1 text-[10px] font-semibold text-purple-700 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
-                          title="تعديل بيانات الحساب واسم المستخدم"
-                        >
-                          <Edit2 className="w-3 h-3" />
-                          <span>تعديل</span>
                         </button>
                         <button
                           type="button"
@@ -1907,10 +1955,10 @@ export const AdminView: React.FC = () => {
                             setNewRecoveryEmail(acc.recoveryEmail || '');
                             setShowEmailModal(true);
                           }}
-                          className="px-2 py-1 text-[10px] font-semibold text-blue-700 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+                          className="px-2.5 py-1.5 text-[11px] font-bold bg-blue-100/80 dark:bg-blue-950/60 text-blue-800 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/70 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
                           title="تعديل بريد الاستعادة"
                         >
-                          <Mail className="w-3 h-3" />
+                          <Mail className="w-3 h-3 shrink-0" />
                           <span>البريد</span>
                         </button>
                       </div>
@@ -1919,7 +1967,7 @@ export const AdminView: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => setStaffToDelete(acc)}
-                          className="p-1 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
+                          className="p-1.5 text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 rounded-lg transition-colors cursor-pointer"
                           title="حذف حساب الموظف"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -3094,16 +3142,25 @@ export const AdminView: React.FC = () => {
 
       {/* نافذة إنشاء حساب موظف جديد (Phase 3) */}
       {showCreateStaffModal && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
-              <div className="w-10 h-10 rounded-2xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center">
-                <Users className="w-5 h-5" />
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-5 sm:p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl flex flex-col max-h-[88dvh] overflow-hidden">
+            <div className="flex items-center justify-between gap-2.5 pb-3 border-b border-slate-100 dark:border-slate-700 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 flex items-center justify-center shrink-0">
+                  <Users className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900 dark:text-white">إنشاء حساب موظف جديد</h3>
+                  <p className="text-[11px] text-slate-500">تفعيل فوري في Supabase Auth و Vercel عبر كافة الأجهزة</p>
+                </div>
               </div>
-              <div>
-                <h3 className="font-bold text-sm text-slate-900 dark:text-white">إنشاء حساب موظف جديد</h3>
-                <p className="text-[11px] text-slate-500">ربط مباشر مع خدمة المصادقة السحابية وجدول الكادر الوظيفي</p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateStaffModal(false)}
+                className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs font-bold hover:bg-slate-200 cursor-pointer shrink-0"
+              >
+                إغلاق
+              </button>
             </div>
 
             <form
@@ -3129,162 +3186,164 @@ export const AdminView: React.FC = () => {
                   setShowCreateStaffModal(false);
                 }
               }}
-              className="space-y-3"
+              className="flex flex-col flex-1 overflow-hidden pt-3"
             >
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  اسم الموظف الظاهر:
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={createStaffDisplayName}
-                  onChange={(e) => setCreateStaffDisplayName(e.target.value)}
-                  placeholder="مثال: أ. كريم حسن (مسؤول استقبال)"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
+              <div className="space-y-3 overflow-y-auto flex-1 pr-1 pb-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    اسم الموظف الظاهر:
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createStaffDisplayName}
+                    onChange={(e) => setCreateStaffDisplayName(e.target.value)}
+                    placeholder="مثال: أ. كريم حسن (مسؤول استقبال)"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  اسم المستخدم (لتسجيل الدخول):
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={createStaffUsername}
-                  onChange={(e) => setCreateStaffUsername(e.target.value)}
-                  placeholder="مثال: reception.2 أو doctor.ent"
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    اسم المستخدم (لتسجيل الدخول):
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createStaffUsername}
+                    onChange={(e) => setCreateStaffUsername(e.target.value)}
+                    placeholder="مثال: reception.2 أو finance.2"
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  كلمة المرور (6 أحرف على الأقل):
-                </label>
-                <input
-                  type="password"
-                  required
-                  minLength={6}
-                  value={createStaffPassword}
-                  onChange={(e) => setCreateStaffPassword(e.target.value)}
-                  placeholder="أدخل كلمة مرور قوية"
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    كلمة المرور (6 أحرف على الأقل):
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    minLength={6}
+                    value={createStaffPassword}
+                    onChange={(e) => setCreateStaffPassword(e.target.value)}
+                    placeholder="أدخل كلمة مرور قوية"
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  الدور الوظيفي (Role):
-                </label>
-                <select
-                  value={createStaffRole}
-                  onChange={(e) => {
-                    const nextRole = e.target.value as UserRole;
-                    setCreateStaffRole(nextRole);
-                    if (nextRole === 'reception') {
-                      setCreateStaffClinicId('');
-                    } else if (nextRole === 'doctor' && !createStaffDoctorId && doctors[0]) {
-                      setCreateStaffDoctorId(doctors[0].id);
-                      setCreateStaffClinicId(doctors[0].clinicId);
-                    }
-                  }}
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
-                >
-                  <option value="reception">مسؤول الاستقبال (reception)</option>
-                  <option value="cashier">أمين الخزينة (cashier)</option>
-                  <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
-                  <option value="doctor">طبيب العيادة (doctor)</option>
-                  <option value="admin">مدير المنظومة (admin)</option>
-                </select>
-              </div>
-
-              {createStaffRole === 'reception' && (
-                <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
-                  <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
-                    تخصيص موظف الاستقبال لعيادة محددة (أو جميع العيادات):
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    الدور الوظيفي (Role):
                   </label>
                   <select
-                    value={createStaffClinicId}
-                    onChange={(e) => setCreateStaffClinicId(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                    value={createStaffRole}
+                    onChange={(e) => {
+                      const nextRole = e.target.value as UserRole;
+                      setCreateStaffRole(nextRole);
+                      if (nextRole === 'reception') {
+                        setCreateStaffClinicId('');
+                      } else if (nextRole === 'doctor' && !createStaffDoctorId && doctors[0]) {
+                        setCreateStaffDoctorId(doctors[0].id);
+                        setCreateStaffClinicId(doctors[0].clinicId);
+                      }
+                    }}
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
                   >
-                    <option value="">جميع العيادات (استقبال عام)</option>
-                    {clinics.map(c => (
-                      <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
-                    ))}
+                    <option value="reception">مسؤول الاستقبال (reception)</option>
+                    <option value="cashier">أمين الخزينة (cashier)</option>
+                    <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
+                    <option value="doctor">طبيب العيادة (doctor)</option>
+                    <option value="admin">مدير المنظومة (admin)</option>
                   </select>
-                  <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                    يمكنك تغيير العيادة المخصصة لموظف الاستقبال في أي وقت بضغطة واحدة من بطاقة حسابه.
-                  </p>
                 </div>
-              )}
 
-              {createStaffRole === 'doctor' && (
-                <div className="p-3 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/70 space-y-2.5">
-                  <div>
-                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                      الطبيب المرتبط بالحساب:
+                {createStaffRole === 'reception' && (
+                  <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
+                    <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
+                      تخصيص موظف الاستقبال لعيادة محددة (أو جميع العيادات):
                     </label>
                     <select
-                      required
-                      value={createStaffDoctorId}
-                      onChange={(e) => {
-                        const docId = e.target.value;
-                        setCreateStaffDoctorId(docId);
-                        const doc = doctors.find(d => d.id === docId);
-                        if (doc?.clinicId) {
-                          setCreateStaffClinicId(doc.clinicId);
-                        }
-                      }}
-                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                      value={createStaffClinicId}
+                      onChange={(e) => setCreateStaffClinicId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
                     >
-                      {doctors.map(doc => (
-                        <option key={doc.id} value={doc.id}>
-                          {doc.name} ({doc.clinicName})
-                        </option>
+                      <option value="">جميع العيادات (استقبال عام)</option>
+                      {clinics.map(c => (
+                        <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
                       ))}
                     </select>
+                    <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                      يمكنك تغيير العيادة المخصصة لموظف الاستقبال في أي وقت بضغطة واحدة من بطاقة حسابه.
+                    </p>
                   </div>
+                )}
 
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
-                      العيادة التخصصية التابعة:
-                    </label>
-                    <input
-                      type="text"
-                      readOnly
-                      value={clinics.find(c => c.id === createStaffClinicId)?.name || 'العيادة المختارة'}
-                      className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300"
-                    />
+                {createStaffRole === 'doctor' && (
+                  <div className="p-3 rounded-2xl bg-blue-50/60 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800/70 space-y-2.5">
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                        الطبيب المرتبط بالحساب:
+                      </label>
+                      <select
+                        required
+                        value={createStaffDoctorId}
+                        onChange={(e) => {
+                          const docId = e.target.value;
+                          setCreateStaffDoctorId(docId);
+                          const doc = doctors.find(d => d.id === docId);
+                          if (doc?.clinicId) {
+                            setCreateStaffClinicId(doc.clinicId);
+                          }
+                        }}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                      >
+                        {doctors.map(doc => (
+                          <option key={doc.id} value={doc.id}>
+                            {doc.name} ({doc.clinicName})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-600 dark:text-slate-400 mb-1">
+                        العيادة التخصصية التابعة:
+                      </label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={clinics.find(c => c.id === createStaffClinicId)?.name || 'العيادة المختارة'}
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300"
+                      />
+                    </div>
                   </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    بريد استعادة الحساب (اختياري):
+                  </label>
+                  <input
+                    type="email"
+                    value={createStaffEmail}
+                    onChange={(e) => setCreateStaffEmail(e.target.value)}
+                    placeholder="employee@sharia-clinics.eg"
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
+                  />
                 </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  بريد استعادة الحساب (اختياري):
-                </label>
-                <input
-                  type="email"
-                  value={createStaffEmail}
-                  onChange={(e) => setCreateStaffEmail(e.target.value)}
-                  placeholder="employee@sharia-clinics.eg"
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
-                />
               </div>
 
-              <div className="flex items-center gap-2 pt-2">
+              <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-700 bg-white dark:bg-slate-800 shrink-0">
                 <button
                   type="submit"
                   disabled={isCreatingStaff}
                   className="flex-1 py-2.5 bg-emerald-700 hover:bg-emerald-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs shadow-md transition-colors cursor-pointer"
                 >
-                  {isCreatingStaff ? 'جاري الإنشاء والربط...' : 'إنشاء حساب الموظف'}
+                  {isCreatingStaff ? 'جاري الإنشاء والتفعيل...' : 'إنشاء وتفعيل الحساب'}
                 </button>
                 <button
                   type="button"
@@ -3348,16 +3407,25 @@ export const AdminView: React.FC = () => {
 
       {/* نافذة تعديل بيانات حساب الموظف بالكامل (الاسم، المستخدم، الدور، الطبيب، البريد، الرمز) */}
       {editingStaffForFullUpdate && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white dark:bg-slate-800 rounded-3xl p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-100 dark:border-slate-700">
-              <div className="w-10 h-10 rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 flex items-center justify-center">
-                <Edit2 className="w-5 h-5" />
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl p-5 sm:p-6 max-w-md w-full border border-slate-200 dark:border-slate-700 shadow-2xl flex flex-col max-h-[88dvh] overflow-hidden">
+            <div className="flex items-center justify-between gap-2.5 pb-3 border-b border-slate-100 dark:border-slate-700 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-purple-100 dark:bg-purple-950 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0">
+                  <Edit2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900 dark:text-white">تعديل حساب الموظف</h3>
+                  <p className="text-[11px] text-slate-500">تحديث البيانات والدور الوظيفي وكلمة المرور سحابياً</p>
+                </div>
               </div>
-              <div>
-                <h3 className="font-bold text-sm text-slate-900 dark:text-white">تعديل حساب الموظف</h3>
-                <p className="text-[11px] text-slate-500">تحديث بيانات الدخول والدور الوظيفي والبريد الرسمي والمصادقة</p>
-              </div>
+              <button
+                type="button"
+                onClick={() => setEditingStaffForFullUpdate(null)}
+                className="px-2.5 py-1 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 text-xs font-bold hover:bg-slate-200 cursor-pointer shrink-0"
+              >
+                إغلاق
+              </button>
             </div>
 
             <form
@@ -3384,137 +3452,139 @@ export const AdminView: React.FC = () => {
                   setEditingStaffForFullUpdate(null);
                 }
               }}
-              className="space-y-3"
+              className="flex flex-col flex-1 overflow-hidden pt-3"
             >
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  اسم الموظف الظاهر:
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={staffEditDisplayName}
-                  onChange={(e) => setStaffEditDisplayName(e.target.value)}
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  اسم المستخدم (تسجيل الدخول):
-                </label>
-                <input
-                  type="text"
-                  required
-                  disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
-                  value={staffEditUsername}
-                  onChange={(e) => setStaffEditUsername(e.target.value)}
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 disabled:opacity-60"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  الدور الوظيفي (Role):
-                </label>
-                <select
-                  disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
-                  value={staffEditRole}
-                  onChange={(e) => {
-                    const nextRole = e.target.value as UserRole;
-                    setStaffEditRole(nextRole);
-                    if (nextRole === 'reception') {
-                      setStaffEditClinicId('');
-                    } else if (nextRole === 'doctor' && !staffEditDoctorId && doctors[0]) {
-                      setStaffEditDoctorId(doctors[0].id);
-                      setStaffEditClinicId(doctors[0].clinicId);
-                    }
-                  }}
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white disabled:opacity-60"
-                >
-                  <option value="reception">مسؤول الاستقبال (reception)</option>
-                  <option value="cashier">أمين الخزينة (cashier)</option>
-                  <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
-                  <option value="doctor">طبيب العيادة (doctor)</option>
-                  <option value="admin">مدير المنظومة (admin)</option>
-                </select>
-              </div>
-
-              {staffEditRole === 'reception' && (
-                <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
-                  <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
-                    العيادة المخصصة لموظف الاستقبال (تغيير الدور لأي عيادة):
+              <div className="space-y-3 overflow-y-auto flex-1 pr-1 pb-2">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    اسم الموظف الظاهر:
                   </label>
-                  <select
-                    value={staffEditClinicId}
-                    onChange={(e) => setStaffEditClinicId(e.target.value)}
-                    className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
-                  >
-                    <option value="">جميع العيادات (استقبال عام)</option>
-                    {clinics.map(c => (
-                      <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {staffEditRole === 'doctor' && (
-                <div className="p-3 rounded-2xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/70 space-y-2">
-                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                    الطبيب المرتبط بالحساب:
-                  </label>
-                  <select
+                  <input
+                    type="text"
                     required
-                    value={staffEditDoctorId}
+                    value={staffEditDisplayName}
+                    onChange={(e) => setStaffEditDisplayName(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    اسم المستخدم (تسجيل الدخول):
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
+                    value={staffEditUsername}
+                    onChange={(e) => setStaffEditUsername(e.target.value)}
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-mono text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 disabled:opacity-60"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    الدور الوظيفي (Role):
+                  </label>
+                  <select
+                    disabled={editingStaffForFullUpdate.username.toLowerCase() === 'admin'}
+                    value={staffEditRole}
                     onChange={(e) => {
-                      const docId = e.target.value;
-                      setStaffEditDoctorId(docId);
-                      const doc = doctors.find(d => d.id === docId);
-                      if (doc?.clinicId) {
-                        setStaffEditClinicId(doc.clinicId);
+                      const nextRole = e.target.value as UserRole;
+                      setStaffEditRole(nextRole);
+                      if (nextRole === 'reception') {
+                        setStaffEditClinicId('');
+                      } else if (nextRole === 'doctor' && !staffEditDoctorId && doctors[0]) {
+                        setStaffEditDoctorId(doctors[0].id);
+                        setStaffEditClinicId(doctors[0].clinicId);
                       }
                     }}
-                    className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white disabled:opacity-60"
                   >
-                    {doctors.map(doc => (
-                      <option key={doc.id} value={doc.id}>
-                        {doc.name} ({doc.clinicName})
-                      </option>
-                    ))}
+                    <option value="reception">مسؤول الاستقبال (reception)</option>
+                    <option value="cashier">أمين الخزينة (cashier)</option>
+                    <option value="finance_manager">مدير المالية والحسابات (finance_manager)</option>
+                    <option value="doctor">طبيب العيادة (doctor)</option>
+                    <option value="admin">مدير المنظومة (admin)</option>
                   </select>
                 </div>
-              )}
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  بريد استعادة الحساب:
-                </label>
-                <input
-                  type="email"
-                  value={staffEditEmail}
-                  onChange={(e) => setStaffEditEmail(e.target.value)}
-                  placeholder="employee@sharia-clinics.eg"
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
-                />
+                {staffEditRole === 'reception' && (
+                  <div className="p-3 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/80 space-y-2">
+                    <label className="block text-xs font-bold text-amber-900 dark:text-amber-300">
+                      العيادة المخصصة لموظف الاستقبال (تغيير الدور لأي عيادة):
+                    </label>
+                    <select
+                      value={staffEditClinicId}
+                      onChange={(e) => setStaffEditClinicId(e.target.value)}
+                      className="w-full px-3 py-2 rounded-xl border border-amber-300 dark:border-amber-700 bg-white dark:bg-slate-900 text-xs font-medium text-slate-900 dark:text-white"
+                    >
+                      <option value="">جميع العيادات (استقبال عام)</option>
+                      {clinics.map(c => (
+                        <option key={c.id} value={c.id}>عيادة مخصصة: {c.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {staffEditRole === 'doctor' && (
+                  <div className="p-3 rounded-2xl bg-purple-50/60 dark:bg-purple-950/30 border border-purple-200 dark:border-purple-800/70 space-y-2">
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                      الطبيب المرتبط بالحساب:
+                    </label>
+                    <select
+                      required
+                      value={staffEditDoctorId}
+                      onChange={(e) => {
+                        const docId = e.target.value;
+                        setStaffEditDoctorId(docId);
+                        const doc = doctors.find(d => d.id === docId);
+                        if (doc?.clinicId) {
+                          setStaffEditClinicId(doc.clinicId);
+                        }
+                      }}
+                      className="w-full px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs text-slate-900 dark:text-white"
+                    >
+                      {doctors.map(doc => (
+                        <option key={doc.id} value={doc.id}>
+                          {doc.name} ({doc.clinicName})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    بريد استعادة الحساب:
+                  </label>
+                  <input
+                    type="email"
+                    value={staffEditEmail}
+                    onChange={(e) => setStaffEditEmail(e.target.value)}
+                    placeholder="employee@sharia-clinics.eg"
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    كلمة المرور الجديدة (اتركها فارغة إذا لم ترد التغيير):
+                  </label>
+                  <input
+                    type="password"
+                    value={staffEditPassword}
+                    onChange={(e) => setStaffEditPassword(e.target.value)}
+                    placeholder="اتركها فارغة للاحتفاظ بكلمة المرور الحالية"
+                    dir="ltr"
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
+                  />
+                </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
-                  كلمة المرور الجديدة (اتركها فارغة إذا لم ترد التغيير):
-                </label>
-                <input
-                  type="password"
-                  value={staffEditPassword}
-                  onChange={(e) => setStaffEditPassword(e.target.value)}
-                  placeholder="اتركها فارغة للاحتفاظ بكلمة المرور الحالية"
-                  dir="ltr"
-                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 text-xs text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500"
-                />
-              </div>
-
-              <div className="flex items-center gap-2 pt-2">
+              <div className="flex items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-700 bg-white dark:bg-slate-800 shrink-0">
                 <button
                   type="submit"
                   disabled={isSavingStaff}

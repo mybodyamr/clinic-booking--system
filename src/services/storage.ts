@@ -46,7 +46,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v8_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v9_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -563,30 +563,35 @@ export const DEFAULT_PASSWORD_HASHES: Record<string, string> = {
 export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
   {
     id: 'staff-admin',
+    authUserId: '00000000-0000-0000-0000-000000000101',
     username: 'admin',
     displayName: 'د. أحمد الشناوي (مدير المنظومة)',
     role: 'admin',
   },
   {
     id: 'staff-finance',
+    authUserId: '00000000-0000-0000-0000-000000000101',
     username: 'finance',
     displayName: 'أ. خالد المنشاوي (مدير المالية والحسابات)',
     role: 'finance_manager',
   },
   {
     id: 'staff-reception',
+    authUserId: '00000000-0000-0000-0000-000000000102',
     username: 'reception',
     displayName: 'أ. سارة مصطفى (مسؤولة الاستقبال)',
     role: 'reception',
   },
   {
     id: 'staff-cashier',
+    authUserId: '00000000-0000-0000-0000-000000000103',
     username: 'cashier',
     displayName: 'أ. محمود إبراهيم (أمين الصندوق والخزينة)',
     role: 'cashier',
   },
   {
     id: 'staff-doctor',
+    authUserId: '00000000-0000-0000-0000-000000000104',
     username: 'doctor',
     displayName: 'د. علي عبد الرحمن (عيادة الباطنة)',
     role: 'doctor',
@@ -595,6 +600,7 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
   },
   {
     id: 'staff-doctor-pediatrics',
+    authUserId: '00000000-0000-0000-0000-000000000105',
     username: 'doctor.pediatrics',
     displayName: 'د. فاطمة الزهراء كمال (عيادة الأطفال)',
     role: 'doctor',
@@ -603,6 +609,7 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
   },
   {
     id: 'staff-doctor-ortho',
+    authUserId: '00000000-0000-0000-0000-000000000106',
     username: 'doctor.ortho',
     displayName: 'د. حسام الدين عبد الله (عيادة العظام)',
     role: 'doctor',
@@ -611,6 +618,7 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
   },
   {
     id: 'staff-doctor-dental',
+    authUserId: '00000000-0000-0000-0000-000000000107',
     username: 'doctor.dental',
     displayName: 'د. منى الشاذلي (عيادة الأسنان)',
     role: 'doctor',
@@ -618,6 +626,28 @@ export const DEFAULT_STAFF_ACCOUNTS: StaffAccount[] = [
     clinicId: 'clinic-dental',
   }
 ];
+
+function normalizeStaffAccountItem(acc: StaffAccount): StaffAccount {
+  const cleanUser = String(acc?.username || '').trim().toLowerCase();
+  const effectiveRole: UserRole =
+    cleanUser === 'finance' || acc?.role === 'finance_manager'
+      ? 'finance_manager'
+      : acc.role;
+  const fallbackAuthUid =
+    acc.authUserId ||
+    (effectiveRole === 'admin' || effectiveRole === 'finance_manager'
+      ? '00000000-0000-0000-0000-000000000101'
+      : effectiveRole === 'reception'
+      ? '00000000-0000-0000-0000-000000000102'
+      : effectiveRole === 'cashier'
+      ? '00000000-0000-0000-0000-000000000103'
+      : '00000000-0000-0000-0000-000000000104');
+  return {
+    ...acc,
+    role: effectiveRole,
+    authUserId: fallbackAuthUid,
+  };
+}
 
 export function getStoredStaffAccounts(): StaffAccount[] {
   try {
@@ -628,7 +658,17 @@ export function getStoredStaffAccounts(): StaffAccount[] {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
+      const normalized = parsed.map(normalizeStaffAccountItem);
+      const hasFinance = normalized.some(
+        (a: StaffAccount) => String(a.username || '').trim().toLowerCase() === 'finance'
+      );
+      if (!hasFinance) {
+        const defaultFinance = DEFAULT_STAFF_ACCOUNTS.find(a => a.username === 'finance');
+        if (defaultFinance) {
+          normalized.splice(1, 0, defaultFinance);
+        }
+      }
+      return normalized;
     }
     return DEFAULT_STAFF_ACCOUNTS;
   } catch (e) {
@@ -640,15 +680,25 @@ export function getStoredStaffAccounts(): StaffAccount[] {
 export function saveStaffAccounts(accounts: StaffAccount[]): void {
   try {
     // عدم تخزين البريد الإلكتروني للاستعادة (recoveryEmail) في localStorage لحماية خصوصية الحسابات
-    const safeForLocalStorage = (accounts || []).map(({ recoveryEmail: _omitted, ...rest }) => rest);
+    const safeForLocalStorage = (accounts || [])
+      .map(normalizeStaffAccountItem)
+      .map(({ recoveryEmail: _omitted, ...rest }) => rest);
     localStorage.setItem(STORAGE_KEYS.STAFF_ACCOUNTS, JSON.stringify(safeForLocalStorage));
   } catch (e) {
     console.error('فشل حفظ حسابات الموظفين:', e);
   }
 }
 
-export function removeStaffPasswordHash(_username: string): void {
+const runtimeStaffPasswordHashes: Record<string, string> = {
+  ...DEFAULT_PASSWORD_HASHES,
+};
+
+export function removeStaffPasswordHash(username: string): void {
   try {
+    const cleanUser = String(username || '').trim().toLowerCase();
+    if (cleanUser) {
+      delete runtimeStaffPasswordHashes[cleanUser];
+    }
     localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
   } catch {
     // ignore
@@ -696,11 +746,15 @@ export function getStoredStaffPasswordHashes(): Record<string, string> {
     // تنظيف أي تجزئات قديمة مخزنة في localStorage لمنع قراءتها من الكونسول
     localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
   } catch {}
-  return { ...DEFAULT_PASSWORD_HASHES };
+  return { ...DEFAULT_PASSWORD_HASHES, ...runtimeStaffPasswordHashes };
 }
 
-export function saveStaffPasswordHash(_username: string, _newHash: string): void {
+export function saveStaffPasswordHash(username: string, newHash: string): void {
   try {
+    const cleanUser = String(username || '').trim().toLowerCase();
+    if (cleanUser && newHash) {
+      runtimeStaffPasswordHashes[cleanUser] = newHash;
+    }
     localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
   } catch {}
 }

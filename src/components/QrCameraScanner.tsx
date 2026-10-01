@@ -494,99 +494,97 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
           {/* حالة تعذر فتح الكاميرا أو رفض الإذن */}
           {cameraState === 'error' && (
             <div className="text-center space-y-3 text-white max-w-md mx-auto">
-              <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center">
-                <AlertTriangle className="w-6 h-6 text-amber-400" />
+              <div className="w-11 h-11 mx-auto rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center">
+                <AlertTriangle className="w-5 h-5 text-amber-400" />
               </div>
-              <div className="text-xs font-bold text-amber-200 leading-relaxed">
+              <div className="text-xs font-bold text-amber-200 leading-relaxed px-1">
                 {errorMessage || 'تعذر تشغيل البث المباشر للكاميرا في المتصفح'}
               </div>
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2 pt-1">
                 <button
                   type="button"
                   onClick={() => startCameraStream(facingMode, true)}
-                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
                 >
                   <RefreshCw className="w-4 h-4" />
-                  <span>تشغيل الكاميرا المباشرة</span>
+                  <span>إعادة تشغيل الكاميرا</span>
                 </button>
                 <button
                   type="button"
+                  disabled={isProcessingImage}
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
                 >
-                  <Camera className="w-4 h-4" />
-                  <span>التقاط صورة الكود بالكاميرا (بديل فوري)</span>
+                  {isProcessingImage ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span>جاري قراءة الكود...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Camera className="w-4 h-4" />
+                      <span>التقاط صورة الكود فوراً</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
           )}
         </div>
 
-        {/* شريط أدوات التحكم بالكاميرا في أسفل نافذة المسح */}
-        <div className="bg-slate-900/95 border-t border-slate-800 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-200">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {cameraState === 'active' ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleSwitchCamera}
-                  className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer border border-slate-700"
-                  title="تبديل بين الكاميرا الخلفية والأمامية"
-                >
-                  <SwitchCamera className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>تبديل الكاميرا</span>
-                </button>
+        {/* مدخل الصورة المخفي لالتقاط الكود مباشرة بالكاميرا أو المعرض */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          onChange={handleFileCaptureChange}
+          className="hidden"
+        />
 
-                {torchSupported && (
-                  <button
-                    type="button"
-                    onClick={handleToggleTorch}
-                    className={`px-2.5 py-1.5 rounded-xl font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer border ${
-                      torchOn
-                        ? 'bg-amber-400 text-slate-950 border-amber-300'
-                        : 'bg-slate-800 hover:bg-slate-700 text-slate-100 border-slate-700'
-                    }`}
-                    title="تشغيل أو إيقاف كشاف الهاتف"
-                  >
-                    <Flashlight className="w-3.5 h-3.5" />
-                    <span>{torchOn ? 'إيقاف الفلاش' : 'الفلاش'}</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    stopCameraStream();
-                    setCameraState('stopped');
-                  }}
-                  className="px-2.5 py-1.5 rounded-xl bg-rose-950/80 hover:bg-rose-900 text-rose-200 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border border-rose-800/60"
-                >
-                  <CameraOff className="w-3.5 h-3.5" />
-                  <span>إيقاف</span>
-                </button>
-              </>
-            ) : (
+        {/* شريط أدوات التحكم بالكاميرا — يظهر فقط عندما يكون البث المباشر للكاميرا نشطاً لمنع تكرار الأزرار */}
+        {cameraState === 'active' && (
+          <div className="bg-slate-900/95 border-t border-slate-800 px-3 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-200">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
-                onClick={() => startCameraStream(facingMode, true)}
-                className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer"
+                onClick={handleSwitchCamera}
+                className="px-2.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer border border-slate-700"
+                title="تبديل بين الكاميرا الخلفية والأمامية"
               >
-                <Camera className="w-3.5 h-3.5" />
-                <span>فتح الكاميرا المباشرة</span>
+                <SwitchCamera className="w-3.5 h-3.5 text-emerald-400" />
+                <span>تبديل الكاميرا</span>
               </button>
-            )}
-          </div>
 
-          {/* زر مسح من صورة أو كاميرا الهاتف الأصلية */}
-          <div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={handleFileCaptureChange}
-              className="hidden"
-            />
+              {torchSupported && (
+                <button
+                  type="button"
+                  onClick={handleToggleTorch}
+                  className={`px-2.5 py-1.5 rounded-xl font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer border ${
+                    torchOn
+                      ? 'bg-amber-400 text-slate-950 border-amber-300'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-100 border-slate-700'
+                  }`}
+                  title="تشغيل أو إيقاف كشاف الهاتف"
+                >
+                  <Flashlight className="w-3.5 h-3.5" />
+                  <span>{torchOn ? 'إيقاف الفلاش' : 'الفلاش'}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  stopCameraStream();
+                  setCameraState('stopped');
+                }}
+                className="px-2.5 py-1.5 rounded-xl bg-rose-950/80 hover:bg-rose-900 text-rose-200 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer border border-rose-800/60"
+              >
+                <CameraOff className="w-3.5 h-3.5" />
+                <span>إيقاف</span>
+              </button>
+            </div>
+
             <button
               type="button"
               disabled={isProcessingImage}
@@ -602,12 +600,12 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
               ) : (
                 <>
                   <ImageUp className="w-3.5 h-3.5" />
-                  <span>مسح من صورة / كاميرا</span>
+                  <span>مسح من صورة</span>
                 </>
               )}
             </button>
           </div>
-        </div>
+        )}
       </div>
 
       {/* رسالة توضيحية أو خطأ قراءة صورة */}

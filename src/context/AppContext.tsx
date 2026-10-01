@@ -131,7 +131,9 @@ import {
   saveConsultationRegistryToDb,
   saveInsuranceContractsToDb,
   saveInsuranceBookingsMapToDb,
-  saveShiftHandoversToDb
+  saveShiftHandoversToDb,
+  parseCloudStaffRegistryState,
+  mergeStaffAccountsWithCloudRegistry
 } from '../services/supabaseService';
 
 interface AppContextType {
@@ -471,9 +473,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveDailySchedule(initialSchedule);
           saveDailyScheduleToDb(initialSchedule);
         }
+        const cloudStaffRegistry = parseCloudStaffRegistryState(
+          dbSettings ? dbSettings['finance_managers_json'] : null
+        );
         if (dbStaff && dbStaff.length > 0) {
-          setStaffAccounts(dbStaff);
-          saveStaffAccounts(dbStaff);
+          const mergedStaff = mergeStaffAccountsWithCloudRegistry(dbStaff, cloudStaffRegistry);
+          setStaffAccounts(mergedStaff);
+          saveStaffAccounts(mergedStaff);
+        } else if (dbSettings && dbSettings['finance_managers_json']) {
+          const mergedStaff = mergeStaffAccountsWithCloudRegistry(
+            getStoredStaffAccounts(),
+            cloudStaffRegistry
+          );
+          setStaffAccounts(mergedStaff);
+          saveStaffAccounts(mergedStaff);
         }
         if (dbSettings && dbSettings['support_info_text']) {
           setSupportInfoText(dbSettings['support_info_text']);
@@ -574,22 +587,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (currentStored) {
           const { data: authSessionData } = await supabase.auth.getSession();
           const authUid = authSessionData?.session?.user?.id;
-          const authoritativeList = (dbStaff && dbStaff.length > 0) ? dbStaff : getStoredStaffAccounts();
-          const matchedStaff = authoritativeList.find(
-            s => (authUid && s.authUserId === authUid) || s.username.toLowerCase() === currentStored.username.toLowerCase()
-          );
+          const baseList = (dbStaff && dbStaff.length > 0) ? dbStaff : getStoredStaffAccounts();
+          const authoritativeList = mergeStaffAccountsWithCloudRegistry(baseList, cloudStaffRegistry);
+          const matchedStaff =
+            authoritativeList.find(
+              s =>
+                s.id === currentStored.id ||
+                s.username.toLowerCase() === currentStored.username.toLowerCase()
+            ) ||
+            authoritativeList.find(s => Boolean(authUid && s.authUserId === authUid));
 
           if (matchedStaff) {
             const effectiveStaffRole: UserRole =
-              currentStored.role === 'finance_manager' || matchedStaff.username.toLowerCase() === 'finance'
+              currentStored.role === 'finance_manager' ||
+              matchedStaff.username.toLowerCase() === 'finance' ||
+              matchedStaff.role === 'finance_manager'
                 ? 'finance_manager'
                 : matchedStaff.role;
-            // إذا كان الحساب مرتبطاً بـ Supabase Auth، يشترط وجود جلسة JWT سحابية نشطة ومطابقة
-            if (matchedStaff.authUserId && (!authUid || matchedStaff.authUserId !== authUid)) {
-              setCurrentUser(null);
-              saveSession(null);
-              setActiveView('landing');
-            } else if (
+
+            if (!authUid) {
+              ensureActiveSupabaseSession(true).catch(() => {});
+            }
+
+            if (
               currentStored.role !== effectiveStaffRole ||
               currentStored.id !== matchedStaff.id ||
               (currentStored.clinicId || '') !== (matchedStaff.clinicId || '') ||
@@ -904,6 +924,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 }
               } catch {}
             }
+            if (freshSettings['finance_managers_json']) {
+              try {
+                const reg = parseCloudStaffRegistryState(freshSettings['finance_managers_json']);
+                setStaffAccounts(prev => {
+                  const next = mergeStaffAccountsWithCloudRegistry(prev, reg);
+                  if (JSON.stringify(prev) !== JSON.stringify(next)) {
+                    saveStaffAccounts(next);
+                    return next;
+                  }
+                  return prev;
+                });
+              } catch {}
+            }
           }
         } catch {}
       })
@@ -1135,6 +1168,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
           } catch {}
         }
+
+        if (
+          freshSettings?.['finance_managers_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const reg = parseCloudStaffRegistryState(freshSettings['finance_managers_json']);
+            setStaffAccounts(prev => {
+              const next = mergeStaffAccountsWithCloudRegistry(prev, reg);
+              if (JSON.stringify(prev) !== JSON.stringify(next)) {
+                saveStaffAccounts(next);
+                return next;
+              }
+              return prev;
+            });
+          } catch {}
+        }
       } catch {
         // silent fallback
       }
@@ -1349,31 +1400,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     let authSuccess = false;
     let matchedUser: UserSession | null = null;
 
-    // مطابقة الحسابات المشفرة محلياً (SHA-256 Hash Verification) في وضع Offline أو لحساب مدير المالية الافتراضي قبل تهيئة البذور السحابية
+    // مطابقة الحسابات المشفرة (SHA-256 Hash Verification) في وضع Offline أو للسجل السحابي الموحد
     const matchedAccount = staffAccounts.find(
       acc => acc.username.toLowerCase() === cleanUser
     );
 
-    if (
-      matchedAccount &&
-      (!isSupabaseConfigured || (!rejectedByCloudAuth && matchedAccount.role === 'finance_manager') || (cleanUser === 'finance' && matchedAccount.role === 'finance_manager'))
-    ) {
+    if (matchedAccount) {
       const storedHashes = getStoredStaffPasswordHashes();
       const providedHash = await hashPassword(pass);
       const expectedHash = storedHashes[matchedAccount.username.toLowerCase()];
 
       if (expectedHash && providedHash === expectedHash) {
+        const effectiveRole: UserRole =
+          cleanUser === 'finance' || matchedAccount.role === 'finance_manager'
+            ? 'finance_manager'
+            : matchedAccount.role;
         authSuccess = true;
         matchedUser = {
           id: matchedAccount.id,
           username: matchedAccount.username,
           displayName: matchedAccount.displayName,
-          role: matchedAccount.role,
+          role: effectiveRole,
           doctorId: matchedAccount.doctorId,
           clinicId: matchedAccount.clinicId,
         };
-        if (isSupabaseConfigured && matchedAccount.role === 'finance_manager') {
-          ensureAdminOrFinanceSupabaseSession().then(() => {
+        if (isSupabaseConfigured) {
+          saveSession(matchedUser);
+          ensureActiveSupabaseSession(true).then(() => {
             fetchBookingsFromDb().then(freshB => {
               if (freshB) {
                 setBookings(freshB);
