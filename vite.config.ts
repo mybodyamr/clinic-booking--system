@@ -9,6 +9,8 @@ export default defineConfig(() => {
     envPrefix: 'APP_PUBLIC_',
     build: {
       sourcemap: false,
+      target: ['es2018', 'chrome80', 'firefox78', 'safari13'],
+      cssTarget: ['chrome80', 'firefox78', 'safari13'],
     },
     resolve: {
       alias: {

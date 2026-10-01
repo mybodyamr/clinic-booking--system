@@ -27,8 +27,8 @@
     <script>
       (function() {
         try {
-          const theme = localStorage.getItem('sharaya_theme_v2');
-          if (theme === 'dark' || (!theme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+          var theme = localStorage.getItem('sharaya_theme_v2');
+          if (theme === 'dark' || (!theme && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
             document.documentElement.classList.add('dark');
             document.documentElement.style.colorScheme = 'dark';
           } else {
@@ -42,7 +42,7 @@
           if ('caches' in window) {
             window.caches.keys().then(function(keys) {
               keys.forEach(function(key) {
-                if (key !== 'sharaya-clinics-v13') {
+                if (key !== 'sharaya-clinics-v14') {
                   window.caches.delete(key);
                 } else {
                   window.caches.open(key).then(function(cache) {
@@ -82,6 +82,9 @@
   </head>
   <body class="bg-[#F7FAF8] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 antialiased selection:bg-emerald-800 selection:text-white transition-colors duration-300">
     <div id="root"></div>
+    <script nomodule>
+      document.getElementById('root').innerHTML = '<div style="font-family: Tahoma, Arial, sans-serif; direction: rtl; text-align: center; padding: 40px 20px; max-width: 600px; margin: 40px auto; background: #fff; border: 2px solid #065f46; border-radius: 16px;"><h2 style="color: #065f46; margin-bottom: 12px;">متصفح الإنترنت على هذا الجهاز قديم جداً</h2><p style="color: #334155; font-size: 15px; line-height: 1.7;">نسخة المتصفح الحالية على ويندوز 7 قديمة جداً (منذ عام 2015) ولا تدعم تشغيل المنظومات السحابية الحديثة.<br/><strong>الحل السريع:</strong> افتح الرابط من متصفح <strong>Firefox</strong> الموجود أسفل الشاشة، أو قم بتحديث Google Chrome إلى الإصدار 109 الخاص بويندوز 7.</p></div>';
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
