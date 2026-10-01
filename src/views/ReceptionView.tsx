@@ -41,6 +41,7 @@ export const ReceptionView: React.FC = () => {
     updateClinic,
     updateBookingStatus, 
     admitPatient,
+    callNextPatientInClinic,
     markPatientLate,
     restoreLatePatient,
     createBooking, 
@@ -90,11 +91,31 @@ export const ReceptionView: React.FC = () => {
       return matchClinic && matchStatus && matchSearch;
     })
     .sort((a, b) => {
-      // فرز حسب وقت تسجيل السداد أو الإعفاء
+      // فرز حسب وقت تسجيل السداد أو الإعفاء ثم رقم الدور
       const timeA = new Date(a.paidAt || a.createdAt).getTime();
       const timeB = new Date(b.paidAt || b.createdAt).getTime();
-      return timeA - timeB;
+      if (timeA !== timeB) return timeA - timeB;
+      return a.queuePosition - b.queuePosition;
     });
+
+  // حساب الترتيب التسلسلي الفعلي لكل مريض منتظر داخل عيادته (1، 2، 3...)
+  const clinicTurnOrderMap = React.useMemo(() => {
+    const map: Record<string, number> = {};
+    clinics.forEach(c => {
+      const clinicWaiting = confirmedBookings
+        .filter(b => b.clinicId === c.id && b.status === 'waiting')
+        .sort((a, b) => {
+          const timeA = new Date(a.paidAt || a.createdAt).getTime();
+          const timeB = new Date(b.paidAt || b.createdAt).getTime();
+          if (timeA !== timeB) return timeA - timeB;
+          return a.queuePosition - b.queuePosition;
+        });
+      clinicWaiting.forEach((b, idx) => {
+        map[b.id] = idx + 1;
+      });
+    });
+    return map;
+  }, [confirmedBookings, clinics]);
 
   const waitingCount = confirmedBookings.filter(b => b.status === 'waiting' && b.date === todayStr).length;
   const inProgressCount = confirmedBookings.filter(b => b.status === 'in-progress' && b.date === todayStr).length;
@@ -406,6 +427,119 @@ export const ReceptionView: React.FC = () => {
       {activeTab === 'queue' && (
         <div className="space-y-4">
           
+          {/* لوحة النداء التسلسلي السريع لكل عيادة بضغطة واحدة */}
+          <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-700/70 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+                <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  النداء التسلسلي السريع للعيادات (بضغطة واحدة)
+                </h3>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                الضغط على «نداء الدور التالي» ينهي كشف المريض الحالي تلقائياً ويدخل المريض الذي يليه في الطابور الفعلي
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+              {(selectedClinicFilter === 'all'
+                ? clinics
+                : clinics.filter(c => c.id === selectedClinicFilter)
+              ).map(clinic => {
+                const clinicConfirmed = confirmedBookings
+                  .filter(b => b.clinicId === clinic.id && b.status !== 'cancelled')
+                  .sort((a, b) => {
+                    const timeA = new Date(a.paidAt || a.createdAt).getTime();
+                    const timeB = new Date(b.paidAt || b.createdAt).getTime();
+                    if (timeA !== timeB) return timeA - timeB;
+                    return a.queuePosition - b.queuePosition;
+                  });
+                const currentInside = clinicConfirmed.find(b => b.status === 'in-progress') || null;
+                const waitingInClinic = clinicConfirmed.filter(b => b.status === 'waiting');
+                const nextInLine = waitingInClinic[0] || null;
+
+                return (
+                  <div
+                    key={clinic.id}
+                    className={`p-3.5 rounded-xl border transition-all flex flex-col justify-between gap-3 ${
+                      currentInside
+                        ? 'bg-blue-50/40 dark:bg-blue-950/20 border-blue-200 dark:border-blue-800/70'
+                        : nextInLine
+                        ? 'bg-emerald-50/40 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800/70'
+                        : 'bg-slate-50/70 dark:bg-slate-900/40 border-slate-200 dark:border-slate-800'
+                    }`}
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-extrabold text-xs text-slate-900 dark:text-white truncate">
+                          {clinic.name}
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 shrink-0">
+                          منتظر: {waitingInClinic.length}
+                        </span>
+                      </div>
+
+                      <div className="text-[11px] space-y-1">
+                        <div className="flex items-center justify-between gap-1 text-slate-600 dark:text-slate-300">
+                          <span>داخل العيادة:</span>
+                          {currentInside ? (
+                            <strong className="text-blue-700 dark:text-blue-300 font-bold truncate max-w-[160px]">
+                              {currentInside.ticketNumber} — {currentInside.patientName}
+                            </strong>
+                          ) : (
+                            <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
+                              متاحة الآن
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between gap-1 text-slate-600 dark:text-slate-300">
+                          <span>الدور التالي (#1):</span>
+                          {nextInLine ? (
+                            <strong className="text-emerald-800 dark:text-emerald-300 font-bold truncate max-w-[160px]">
+                              {nextInLine.ticketNumber} — {nextInLine.patientName}
+                            </strong>
+                          ) : (
+                            <span className="text-slate-400">لا يوجد منتظرون</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {nextInLine ? (
+                      <button
+                        onClick={() => callNextPatientInClinic(clinic.id)}
+                        className="w-full py-2 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition-all cursor-pointer"
+                      >
+                        <ArrowRight className="w-3.5 h-3.5" />
+                        <span>
+                          {currentInside
+                            ? `إنهاء (${currentInside.ticketNumber}) ونداء التالي (${nextInLine.ticketNumber})`
+                            : `نداء الدور التالي (${nextInLine.ticketNumber})`}
+                        </span>
+                      </button>
+                    ) : currentInside ? (
+                      <button
+                        onClick={() => callNextPatientInClinic(clinic.id)}
+                        className="w-full py-2 px-3 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-2xs transition-all cursor-pointer"
+                      >
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>إنهاء الكشف الحالي ({currentInside.ticketNumber})</span>
+                      </button>
+                    ) : (
+                      <button
+                        disabled
+                        className="w-full py-2 px-3 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-500 font-bold text-xs cursor-not-allowed"
+                      >
+                        لا توجد أدوار في الانتظار
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           {/* شريط الفلاتر والبحث السريع */}
           <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="relative">
@@ -508,12 +642,26 @@ export const ReceptionView: React.FC = () => {
                         <span className="text-[10px] bg-emerald-50 dark:bg-emerald-900/40 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded border border-emerald-200 dark:border-emerald-800">
                           {b.paymentStatus === 'paid' ? `مسدد (${b.fee} ج.م)` : 'إعفاء خيري'}
                         </span>
+
+                        {b.status === 'waiting' && clinicTurnOrderMap[b.id] && (
+                          <span
+                            className={`text-[10px] px-2 py-0.5 rounded-full font-extrabold border ${
+                              clinicTurnOrderMap[b.id] === 1
+                                ? 'bg-blue-600 text-white border-blue-500 shadow-2xs'
+                                : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border-slate-300 dark:border-slate-700'
+                            }`}
+                          >
+                            {clinicTurnOrderMap[b.id] === 1
+                              ? 'الدور القادم للدخول (#1)'
+                              : `ترتيب الدخول بالعيادة: #${clinicTurnOrderMap[b.id]}`}
+                          </span>
+                        )}
                       </div>
 
                       <div className="text-slate-600 dark:text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
                         <span>العيادة: <strong>{b.clinicName}</strong></span>
                         <span>الطبيب: <strong>{b.doctorName}</strong></span>
-                        <span>رقم الدور: <strong className="font-mono text-emerald-700 dark:text-emerald-400">#{b.queuePosition}</strong></span>
+                        <span>رقم التذكرة العام: <strong className="font-mono text-emerald-700 dark:text-emerald-400">#{b.queuePosition}</strong></span>
                         <span>وقت السداد: <strong className="font-mono">{b.paidAt ? new Date(b.paidAt).toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : 'مسجل'}</strong></span>
                       </div>
                     </div>

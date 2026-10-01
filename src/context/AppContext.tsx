@@ -180,6 +180,7 @@ interface AppContextType {
   updateDoctorMaxBookings: (doctorId: string, maxDailyBookings: number) => void;
   checkClinicAvailabilityStatus: (clinicId: string, doctorId: string, date?: string) => ClinicAvailabilityResult | null;
   admitPatient: (bookingId: string) => void;
+  callNextPatientInClinic: (clinicId: string) => void;
   markPatientLate: (bookingId: string) => void;
   restoreLatePatient: (bookingId: string, action: 'admit_now' | 'return_to_queue') => void;
   addDoctorDiagnosis: (bookingId: string, diagnosis: string) => void;
@@ -480,9 +481,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // تفعيل التحديث اللحظي عبر Supabase Realtime لجدول bookings
     const unsubscribeBookings = subscribeToBookingsRealtime(async () => {
-      if (isDoctorRoleSession()) return;
+      if (isDoctorRoleSession() || isMutationGuardActive()) return;
       const freshBookings = await fetchBookingsFromDb();
-      if (freshBookings && isMounted) {
+      if (freshBookings && isMounted && !isMutationGuardActive()) {
         const merged = mergeWithSelectedTicket(freshBookings);
         setBookings(merged);
         saveBookings(merged);
@@ -569,6 +570,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (isDoctorRoleSession()) return;
         const fresh = await fetchBookingsFromDb();
         if (fresh && isMounted) {
+          const merged = mergeWithSelectedTicket(fresh);
+          setBookings(merged);
+          saveBookings(merged);
+        }
+      })
+      .on('broadcast', { event: 'bookings_updated' }, async () => {
+        if (!isMounted || isDoctorRoleSession() || isMutationGuardActive()) return;
+        const fresh = await fetchBookingsFromDb();
+        if (fresh && isMounted && !isMutationGuardActive()) {
           const merged = mergeWithSelectedTicket(fresh);
           setBookings(merged);
           saveBookings(merged);
@@ -1785,12 +1795,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const now = new Date().toISOString();
+    lastMutationAtRef.current = Date.now();
 
     if (isSupabaseConfigured) {
       updateBookingStatusInDb(bookingId, {
         status,
         calledAt: status === 'in-progress' ? now : undefined,
         completedAt: status === 'completed' ? now : undefined
+      }).then(() => {
+        try {
+          supabase.channel('system_updates').send({
+            type: 'broadcast',
+            event: 'bookings_updated',
+            payload: { bookingId, status }
+          });
+        } catch {}
       });
     }
 
@@ -2213,9 +2232,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
   };
 
-  // منطق تخطي الدور وتحويل المرضى المتغيبين إلى "متأخر" تلقائياً
+  // منطق تخطي الدور وتحويل المرضى المتغيبين إلى "متأخر" تلقائياً مع إنهاء الكشف الجاري بنفس العيادة
   const admitPatient = (targetBookingId: string) => {
-    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'reception' &&
+        currentUser.role !== 'admin' &&
+        !hasPermission(currentUser.role, 'call_queue_patients'))
+    ) {
       addToast({
         type: 'error',
         title: 'غير مصرح',
@@ -2227,16 +2251,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!targetBooking) return;
 
     const now = new Date().toISOString();
+    lastMutationAtRef.current = Date.now();
     let skippedCount = 0;
+    const dbPromises: Promise<boolean>[] = [];
 
     if (isSupabaseConfigured) {
-      updateBookingStatusInDb(targetBookingId, {
-        status: 'in-progress',
-        calledAt: now
-      });
+      dbPromises.push(
+        updateBookingStatusInDb(targetBookingId, {
+          status: 'in-progress',
+          calledAt: now
+        })
+      );
     }
 
-    // الحصول على جميع المرضى في انتظار نفس العيادة اليوم
+    // الحصول على جميع المرضى في نفس العيادة اليوم
     const updated = bookings.map(b => {
       // المريض المستدعى للدخول الآن
       if (b.id === targetBookingId) {
@@ -2247,19 +2275,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      // أي مريض آخر في نفس العيادة ونفس اليوم كان في الانتظار وترتيبه أسبق من المستدعى
       const isSameClinicAndDate = b.clinicId === targetBooking.clinicId && b.date === targetBooking.date;
-      const isWaiting = b.status === 'waiting';
-      
+
+      // إذا كان هناك مريض آخر داخل نفس العيادة حالياً، يتم إنهاء كشفه تلقائياً عند دخول المريض الجديد
+      if (isSameClinicAndDate && b.status === 'in-progress') {
+        if (isSupabaseConfigured) {
+          dbPromises.push(
+            updateBookingStatusInDb(b.id, {
+              status: 'completed',
+              completedAt: now
+            })
+          );
+        }
+        return {
+          ...b,
+          status: 'completed' as BookingStatus,
+          completedAt: now
+        };
+      }
+
+      // أي مريض آخر في نفس العيادة ونفس اليوم كان في الانتظار ومؤكد السداد وترتيبه الفعلي أسبق من المستدعى
+      const isConfirmed = b.paymentStatus === 'paid' || b.paymentStatus === 'exempt';
+      const isWaiting = b.status === 'waiting' && isConfirmed;
+
       const timeB = new Date(b.paidAt || b.createdAt).getTime();
       const timeTarget = new Date(targetBooking.paidAt || targetBooking.createdAt).getTime();
 
-      const isEarlier = timeB < timeTarget || b.queuePosition < targetBooking.queuePosition;
+      const isEarlier =
+        timeB < timeTarget ||
+        (timeB === timeTarget && b.queuePosition < targetBooking.queuePosition);
 
       if (isSameClinicAndDate && isWaiting && isEarlier) {
         skippedCount++;
         if (isSupabaseConfigured) {
-          updateBookingStatusInDb(b.id, { status: 'late' });
+          dbPromises.push(updateBookingStatusInDb(b.id, { status: 'late' }));
         }
         return {
           ...b,
@@ -2273,6 +2322,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setBookings(updated);
     saveBookings(updated);
 
+    if (isSupabaseConfigured && dbPromises.length > 0) {
+      Promise.all(dbPromises).then(() => {
+        try {
+          supabase.channel('system_updates').send({
+            type: 'broadcast',
+            event: 'bookings_updated',
+            payload: { clinicId: targetBooking.clinicId, admittedId: targetBookingId }
+          });
+        } catch {}
+      });
+    }
+
     if (skippedCount > 0) {
       addToast({
         type: 'warning',
@@ -2283,13 +2344,144 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       addToast({
         type: 'success',
         title: 'تم إدخال المريض للعيادة',
-        message: `المريض: ${targetBooking.patientName} داخل غرفة الكشف الآن.`
+        message: `المريض: ${targetBooking.patientName} (${targetBooking.ticketNumber}) داخل غرفة الكشف الآن.`
+      });
+    }
+  };
+
+  // نداء الدور التالي تسلسلياً للعيادة بضغطة واحدة (ينهي الكشف الحالي ويدخل المريض التالي في الطابور الفعلي)
+  const callNextPatientInClinic = (clinicId: string) => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'reception' &&
+        currentUser.role !== 'admin' &&
+        !hasPermission(currentUser.role, 'call_queue_patients'))
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'النداء التسلسلي وإدارة الطابور مخصص لمكتب الاستقبال وإدارة النظام فقط.'
+      });
+      return;
+    }
+
+    const todayStr = getLocalDateStr(new Date());
+    const clinicObj = clinics.find(c => c.id === clinicId);
+    const clinicName = clinicObj?.name || 'العيادة';
+
+    const clinicConfirmedToday = bookings.filter(
+      b =>
+        b.clinicId === clinicId &&
+        b.date === todayStr &&
+        b.status !== 'cancelled' &&
+        (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt')
+    );
+
+    const currentInProgressList = clinicConfirmedToday.filter(b => b.status === 'in-progress');
+    const waitingQueue = clinicConfirmedToday
+      .filter(b => b.status === 'waiting')
+      .sort((a, b) => {
+        const timeA = new Date(a.paidAt || a.createdAt).getTime();
+        const timeB = new Date(b.paidAt || b.createdAt).getTime();
+        if (timeA !== timeB) return timeA - timeB;
+        return a.queuePosition - b.queuePosition;
+      });
+
+    const nextPatient = waitingQueue[0] || null;
+    const now = new Date().toISOString();
+
+    if (!nextPatient && currentInProgressList.length === 0) {
+      addToast({
+        type: 'info',
+        title: 'لا يوجد منتظرون حالياً',
+        message: `لا توجد حالات مسددة في طابور انتظار ${clinicName} حالياً.`
+      });
+      return;
+    }
+
+    lastMutationAtRef.current = Date.now();
+    const dbPromises: Promise<boolean>[] = [];
+
+    const updated = bookings.map(b => {
+      if (b.clinicId !== clinicId || b.date !== todayStr) return b;
+
+      // إنهاء كشف المريض الحالي داخل العيادة
+      if (b.status === 'in-progress') {
+        if (isSupabaseConfigured) {
+          dbPromises.push(
+            updateBookingStatusInDb(b.id, {
+              status: 'completed',
+              completedAt: now
+            })
+          );
+        }
+        return {
+          ...b,
+          status: 'completed' as BookingStatus,
+          completedAt: now
+        };
+      }
+
+      // إدخال المريض صاحب الدور التالي في الطابور التسلسلي
+      if (nextPatient && b.id === nextPatient.id) {
+        if (isSupabaseConfigured) {
+          dbPromises.push(
+            updateBookingStatusInDb(b.id, {
+              status: 'in-progress',
+              calledAt: now
+            })
+          );
+        }
+        return {
+          ...b,
+          status: 'in-progress' as BookingStatus,
+          calledAt: now
+        };
+      }
+
+      return b;
+    });
+
+    setBookings(updated);
+    saveBookings(updated);
+
+    if (isSupabaseConfigured && dbPromises.length > 0) {
+      Promise.all(dbPromises).then(() => {
+        try {
+          supabase.channel('system_updates').send({
+            type: 'broadcast',
+            event: 'bookings_updated',
+            payload: { clinicId, admittedId: nextPatient?.id || null }
+          });
+        } catch {}
+      });
+    }
+
+    if (nextPatient) {
+      const prevTicket = currentInProgressList[0]?.ticketNumber;
+      addToast({
+        type: 'success',
+        title: `نداء الدور التالي — ${clinicName}`,
+        message: prevTicket
+          ? `تم إنهاء كشف (${prevTicket})، والنداء الآن على الدور التالي: ${nextPatient.patientName} (${nextPatient.ticketNumber}).`
+          : `تم النداء على الدور التالي: ${nextPatient.patientName} (${nextPatient.ticketNumber}) للدخول إلى ${clinicName}.`
+      });
+    } else if (currentInProgressList.length > 0) {
+      addToast({
+        type: 'info',
+        title: `تم إنهاء الكشف الحالي — ${clinicName}`,
+        message: `تم إنهاء كشف المريض (${currentInProgressList[0].ticketNumber})، ولا يوجد مرضى آخرون في طابور الانتظار حالياً.`
       });
     }
   };
 
   const markPatientLate = (bookingId: string) => {
-    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'reception' &&
+        currentUser.role !== 'admin' &&
+        !hasPermission(currentUser.role, 'call_queue_patients'))
+    ) {
       addToast({
         type: 'error',
         title: 'غير مصرح',
@@ -2297,8 +2489,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       return;
     }
+    lastMutationAtRef.current = Date.now();
     if (isSupabaseConfigured) {
-      updateBookingStatusInDb(bookingId, { status: 'late' });
+      updateBookingStatusInDb(bookingId, { status: 'late' }).then(() => {
+        try {
+          supabase.channel('system_updates').send({
+            type: 'broadcast',
+            event: 'bookings_updated',
+            payload: { bookingId, status: 'late' }
+          });
+        } catch {}
+      });
     }
 
     const updated = bookings.map(b => (b.id === bookingId ? { ...b, status: 'late' as BookingStatus } : b));
@@ -2312,7 +2513,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const restoreLatePatient = (bookingId: string, action: 'admit_now' | 'return_to_queue') => {
-    if (!currentUser || (currentUser.role !== 'reception' && currentUser.role !== 'admin')) {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'reception' &&
+        currentUser.role !== 'admin' &&
+        !hasPermission(currentUser.role, 'call_queue_patients'))
+    ) {
       addToast({
         type: 'error',
         title: 'غير مصرح',
@@ -2324,12 +2530,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!target) return;
 
     const now = new Date().toISOString();
+    lastMutationAtRef.current = Date.now();
+    const dbPromises: Promise<boolean>[] = [];
+
     if (isSupabaseConfigured) {
-      updateBookingStatusInDb(bookingId, {
-        status: action === 'admit_now' ? 'in-progress' : 'waiting',
-        calledAt: action === 'admit_now' ? now : undefined,
-        paidAt: action === 'return_to_queue' ? now : undefined
-      });
+      dbPromises.push(
+        updateBookingStatusInDb(bookingId, {
+          status: action === 'admit_now' ? 'in-progress' : 'waiting',
+          calledAt: action === 'admit_now' ? now : undefined,
+          paidAt: action === 'return_to_queue' ? now : undefined
+        })
+      );
     }
 
     const updated = bookings.map(b => {
@@ -2348,11 +2559,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
       }
+      if (action === 'admit_now' && b.clinicId === target.clinicId && b.date === target.date && b.status === 'in-progress') {
+        if (isSupabaseConfigured) {
+          dbPromises.push(
+            updateBookingStatusInDb(b.id, {
+              status: 'completed',
+              completedAt: now
+            })
+          );
+        }
+        return {
+          ...b,
+          status: 'completed' as BookingStatus,
+          completedAt: now
+        };
+      }
       return b;
     });
 
     setBookings(updated);
     saveBookings(updated);
+
+    if (isSupabaseConfigured && dbPromises.length > 0) {
+      Promise.all(dbPromises).then(() => {
+        try {
+          supabase.channel('system_updates').send({
+            type: 'broadcast',
+            event: 'bookings_updated',
+            payload: { bookingId, action }
+          });
+        } catch {}
+      });
+    }
 
     if (action === 'admit_now') {
       addToast({
@@ -3294,6 +3532,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         updateDoctorMaxBookings,
         checkClinicAvailabilityStatus,
         admitPatient,
+        callNextPatientInClinic,
         markPatientLate,
         restoreLatePatient,
         addDoctorDiagnosis,

@@ -163,7 +163,8 @@ export const QueueView: React.FC = () => {
             .sort((a, b) => {
               const timeA = new Date(a.paidAt || a.createdAt).getTime();
               const timeB = new Date(b.paidAt || b.createdAt).getTime();
-              return timeA - timeB;
+              if (timeA !== timeB) return timeA - timeB;
+              return a.queuePosition - b.queuePosition;
             });
 
           // المريض الموجود داخل غرفة الكشف حالياً
