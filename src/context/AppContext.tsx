@@ -303,6 +303,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [theme]);
 
   const lastSettingsSaveAtRef = React.useRef<number>(0);
+  const lastMutationAtRef = React.useRef<number>(0);
+  const activeMutationsCountRef = React.useRef<number>(0);
+  const isMutationGuardActive = () =>
+    activeMutationsCountRef.current > 0 || Date.now() - lastMutationAtRef.current < 4000;
 
   // مزامنة البيانات مع Supabase عند بدء التشغيل وتفعيل التحديث اللحظي Realtime
   useEffect(() => {
@@ -613,34 +617,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'doctors' }, async () => {
-        if (!isMounted) return;
+        if (!isMounted || isMutationGuardActive()) return;
         try {
           const freshDoctors = await fetchDoctorsFromDb();
-          if (freshDoctors && freshDoctors.length > 0 && isMounted) {
+          if (freshDoctors && freshDoctors.length > 0 && isMounted && !isMutationGuardActive()) {
             setDoctors(freshDoctors);
             saveDoctors(freshDoctors);
           }
         } catch {}
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_schedule' }, async () => {
-        if (!isMounted) return;
+        if (!isMounted || isMutationGuardActive()) return;
         try {
           const currentToday = getLocalDateStr(new Date());
           const freshSched = await fetchDailyScheduleFromDb(currentToday);
-          if (freshSched && freshSched.items.length > 0 && isMounted) {
+          if (freshSched && freshSched.items.length > 0 && isMounted && !isMutationGuardActive()) {
             setDailySchedule(freshSched);
             saveDailySchedule(freshSched);
           }
         } catch {}
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'clinics' }, async () => {
-        if (!isMounted) return;
+        if (!isMounted || isMutationGuardActive()) return;
         try {
           const [freshClinics, freshSettings] = await Promise.all([
             fetchClinicsFromDb(),
             fetchSettingsFromDb()
           ]);
-          if (freshClinics && freshClinics.length > 0 && isMounted) {
+          if (freshClinics && freshClinics.length > 0 && isMounted && !isMutationGuardActive()) {
             setClinics(freshClinics);
             saveClinics(freshClinics);
           }
@@ -681,7 +685,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // دورية مزامنة احتياطية كل 7 ثوانٍ لضمان بقاء جميع الشاشات محدثة لحظياً وفحص سلامة الجلسة
     const syncInterval = setInterval(async () => {
-      if (!isMounted) return;
+      if (!isMounted || isMutationGuardActive()) return;
       try {
         const currentToday = getLocalDateStr(new Date());
 
@@ -689,16 +693,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const activeTicket = selectedTicketRef.current;
         if ((activeTicket?.ticketNumber || activeTicket?.id) && activeTicket?.patientPhone && !getStoredSession()) {
           const refreshedTicket = await fetchPatientTicketSecureRpc(activeTicket.ticketNumber || activeTicket.id, activeTicket.patientPhone);
-          if (refreshedTicket && isMounted) {
+          if (refreshedTicket && isMounted && !isMutationGuardActive()) {
             if (JSON.stringify(activeTicket) !== JSON.stringify(refreshedTicket)) {
               setSelectedTicket(refreshedTicket);
             }
           }
         }
 
-        if (!isDoctorRoleSession()) {
+        if (!isDoctorRoleSession() && !isMutationGuardActive()) {
           const fresh = await fetchBookingsFromDb();
-          if (fresh && isMounted) {
+          if (fresh && isMounted && !isMutationGuardActive()) {
             const merged = mergeWithSelectedTicket(fresh);
             setBookings(prev => {
               if (JSON.stringify(prev) !== JSON.stringify(merged)) {
@@ -717,6 +721,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           fetchSettingsFromDb()
         ]);
 
+        if (!isMounted || isMutationGuardActive()) return;
         if (freshClinics && freshClinics.length > 0 && isMounted) {
           setClinics(prev => {
             if (JSON.stringify(prev) !== JSON.stringify(freshClinics)) {
@@ -2033,107 +2038,140 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const finalStartTime = shiftStartTime || shift.startTime;
     const finalEndTime = shiftEndTime || shift.endTime;
 
-    if (isSupabaseConfigured) {
-      const saved = await updateDoctorInDb(doctorId, {
-        scheduleDays,
-        scheduleHours
+    activeMutationsCountRef.current += 1;
+    lastMutationAtRef.current = Date.now();
+
+    try {
+      let targetClinicId = '';
+      setDoctors(prev => {
+        const updated = prev.map(d => {
+          if (d.id === doctorId) {
+            targetClinicId = d.clinicId;
+            return { 
+              ...d, 
+              scheduleDays, 
+              scheduleHours,
+              shiftStartTime: finalStartTime,
+              shiftEndTime: finalEndTime
+            };
+          }
+          return d;
+        });
+        saveDoctors(updated);
+        return updated;
       });
 
-      if (!saved) {
-        addToast({
-          type: 'error',
-          title: 'تعذر حفظ الجدول الأسبوعي',
-          message: 'فشل حفظ وتثبيت جدول الطبيب في قاعدة البيانات. يرجى التحقق من الاتصال أو الصلاحيات والمحاولة مرة أخرى.'
+      if (isSupabaseConfigured) {
+        const saved = await updateDoctorInDb(doctorId, {
+          scheduleDays,
+          scheduleHours
         });
-        return false;
-      }
-    }
+        lastMutationAtRef.current = Date.now();
 
-    const updated = doctors.map(d => {
-      if (d.id === doctorId) {
-        return { 
-          ...d, 
-          scheduleDays, 
+        if (!saved) {
+          addToast({
+            type: 'error',
+            title: 'تعذر حفظ الجدول الأسبوعي',
+            message: 'فشل حفظ وتثبيت جدول الطبيب في قاعدة البيانات. يرجى التحقق من الاتصال أو الصلاحيات والمحاولة مرة أخرى.'
+          });
+          return false;
+        }
+      }
+
+      // مزامنة جدول تشغيل عيادات اليوم تلقائياً إذا كان الطبيب مسؤولاً عن عيادة اليوم
+      const targetDoc = doctors.find(d => d.id === doctorId);
+      const effectiveClinicId = targetClinicId || targetDoc?.clinicId || '';
+      if (effectiveClinicId) {
+        const updatedDocObj: Doctor = {
+          ...(targetDoc || ({ id: doctorId, name: '', clinicId: effectiveClinicId, clinicName: '', title: '', status: 'available', maxDailyBookings: 30, currentQueueNumber: 0 } as Doctor)),
+          scheduleDays,
           scheduleHours,
           shiftStartTime: finalStartTime,
           shiftEndTime: finalEndTime
         };
-      }
-      return d;
-    });
-    setDoctors(updated);
-    saveDoctors(updated);
+        const todayStr = getLocalDateStr(new Date());
+        const isScheduledToday = isDoctorScheduledOnDate(updatedDocObj, todayStr);
+        const isDocPresent = updatedDocObj.status !== 'offline';
+        const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
 
-    // مزامنة جدول تشغيل عيادات اليوم تلقائياً إذا كان الطبيب مسؤولاً عن عيادة اليوم
-    const targetDoc = updated.find(d => d.id === doctorId);
-    if (targetDoc && targetDoc.clinicId) {
-      const todayStr = getLocalDateStr(new Date());
-      const isScheduledToday = isDoctorScheduledOnDate(targetDoc, todayStr);
-      const isDocPresent = targetDoc.status !== 'offline';
-      const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
+        const existingItem = dailySchedule.items.find(i => i.clinicId === effectiveClinicId);
+        if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
+          const nextItems = existingItem
+            ? dailySchedule.items.map(i =>
+                i.clinicId === effectiveClinicId
+                  ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
+                  : i
+              )
+            : [
+                ...dailySchedule.items,
+                { clinicId: effectiveClinicId, doctorId, isOpen: shouldClinicBeOpenToday }
+              ];
+          const nextSchedule: DailyScheduleState = {
+            date: dailySchedule.date || todayStr,
+            items: nextItems
+          };
+          setDailySchedule(nextSchedule);
+          saveDailySchedule(nextSchedule);
 
-      const existingItem = dailySchedule.items.find(i => i.clinicId === targetDoc.clinicId);
-      if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
-        const nextItems = existingItem
-          ? dailySchedule.items.map(i =>
-              i.clinicId === targetDoc.clinicId
-                ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
-                : i
-            )
-          : [
-              ...dailySchedule.items,
-              { clinicId: targetDoc.clinicId, doctorId, isOpen: shouldClinicBeOpenToday }
-            ];
-        const nextSchedule: DailyScheduleState = {
-          date: dailySchedule.date || todayStr,
-          items: nextItems
-        };
-        setDailySchedule(nextSchedule);
-        saveDailySchedule(nextSchedule);
-
-        const nextClinics = clinics.map(c =>
-          c.id === targetDoc.clinicId
-            ? { ...c, isOpenToday: shouldClinicBeOpenToday, active: shouldClinicBeOpenToday, isActive: shouldClinicBeOpenToday }
-            : c
-        );
-        setClinics(nextClinics);
-        saveClinics(nextClinics);
-
-        if (isSupabaseConfigured) {
-          await saveDailyScheduleToDb(nextSchedule);
-          await updateClinicInDb(targetDoc.clinicId, {
-            isOpenToday: shouldClinicBeOpenToday,
-            active: shouldClinicBeOpenToday,
-            isActive: shouldClinicBeOpenToday
+          setClinics(prev => {
+            const nextClinics = prev.map(c =>
+              c.id === effectiveClinicId
+                ? {
+                    ...c,
+                    isOpenToday: shouldClinicBeOpenToday,
+                    active: shouldClinicBeOpenToday,
+                    isActive: shouldClinicBeOpenToday,
+                    workingDays: scheduleDays,
+                    workingHours: scheduleHours
+                  }
+                : c
+            );
+            saveClinics(nextClinics);
+            return nextClinics;
           });
+
+          if (isSupabaseConfigured) {
+            await saveDailyScheduleToDb(nextSchedule);
+            await updateClinicInDb(effectiveClinicId, {
+              isOpenToday: shouldClinicBeOpenToday,
+              active: shouldClinicBeOpenToday,
+              isActive: shouldClinicBeOpenToday,
+              workingDays: scheduleDays,
+              workingHours: scheduleHours
+            });
+            lastMutationAtRef.current = Date.now();
+          }
         }
       }
-    }
 
-    if (isSupabaseConfigured) {
-      try {
-        const channel = supabase.channel('system_updates');
-        channel.send({
-          type: 'broadcast',
-          event: 'doctors_updated',
-          payload: { doctorId, scheduleDays, scheduleHours }
-        });
-        channel.send({
-          type: 'broadcast',
-          event: 'schedule_updated',
-          payload: { doctorId }
-        });
-      } catch {
-        // ignore
+      if (isSupabaseConfigured) {
+        try {
+          const channel = supabase.channel('system_updates');
+          channel.send({
+            type: 'broadcast',
+            event: 'doctors_updated',
+            payload: { doctorId, scheduleDays, scheduleHours }
+          });
+          channel.send({
+            type: 'broadcast',
+            event: 'schedule_updated',
+            payload: { doctorId }
+          });
+        } catch {
+          // ignore
+        }
       }
-    }
 
-    addToast({
-      type: 'success',
-      title: 'الجدول الأسبوعي للطبيب',
-      message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل في قاعدة البيانات وتعميمها على جميع الأجهزة.'
-    });
-    return true;
+      addToast({
+        type: 'success',
+        title: 'الجدول الأسبوعي للطبيب',
+        message: 'تم حفظ وتثبيت جدول الطبيب ومواعيد العمل في قاعدة البيانات وتعميمها على جميع الأجهزة.'
+      });
+      return true;
+    } finally {
+      lastMutationAtRef.current = Date.now();
+      activeMutationsCountRef.current = Math.max(0, activeMutationsCountRef.current - 1);
+    }
   };
 
   const updateDoctorMaxBookings = (doctorId: string, maxDailyBookings: number) => {
@@ -2620,88 +2658,109 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mergedDoc.shiftEndTime = data.shiftEndTime || shift.endTime;
     }
 
-    if (isSupabaseConfigured) {
-      const saved = await updateDoctorInDb(doctorId, mergedDoc);
-      if (!saved) {
-        addToast({
-          type: 'error',
-          title: 'تعذر تحديث بيانات الطبيب',
-          message: 'فشل حفظ التعديلات في قاعدة البيانات السحابية. يرجى المحاولة مرة أخرى.'
-        });
-        return false;
-      }
-    }
+    activeMutationsCountRef.current += 1;
+    lastMutationAtRef.current = Date.now();
 
-    const updated = doctors.map(d => (d.id === doctorId ? mergedDoc : d));
-    setDoctors(updated);
-    saveDoctors(updated);
+    try {
+      const updated = doctors.map(d => (d.id === doctorId ? mergedDoc : d));
+      setDoctors(updated);
+      saveDoctors(updated);
 
-    if (data.scheduleDays && mergedDoc.clinicId) {
-      const todayStr = getLocalDateStr(new Date());
-      const isScheduledToday = isDoctorScheduledOnDate(mergedDoc, todayStr);
-      const isDocPresent = mergedDoc.status !== 'offline';
-      const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
-
-      const existingItem = dailySchedule.items.find(i => i.clinicId === mergedDoc.clinicId);
-      if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
-        const nextItems = existingItem
-          ? dailySchedule.items.map(i =>
-              i.clinicId === mergedDoc.clinicId
-                ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
-                : i
-            )
-          : [
-              ...dailySchedule.items,
-              { clinicId: mergedDoc.clinicId, doctorId, isOpen: shouldClinicBeOpenToday }
-            ];
-        const nextSchedule: DailyScheduleState = {
-          date: dailySchedule.date || todayStr,
-          items: nextItems
-        };
-        setDailySchedule(nextSchedule);
-        saveDailySchedule(nextSchedule);
-
-        const nextClinics = clinics.map(c =>
-          c.id === mergedDoc.clinicId
-            ? { ...c, isOpenToday: shouldClinicBeOpenToday, active: shouldClinicBeOpenToday, isActive: shouldClinicBeOpenToday }
-            : c
-        );
-        setClinics(nextClinics);
-        saveClinics(nextClinics);
-
-        if (isSupabaseConfigured) {
-          await saveDailyScheduleToDb(nextSchedule);
-          await updateClinicInDb(mergedDoc.clinicId, {
-            isOpenToday: shouldClinicBeOpenToday,
-            active: shouldClinicBeOpenToday,
-            isActive: shouldClinicBeOpenToday
+      if (isSupabaseConfigured) {
+        const saved = await updateDoctorInDb(doctorId, mergedDoc);
+        lastMutationAtRef.current = Date.now();
+        if (!saved) {
+          addToast({
+            type: 'error',
+            title: 'تعذر تحديث بيانات الطبيب',
+            message: 'فشل حفظ التعديلات في قاعدة البيانات السحابية. يرجى المحاولة مرة أخرى.'
           });
+          return false;
         }
       }
-    }
 
-    if (isSupabaseConfigured) {
-      try {
-        const channel = supabase.channel('system_updates');
-        channel.send({
-          type: 'broadcast',
-          event: 'doctors_updated',
-          payload: { doctorId }
-        });
-        channel.send({
-          type: 'broadcast',
-          event: 'schedule_updated',
-          payload: { doctorId }
-        });
-      } catch {}
-    }
+      if (data.scheduleDays && mergedDoc.clinicId) {
+        const todayStr = getLocalDateStr(new Date());
+        const isScheduledToday = isDoctorScheduledOnDate(mergedDoc, todayStr);
+        const isDocPresent = mergedDoc.status !== 'offline';
+        const shouldClinicBeOpenToday = isScheduledToday && isDocPresent;
 
-    addToast({
-      type: 'success',
-      title: 'تم تحديث بيانات الطبيب',
-      message: `تم حفظ تعديلات بيانات وجدول (${mergedDoc.name}) في قاعدة البيانات بنجاح.`
-    });
-    return true;
+        const existingItem = dailySchedule.items.find(i => i.clinicId === mergedDoc.clinicId);
+        if (!existingItem || existingItem.doctorId === doctorId || !existingItem.doctorId) {
+          const nextItems = existingItem
+            ? dailySchedule.items.map(i =>
+                i.clinicId === mergedDoc.clinicId
+                  ? { ...i, doctorId, isOpen: shouldClinicBeOpenToday }
+                  : i
+              )
+            : [
+                ...dailySchedule.items,
+                { clinicId: mergedDoc.clinicId, doctorId, isOpen: shouldClinicBeOpenToday }
+              ];
+          const nextSchedule: DailyScheduleState = {
+            date: dailySchedule.date || todayStr,
+            items: nextItems
+          };
+          setDailySchedule(nextSchedule);
+          saveDailySchedule(nextSchedule);
+
+          setClinics(prev => {
+            const nextClinics = prev.map(c =>
+              c.id === mergedDoc.clinicId
+                ? {
+                    ...c,
+                    isOpenToday: shouldClinicBeOpenToday,
+                    active: shouldClinicBeOpenToday,
+                    isActive: shouldClinicBeOpenToday,
+                    workingDays: mergedDoc.scheduleDays,
+                    workingHours: mergedDoc.scheduleHours || c.workingHours
+                  }
+                : c
+            );
+            saveClinics(nextClinics);
+            return nextClinics;
+          });
+
+          if (isSupabaseConfigured) {
+            await saveDailyScheduleToDb(nextSchedule);
+            await updateClinicInDb(mergedDoc.clinicId, {
+              isOpenToday: shouldClinicBeOpenToday,
+              active: shouldClinicBeOpenToday,
+              isActive: shouldClinicBeOpenToday,
+              workingDays: mergedDoc.scheduleDays,
+              workingHours: mergedDoc.scheduleHours
+            });
+            lastMutationAtRef.current = Date.now();
+          }
+        }
+      }
+
+      if (isSupabaseConfigured) {
+        try {
+          const channel = supabase.channel('system_updates');
+          channel.send({
+            type: 'broadcast',
+            event: 'doctors_updated',
+            payload: { doctorId }
+          });
+          channel.send({
+            type: 'broadcast',
+            event: 'schedule_updated',
+            payload: { doctorId }
+          });
+        } catch {}
+      }
+
+      addToast({
+        type: 'success',
+        title: 'تم تحديث بيانات الطبيب',
+        message: `تم حفظ تعديلات بيانات وجدول (${mergedDoc.name}) في قاعدة البيانات بنجاح.`
+      });
+      return true;
+    } finally {
+      lastMutationAtRef.current = Date.now();
+      activeMutationsCountRef.current = Math.max(0, activeMutationsCountRef.current - 1);
+    }
   };
 
   const deleteDoctor = async (doctorId: string): Promise<{ success: boolean; error?: string }> => {
@@ -3046,31 +3105,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, count: 0 };
     }
     const cutoffDate = beforeDate || getLocalDateStr(new Date());
-    const toRemove = bookings.filter(b => b.date < cutoffDate);
-    const remaining = bookings.filter(b => b.date >= cutoffDate && b.notes !== '__PURGED_PAST_BOOKING__');
+    const isPurgeAll = cutoffDate === '9999-12-31';
+    const toRemove = isPurgeAll ? [...bookings] : bookings.filter(b => b.date < cutoffDate);
+    const remaining = isPurgeAll ? [] : bookings.filter(b => b.date >= cutoffDate && b.notes !== '__PURGED_PAST_BOOKING__');
 
-    // 1. تحديث التخزين المحلي فورياً مع حفظ تاريخ القطع واستبعاد المحذوفات
-    removeBookingsBeforeDate(cutoffDate);
-    setBookings(remaining);
-    saveBookings(remaining);
+    activeMutationsCountRef.current += 1;
+    lastMutationAtRef.current = Date.now();
 
-    // 2. تحديث وتطهير السجلات في قاعدة البيانات السحابية Supabase
-    if (isSupabaseConfigured) {
-      await deleteBookingsBeforeDateFromDb(cutoffDate);
-      const freshBookings = await fetchBookingsFromDb();
-      if (freshBookings) {
-        setBookings(freshBookings);
-        saveBookings(freshBookings);
+    try {
+      // 1. وسم جميع السجلات المحذوفة محلياً لمنع عودتها من أي ذاكرة مؤقتة وتحديث الحالة فوراً
+      for (const item of toRemove) {
+        if (item?.id) {
+          markBookingDeletedLocally(item.id);
+        }
       }
+      if (isPurgeAll || (selectedTicketRef.current && toRemove.some(b => b.id === selectedTicketRef.current?.id))) {
+        setSelectedTicket(null);
+      }
+
+      removeBookingsBeforeDate(cutoffDate);
+      setBookings(remaining);
+      saveBookings(remaining);
+
+      // 2. تحديث وتطهير السجلات في قاعدة البيانات السحابية Supabase
+      if (isSupabaseConfigured) {
+        await deleteBookingsBeforeDateFromDb(cutoffDate);
+        lastMutationAtRef.current = Date.now();
+        if (!isPurgeAll) {
+          const freshBookings = await fetchBookingsFromDb();
+          if (freshBookings) {
+            setBookings(freshBookings);
+            saveBookings(freshBookings);
+          }
+        }
+      }
+
+      addToast({
+        type: 'success',
+        title: isPurgeAll ? 'تم مسح السجل بالكامل' : 'تم مسح سجلات الأيام السابقة',
+        message: isPurgeAll
+          ? `تم مسح وتصفير جميع الحجوزات المسجلة (${toRemove.length} حجز) نهائياً من قاعدة البيانات والتخزين المحلي.`
+          : `تم حذف ${toRemove.length} حجز من الأيام السابقة نهائياً من قاعدة البيانات والتخزين المحلي.`
+      });
+
+      return { success: true, count: toRemove.length };
+    } finally {
+      lastMutationAtRef.current = Date.now();
+      activeMutationsCountRef.current = Math.max(0, activeMutationsCountRef.current - 1);
     }
-
-    addToast({
-      type: 'success',
-      title: 'تم مسح سجلات الأيام السابقة',
-      message: `تم حذف ${toRemove.length} حجز من الأيام السابقة نهائياً من قاعدة البيانات والتخزين المحلي.`
-    });
-
-    return { success: true, count: toRemove.length };
   };
 
   const logSystemError = async (input: {

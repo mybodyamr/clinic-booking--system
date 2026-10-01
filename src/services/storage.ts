@@ -24,7 +24,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v5_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v6_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -377,30 +377,39 @@ export function saveStoredBookingsCutoffDate(dateStr: string): void {
   } catch {}
 }
 
+function isBookingBeforeCutoff(b: Booking, cutoffDate: string): boolean {
+  if (!cutoffDate) return false;
+  if (cutoffDate.includes('T')) {
+    const cutoffMs = new Date(cutoffDate).getTime();
+    const createdMs = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+    if (!Number.isNaN(cutoffMs) && createdMs > 0 && createdMs <= cutoffMs) {
+      return true;
+    }
+    return false;
+  }
+  if (cutoffDate === '9999-12-31') return false;
+  const cleanDate = typeof b.date === 'string' ? b.date.split('T')[0] : String(b.date || '');
+  return Boolean(cleanDate && cleanDate < cutoffDate);
+}
+
 export function getStoredBookings(): Booking[] {
   try {
     const deletedIds = getDeletedBookingIds();
     const cutoffDate = localStorage.getItem(STORAGE_KEYS.BOOKINGS_CUTOFF) || '';
     const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
     if (!raw) {
-      if (cutoffDate) return [];
-      const initial = INITIAL_BOOKINGS.filter(b => !deletedIds.has(b.id));
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(initial));
-      return initial;
+      return [];
     }
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) {
-      if (cutoffDate) return [];
-      const initial = INITIAL_BOOKINGS.filter(b => !deletedIds.has(b.id));
-      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(initial));
-      return initial;
+      return [];
     }
-    // تصفية أي حجوزات محذوفة صراحة أو تسبق تاريخ القطع
+    // تصفية أي حجوزات محذوفة صراحة أو تسبق تاريخ/لحظة القطع
     const filtered = parsed.filter((b: Booking) => {
       if (!b) return false;
       if (deletedIds.has(String(b.id))) return false;
       if (b.notes === '__PURGED_PAST_BOOKING__') return false;
-      if (cutoffDate && b.date < cutoffDate) return false;
+      if (isBookingBeforeCutoff(b, cutoffDate)) return false;
       return true;
     });
     return filtered;
@@ -418,7 +427,7 @@ export function saveBookings(bookings: Booking[]): void {
       if (!b) return false;
       if (deletedIds.has(String(b.id))) return false;
       if (b.notes === '__PURGED_PAST_BOOKING__') return false;
-      if (cutoffDate && b.date < cutoffDate) return false;
+      if (isBookingBeforeCutoff(b, cutoffDate)) return false;
       return true;
     });
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(valid));
@@ -429,7 +438,13 @@ export function saveBookings(bookings: Booking[]): void {
 
 export function removeBookingsBeforeDate(dateStr: string): Booking[] {
   try {
-    localStorage.setItem(STORAGE_KEYS.BOOKINGS_CUTOFF, dateStr);
+    const isPurgeAll = dateStr === '9999-12-31';
+    const effectiveCutoff = isPurgeAll ? new Date().toISOString() : dateStr;
+    localStorage.setItem(STORAGE_KEYS.BOOKINGS_CUTOFF, effectiveCutoff);
+    if (isPurgeAll) {
+      localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify([]));
+      return [];
+    }
     const raw = localStorage.getItem(STORAGE_KEYS.BOOKINGS);
     let current: Booking[] = [];
     if (raw) {
@@ -437,7 +452,9 @@ export function removeBookingsBeforeDate(dateStr: string): Booking[] {
         current = JSON.parse(raw);
       } catch {}
     }
-    const remaining = current.filter(b => b && b.date >= dateStr && b.notes !== '__PURGED_PAST_BOOKING__');
+    const remaining = current.filter(
+      b => b && !isBookingBeforeCutoff(b, effectiveCutoff) && b.notes !== '__PURGED_PAST_BOOKING__'
+    );
     localStorage.setItem(STORAGE_KEYS.BOOKINGS, JSON.stringify(remaining));
     return remaining;
   } catch (e) {

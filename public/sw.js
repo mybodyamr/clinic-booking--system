@@ -1,7 +1,7 @@
-// Progressive Web App Service Worker for Sharaya Clinics (v3)
-const CACHE_NAME = 'sharaya-clinics-v3';
+// Progressive Web App Service Worker for Sharaya Clinics (v7 - Network-First & API Bypass)
+const CACHE_NAME = 'sharaya-clinics-v7';
 
-// Static icons and manifest to cache for offline support
+// Static icons and manifest to cache for offline fallback only
 const STATIC_ASSETS = [
   '/manifest.webmanifest',
   '/icon-192.svg',
@@ -12,28 +12,51 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       return cache.addAll(STATIC_ASSETS).catch((err) => {
-        console.warn('Precache error on some static assets:', err);
+        console.warn('Precache error on static assets:', err);
       });
     })
   );
-  // Activate the new service worker immediately
+  // Activate the new service worker immediately without waiting for tabs to close
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  // Purge all old caches (including sharaya-clinics-v1, v2)
+  // Purge ALL old caches (v1, v2, v3, v4, v5, etc.) immediately
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
           if (key !== CACHE_NAME) {
-            console.log('Clearing obsolete cache:', key);
             return caches.delete(key);
           }
+          // Also purge any accidentally cached /api/ entries inside current cache
+          return caches.open(key).then((cache) =>
+            cache.keys().then((requests) =>
+              Promise.all(
+                requests.map((req) => {
+                  if (req.url.includes('/api/') || req.url.includes('/rest/v1') || req.url.includes('/auth/v1')) {
+                    return cache.delete(req);
+                  }
+                  return Promise.resolve(false);
+                })
+              )
+            )
+          );
         })
       );
     }).then(() => self.clients.claim())
   );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+  if (event.data && event.data.type === 'CLEAR_ALL_CACHES') {
+    event.waitUntil(
+      caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+    );
+  }
 });
 
 self.addEventListener('fetch', (event) => {
@@ -42,22 +65,31 @@ self.addEventListener('fetch', (event) => {
 
   const url = new URL(event.request.url);
 
-  // Do not intercept external requests (Supabase, Google Fonts, etc.)
+  // Do not intercept external requests
   if (url.origin !== self.location.origin) {
     return;
   }
 
-  // 1. Navigation requests (HTML documents, page loads, refreshes)
-  // CRITICAL: Network-First Strategy!
-  // When a new build is deployed to Vercel, the browser MUST fetch the fresh HTML containing the new JS/CSS chunk hashes.
-  const isNavigation = event.request.mode === 'navigate' || 
-                       (event.request.headers.get('accept') && event.request.headers.get('accept').includes('text/html'));
+  // CRITICAL: NEVER intercept or cache API, Supabase bridge, REST, Auth, or RPC requests!
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.includes('/supabase-bridge') ||
+    url.pathname.includes('/rest/v1') ||
+    url.pathname.includes('/auth/v1') ||
+    url.pathname.includes('/rpc/')
+  ) {
+    return;
+  }
+
+  // 1. Navigation requests (HTML documents, page loads, refreshes) -> Strict Network-First
+  const isNavigation =
+    event.request.mode === 'navigate' ||
+    (event.request.headers.get('accept') && event.request.headers.get('accept').includes('text/html'));
 
   if (isNavigation) {
     event.respondWith(
-      fetch(event.request)
+      fetch(event.request, { cache: 'no-store' })
         .then((networkResponse) => {
-          // If valid response from Vercel/server, update the offline fallback in cache
           if (networkResponse && networkResponse.status === 200) {
             const responseClone = networkResponse.clone();
             caches.open(CACHE_NAME).then((cache) => {
@@ -67,7 +99,6 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         })
         .catch(() => {
-          // If network is completely unreachable (offline mode), fallback to cached index.html
           return caches.match('/index.html').then((cached) => {
             return cached || caches.match('/');
           });
@@ -76,14 +107,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 2. Static Assets (JS, CSS, SVGs, images)
-  // Try network first, then cache, or cache then network
+  // 2. Static Assets (JS, CSS, SVGs, images) -> Network-First with Offline Cache Fallback
   event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        return cachedResponse;
-      }
-      return fetch(event.request).then((networkResponse) => {
+    fetch(event.request)
+      .then((networkResponse) => {
         if (networkResponse && networkResponse.status === 200) {
           const responseClone = networkResponse.clone();
           caches.open(CACHE_NAME).then((cache) => {
@@ -91,9 +118,9 @@ self.addEventListener('fetch', (event) => {
           });
         }
         return networkResponse;
-      }).catch(() => {
-        return cachedResponse;
-      });
-    })
+      })
+      .catch(() => {
+        return caches.match(event.request);
+      })
   );
 });

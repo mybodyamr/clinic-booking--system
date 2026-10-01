@@ -293,11 +293,63 @@ export async function verifyStaffFromBearerToken(
 
   const authUserId = userData.user.id;
 
-  const { data: staffRow, error: staffError } = await adminClient
+  let { data: staffRow, error: staffError } = await adminClient
     .from('staff_accounts')
     .select('id, username, display_name, role, doctor_id, clinic_id, auth_user_id')
     .eq('auth_user_id', authUserId)
     .maybeSingle();
+
+  // في حال عدم توفر مفتاح Service Role في بيئة النشر (مثل Vercel) ورفض جدول staff_accounts القراءة المباشرة، نستخدم دوال SECURITY DEFINER المعتمدة
+  if (staffError || !staffRow) {
+    try {
+      const { data: rpcRole, error: roleErr } = await adminClient.rpc('get_auth_role');
+      if (!roleErr && typeof rpcRole === 'string' && ['admin', 'reception', 'cashier', 'doctor'].includes(rpcRole)) {
+        if (rpcRole === 'admin') {
+          const { data: allStaff } = await adminClient.rpc('get_all_staff_accounts_for_admin');
+          if (Array.isArray(allStaff)) {
+            const matched = allStaff.find((s: any) => s && s.auth_user_id === authUserId);
+            if (matched) {
+              staffRow = matched;
+              staffError = null;
+            }
+          }
+        }
+        if (!staffRow) {
+          const meta = (userData.user.user_metadata || {}) as Record<string, any>;
+          const rawEmail = String(userData.user.email || '').toLowerCase();
+          const emailPrefix = rawEmail.split('@')[0] || rpcRole;
+          const resolvedUsername = String(meta.username || emailPrefix).trim().toLowerCase();
+          const docMap: Record<string, { doctorId: string; clinicId: string }> = {
+            doctor: { doctorId: 'doc-1', clinicId: 'clinic-internal' },
+            doctor_1: { doctorId: 'doc-1', clinicId: 'clinic-internal' },
+            dr_ahmed: { doctorId: 'doc-1', clinicId: 'clinic-internal' },
+            'doctor.pediatrics': { doctorId: 'doc-2', clinicId: 'clinic-pediatrics' },
+            doctor_2: { doctorId: 'doc-2', clinicId: 'clinic-pediatrics' },
+            dr_sara: { doctorId: 'doc-2', clinicId: 'clinic-pediatrics' },
+            'doctor.ortho': { doctorId: 'doc-3', clinicId: 'clinic-orthopedics' },
+            doctor_3: { doctorId: 'doc-3', clinicId: 'clinic-orthopedics' },
+            dr_tarek: { doctorId: 'doc-3', clinicId: 'clinic-orthopedics' },
+            'doctor.dental': { doctorId: 'doc-4', clinicId: 'clinic-dental' },
+            doctor_4: { doctorId: 'doc-4', clinicId: 'clinic-dental' },
+            dr_hoda: { doctorId: 'doc-4', clinicId: 'clinic-dental' },
+          };
+          const mappedDoc = docMap[resolvedUsername];
+          staffRow = {
+            id: String(meta.staff_id || `staff-${resolvedUsername}`),
+            username: resolvedUsername,
+            display_name: String(meta.display_name || resolvedUsername),
+            role: rpcRole,
+            doctor_id: meta.doctor_id || mappedDoc?.doctorId || null,
+            clinic_id: meta.clinic_id || mappedDoc?.clinicId || null,
+            auth_user_id: authUserId,
+          };
+          staffError = null;
+        }
+      }
+    } catch {
+      // keep original staffError
+    }
+  }
 
   if (staffError || !staffRow || staffRow.auth_user_id !== authUserId) {
     return {
@@ -431,8 +483,12 @@ export function createApiApp(options?: ServerRecoveryOptions) {
     next();
   });
 
-  // إعدادات CORS آمنة ومقيدة بنطاق التطبيق نفسه فقط دون wildcard
+  // إعدادات CORS آمنة ومقيدة بنطاق التطبيق نفسه فقط دون wildcard مع منع تخزين الكاش لأي مسار API
   app.use('/api', (req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
     const origin = req.headers.origin;
 
     if (origin) {
@@ -542,11 +598,19 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   const handleListStaff = async (req: AuthenticatedRequest, res: Response) => {
     try {
       const adminClient = getAdminOrRequestClient(req);
-      const { data, error } = await adminClient
+      let { data, error } = await adminClient
         .from('staff_accounts')
         .select('id, auth_user_id, username, display_name, role, doctor_id, clinic_id, recovery_email, created_at')
         .order('created_at', { ascending: true })
         .order('id', { ascending: true });
+
+      if (error || !data) {
+        const rpcRes = await adminClient.rpc('get_all_staff_accounts_for_admin');
+        if (!rpcRes.error && Array.isArray(rpcRes.data)) {
+          data = rpcRes.data;
+          error = null;
+        }
+      }
 
       if (error) {
         res.status(500).json({ ok: false, error: 'تعذر جلب قائمة حسابات الموظفين' });
@@ -2539,6 +2603,8 @@ export function createApiApp(options?: ServerRecoveryOptions) {
       }
 
       const targetUrlObj = new URL(subPath, supabaseUrl);
+      // إزالة معامل منع الكاش (_cb) قبل تمرير الاستعلام إلى محرك PostgREST في Supabase
+      targetUrlObj.searchParams.delete('_cb');
       const expectedOrigin = new URL(supabaseUrl).origin;
       if (targetUrlObj.origin !== expectedOrigin) {
         res.status(400).json({ message: 'Invalid upstream target origin' });
@@ -2983,9 +3049,21 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
           const newPaymentStatus = paymentType === 'charity_exempt' ? 'exempt' : 'paid';
           const nowIso = new Date().toISOString();
+
+          if (!hasRealServiceRole) {
+            const { data: rpcPaid, error: rpcErr } = await adminClient.rpc('confirm_payment', {
+              p_booking_id: bookingId,
+              p_payment_type: paymentType,
+            });
+            if (!rpcErr && rpcPaid) {
+              res.setHeader('Content-Type', 'application/json; charset=utf-8');
+              res.status(200).json(rpcPaid);
+              return;
+            }
+          }
 
           const { data: updatedBooking, error: updErr } = await adminClient
             .from('bookings')
@@ -3028,7 +3106,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
           const { data: existingRow } = await adminClient
             .from('clinics')
             .select('description')
@@ -3079,7 +3157,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             return;
           }
 
-          const adminClient = getSupabaseAdminClient();
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
           const { data: existingRow } = await adminClient
             .from('clinics')
             .select('description')
@@ -3163,6 +3241,60 @@ export function createApiApp(options?: ServerRecoveryOptions) {
 
           res.setHeader('Content-Type', 'application/json; charset=utf-8');
           res.status(200).json({ ok: true, deletedId: bookingId });
+          return;
+        }
+
+        // معالجة تطهير ومسح سجل الحجوزات بالكامل بواسطة مدير النظام (purge_all_bookings)
+        if (req.method === 'POST' && cleanPathOnly === '/rest/v1/rpc/purge_all_bookings') {
+          if (!authenticatedUserJwt) {
+            res.status(401).json({ message: 'غير مصرح: يجب تسجيل الدخول كمدير نظام' });
+            return;
+          }
+
+          const verified = await verifyStaffFromBearerToken(`Bearer ${authenticatedUserJwt}`);
+          if (!verified.ok || verified.caller.role !== 'admin') {
+            res.status(403).json({ message: 'غير مصرح: مسح أرشيف الحجوزات مخصص لمدير النظام فقط' });
+            return;
+          }
+
+          const adminClient = getBridgeDbClient(authenticatedUserJwt);
+          const cutoffIso = new Date().toISOString();
+          const targetBeforeDate = typeof req.body?.p_before_date === 'string' ? req.body.p_before_date.trim() : '';
+          const isPurgeAll = !targetBeforeDate || targetBeforeDate === '9999-12-31' || targetBeforeDate === 'ALL';
+
+          if (isPurgeAll) {
+            await adminClient.from('bookings').delete().neq('id', '_none_');
+            await adminClient
+              .from('bookings')
+              .update({
+                notes: '__PURGED_PAST_BOOKING__',
+                status: 'cancelled',
+              })
+              .neq('id', '_none_');
+          } else {
+            await adminClient.from('bookings').delete().lte('date', targetBeforeDate);
+            await adminClient
+              .from('bookings')
+              .update({
+                notes: '__PURGED_PAST_BOOKING__',
+                status: 'cancelled',
+              })
+              .lte('date', targetBeforeDate);
+          }
+
+          await adminClient.from('clinics').upsert({
+            id: '_system_bookings_cutoff_date',
+            name: 'System Bookings Cutoff Date',
+            specialty: 'System',
+            room_number: '0',
+            floor: '0',
+            price: 0,
+            description: cutoffIso,
+            is_open_today: false,
+          });
+
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.status(200).json({ ok: true, cutoffIso });
           return;
         }
 
@@ -3438,6 +3570,17 @@ export function createApiApp(options?: ServerRecoveryOptions) {
             const ct = staffRes.headers.get('content-type') || 'application/json';
             const rawText = await staffRes.text();
             if (!staffRes.ok) {
+              if (isCallerAdmin) {
+                try {
+                  const adminClient = getBridgeDbClient(authenticatedUserJwt);
+                  const rpcStaff = await adminClient.rpc('get_all_staff_accounts_for_admin');
+                  if (!rpcStaff.error && Array.isArray(rpcStaff.data)) {
+                    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                    res.status(200).json(rpcStaff.data);
+                    return;
+                  }
+                } catch {}
+              }
               res.setHeader('Content-Type', ct);
               res.status(staffRes.status).send(rawText);
               return;
@@ -3692,11 +3835,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               }
             }
 
-            // (ب) حفظ وتحديث جدول تشغيل اليوم (daily_schedule) من الإدارة أو الموظف المفوض (الاستقبال / الخزينة)
+            // (ب) حفظ وتحديث جدول تشغيل اليوم (daily_schedule) من الإدارة أو الموظف المفوض أو الطبيب لعيادته
             if (
               !isReadMethod &&
               cleanPathOnly === '/rest/v1/daily_schedule' &&
-              ['admin', 'reception', 'cashier'].includes(callerRole)
+              ['admin', 'reception', 'cashier', 'doctor'].includes(callerRole)
             ) {
               const srvHeaders: Record<string, string> = {
                 apikey: serviceRoleKey,
@@ -3720,11 +3863,11 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               return;
             }
 
-            // (ج) تحديث حالة فتح العيادة اليوم أو سعر الكشف (clinics) من الإدارة أو الموظف المفوض
+            // (ج) تحديث حالة فتح العيادة اليوم أو سعر الكشف (clinics) من الإدارة أو الموظف المفوض أو الطبيب لعيادته
             if (
               !isReadMethod &&
               cleanPathOnly === '/rest/v1/clinics' &&
-              ['admin', 'reception', 'cashier'].includes(callerRole)
+              ['admin', 'reception', 'cashier', 'doctor'].includes(callerRole)
             ) {
               const bodyObj = req.body && typeof req.body === 'object' ? req.body : {};
               const bodyKeys = Object.keys(bodyObj);
@@ -3735,10 +3878,21 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               const targetClinicId = idFilter.startsWith('eq.') ? idFilter.slice(3).trim() : '';
               const hasValidTargetClinicId = isValidServerEntityId(targetClinicId) && !targetClinicId.startsWith('_system');
 
+              const isDoctorOwnClinicOpenToggle =
+                callerRole === 'doctor' &&
+                hasValidTargetClinicId &&
+                (!verified.caller.clinicId || verified.caller.clinicId === targetClinicId) &&
+                bodyKeys.length === 1 &&
+                bodyKeys[0] === 'is_open_today';
+
               const isAllowedClinicWrite =
                 callerRole === 'admin' ||
                 isErrorOrWhatsappLog ||
-                (hasValidTargetClinicId && bodyKeys.length > 0 && bodyKeys.every((k) => allowedDelegatedClinicKeys.has(k)));
+                isDoctorOwnClinicOpenToggle ||
+                (callerRole !== 'doctor' &&
+                  hasValidTargetClinicId &&
+                  bodyKeys.length > 0 &&
+                  bodyKeys.every((k) => allowedDelegatedClinicKeys.has(k)));
 
               if (isAllowedClinicWrite) {
                 const srvHeaders: Record<string, string> = {

@@ -15,6 +15,9 @@
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#064E3B" />
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="icon" type="image/svg+xml" href="/icon-192.svg" />
     <link rel="apple-touch-icon" href="/icon-192.svg" />
@@ -31,6 +34,43 @@
           } else {
             document.documentElement.classList.remove('dark');
             document.documentElement.style.colorScheme = 'light';
+          }
+        } catch (e) {}
+
+        // تطهير فوري لأي كاش قديم في Service Worker قد يحتفظ باستجابات API قديمة
+        try {
+          if ('caches' in window) {
+            window.caches.keys().then(function(keys) {
+              keys.forEach(function(key) {
+                if (key !== 'sharaya-clinics-v7') {
+                  window.caches.delete(key);
+                } else {
+                  window.caches.open(key).then(function(cache) {
+                    cache.keys().then(function(requests) {
+                      requests.forEach(function(req) {
+                        if (req.url.indexOf('/api/') !== -1 || req.url.indexOf('/rest/v1') !== -1) {
+                          cache.delete(req);
+                        }
+                      });
+                    });
+                  });
+                }
+              });
+            });
+          }
+          if (localStorage.getItem('sharaya_sw_purge_v7') !== 'done') {
+            localStorage.setItem('sharaya_sw_purge_v7', 'done');
+            localStorage.removeItem('sharaya_clinics_v2');
+            localStorage.removeItem('sharaya_doctors_v2');
+            localStorage.removeItem('sharaya_bookings_v2');
+            localStorage.removeItem('sharaya_daily_schedule_v2');
+            if ('serviceWorker' in navigator) {
+              navigator.serviceWorker.getRegistrations().then(function(regs) {
+                regs.forEach(function(reg) {
+                  reg.update();
+                });
+              });
+            }
           }
         } catch (e) {}
 

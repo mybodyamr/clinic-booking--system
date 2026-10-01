@@ -135,34 +135,104 @@ const DEFAULT_CLOUD_RECOVERY_PASSWORDS: Record<string, string> = {
   admin: 'Adm@Sharia2026!',
   reception: 'Rcp@Sharia2026!',
   cashier: 'Csh@Sharia2026!',
+  doctor: 'Doc@Sharia2026!',
   doctor_1: 'Doc@Sharia2026!',
+  dr_ahmed: 'Doc@Sharia2026!',
+  'doctor.pediatrics': 'Doc@Sharia2026!',
   doctor_2: 'Doc@Sharia2026!',
+  dr_sara: 'Doc@Sharia2026!',
+  'doctor.ortho': 'Doc@Sharia2026!',
   doctor_3: 'Doc@Sharia2026!',
+  dr_tarek: 'Doc@Sharia2026!',
+  'doctor.dental': 'Doc@Sharia2026!',
   doctor_4: 'Doc@Sharia2026!',
+  dr_hoda: 'Doc@Sharia2026!',
 };
 
-export async function ensureActiveSupabaseSession(): Promise<boolean> {
+function resolveCanonicalCloudEmailCandidates(session: UserSession | null): { emails: string[]; password: string } | null {
+  if (!session) return null;
+  const rawUser = String(session.username || '').trim().toLowerCase();
+  const role = session.role;
+  const docId = String(session.doctorId || '').trim().toLowerCase();
+
+  let canonicalPrefix = rawUser;
+  if (role === 'admin') canonicalPrefix = 'admin';
+  else if (role === 'reception') canonicalPrefix = 'reception';
+  else if (role === 'cashier') canonicalPrefix = 'cashier';
+  else if (role === 'doctor') {
+    if (docId === 'doc-2' || rawUser === 'dr_sara' || rawUser === 'doctor_2' || rawUser === 'doctor.pediatrics') {
+      canonicalPrefix = 'doctor.pediatrics';
+    } else if (docId === 'doc-3' || rawUser === 'dr_tarek' || rawUser === 'doctor_3' || rawUser === 'doctor.ortho') {
+      canonicalPrefix = 'doctor.ortho';
+    } else if (docId === 'doc-4' || rawUser === 'dr_hoda' || rawUser === 'doctor_4' || rawUser === 'doctor.dental') {
+      canonicalPrefix = 'doctor.dental';
+    } else {
+      canonicalPrefix = 'doctor';
+    }
+  }
+
+  const password =
+    DEFAULT_CLOUD_RECOVERY_PASSWORDS[canonicalPrefix] ||
+    DEFAULT_CLOUD_RECOVERY_PASSWORDS[rawUser] ||
+    (role === 'admin'
+      ? 'Adm@Sharia2026!'
+      : role === 'reception'
+      ? 'Rcp@Sharia2026!'
+      : role === 'cashier'
+      ? 'Csh@Sharia2026!'
+      : 'Doc@Sharia2026!');
+
+  const prefixes = Array.from(new Set([canonicalPrefix, rawUser].filter(Boolean)));
+  const emails: string[] = [];
+  for (const p of prefixes) {
+    emails.push(`${p}@accounts.sharaya-clinics.internal`);
+    emails.push(`${p}@test.sharaya-clinics.local`);
+  }
+  return { emails, password };
+}
+
+export async function ensureActiveSupabaseSession(forceReauth = false): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
-    const { data } = await supabase.auth.getSession();
-    if (data?.session?.access_token) {
-      return true;
-    }
-    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
-    if (!refreshErr && refreshed?.session?.access_token) {
-      return true;
+    const storedSession = getCurrentStoredSession();
+    const resolvedAuth = resolveCanonicalCloudEmailCandidates(storedSession);
+
+    if (!forceReauth) {
+      const { data } = await supabase.auth.getSession();
+      const activeSession = data?.session;
+      if (activeSession?.access_token) {
+        const isNotExpired =
+          !activeSession.expires_at || activeSession.expires_at * 1000 > Date.now() + 60_000;
+        const activeEmail = String(activeSession.user?.email || '').toLowerCase();
+        const roleMatches =
+          !resolvedAuth ||
+          resolvedAuth.emails.some((e) => e.toLowerCase() === activeEmail) ||
+          (storedSession?.role && activeSession.user?.user_metadata?.role === storedSession.role);
+
+        if (isNotExpired && roleMatches) {
+          return true;
+        }
+      }
+
+      const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession();
+      if (!refreshErr && refreshed?.session?.access_token) {
+        const refreshedEmail = String(refreshed.session.user?.email || '').toLowerCase();
+        const roleMatches =
+          !resolvedAuth ||
+          resolvedAuth.emails.some((e) => e.toLowerCase() === refreshedEmail) ||
+          (storedSession?.role && refreshed.session.user?.user_metadata?.role === storedSession.role);
+        if (roleMatches) {
+          return true;
+        }
+      }
     }
 
-    // إذا كان الموظف مسجلاً بالفعل في الجلسة المحلية ولكن رمز JWT السحابي مفقود أو منتهي (مثلاً بعد تحديث قاعدة البيانات)
-    const storedSession = getCurrentStoredSession();
-    if (storedSession?.username) {
-      const cleanUser = storedSession.username.trim().toLowerCase();
-      const defaultPass = DEFAULT_CLOUD_RECOVERY_PASSWORDS[cleanUser];
-      if (defaultPass) {
-        const syntheticEmail = `${cleanUser}@accounts.sharaya-clinics.internal`;
+    // إعادة المصادقة التلقائية في حال انتهاء الجلسة السحابية أو اختلاف الدور أو طلب تحديث رمز JWT
+    if (resolvedAuth) {
+      for (const candidateEmail of resolvedAuth.emails) {
         const { data: reAuthData, error: reAuthErr } = await supabase.auth.signInWithPassword({
-          email: syntheticEmail,
-          password: defaultPass,
+          email: candidateEmail,
+          password: resolvedAuth.password,
         });
         if (!reAuthErr && reAuthData?.session?.access_token) {
           return true;
@@ -176,7 +246,7 @@ export async function ensureActiveSupabaseSession(): Promise<boolean> {
   }
 }
 
-export async function ensureAdminSupabaseSession(): Promise<boolean> {
+export async function ensureAdminSupabaseSession(forceReauth = false): Promise<boolean> {
   if (!isSupabaseConfigured) return false;
   try {
     // لا يتم تفعيل أو تحديث الجلسة الإدارية إذا كان المستخدم الحالي مسجلاً بدور آخر غير admin
@@ -185,7 +255,7 @@ export async function ensureAdminSupabaseSession(): Promise<boolean> {
       return false;
     }
 
-    return await ensureActiveSupabaseSession();
+    return await ensureActiveSupabaseSession(forceReauth);
   } catch {
     return false;
   }
@@ -380,7 +450,20 @@ export async function fetchBookingsFromDb(): Promise<Booking[] | null> {
     const validRows = (data || []).filter((row: any) => {
       if (deletedBookingIds.has(String(row.id))) return false;
       if (row.notes === '__PURGED_PAST_BOOKING__') return false;
-      if (effectiveCutoff && row.date < effectiveCutoff) return false;
+      if (effectiveCutoff) {
+        if (effectiveCutoff.includes('T')) {
+          const cutoffMs = new Date(effectiveCutoff).getTime();
+          const rowCreatedMs = row.created_at ? new Date(row.created_at).getTime() : 0;
+          if (!Number.isNaN(cutoffMs) && rowCreatedMs > 0 && rowCreatedMs <= cutoffMs) {
+            return false;
+          }
+        } else if (effectiveCutoff !== '9999-12-31') {
+          const cleanRowDate = typeof row.date === 'string' ? row.date.split('T')[0] : String(row.date || '');
+          if (cleanRowDate && cleanRowDate < effectiveCutoff) {
+            return false;
+          }
+        }
+      }
       return true;
     });
 
@@ -724,29 +807,56 @@ export async function deleteBookingsBeforeDateFromDb(dateStr: string): Promise<b
   if (!isSupabaseConfigured) return false;
   try {
     await ensureAdminSupabaseSession();
+    const isPurgeAll = dateStr === '9999-12-31';
+    const effectiveCutoffToStore = isPurgeAll ? new Date().toISOString() : dateStr;
+
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem('sharaya_bookings_cutoff_v2', effectiveCutoffToStore);
+      } catch {}
+    }
+
+    // 0. إذا كان مسحاً شاملاً للسجل، نستدعي مسار الخادم المباشر الموثق (purge_all_bookings)
+    if (isPurgeAll) {
+      try {
+        const { error: rpcErr } = await supabase.rpc('purge_all_bookings');
+        if (rpcErr) {
+          await ensureAdminSupabaseSession(true);
+          await supabase.rpc('purge_all_bookings');
+        }
+      } catch {}
+    }
 
     // 1. محاولة الحذف المباشر لجدول الحجوزات
     try {
-      await supabase
-        .from('bookings')
-        .delete()
-        .lt('date', dateStr);
+      const delQuery = supabase.from('bookings').delete();
+      const { error: delErr } = isPurgeAll
+        ? await delQuery.neq('id', '__never__')
+        : await delQuery.lt('date', dateStr);
+      if (delErr) {
+        await ensureAdminSupabaseSession(true);
+        const retryDel = supabase.from('bookings').delete();
+        if (isPurgeAll) await retryDel.neq('id', '__never__');
+        else await retryDel.lt('date', dateStr);
+      }
     } catch {}
 
-    // 2. تحديث وتطهير جميع الحجوزات السابقة في قاعدة البيانات لوسمها بالحذف وإلغائها نهائياً
+    // 2. تحديث وتطهير جميع الحجوزات المستهدفة في قاعدة البيانات لوسمها بالحذف وإلغائها نهائياً
     try {
-      await supabase
-        .from('bookings')
-        .update({
-          notes: '__PURGED_PAST_BOOKING__',
-          status: 'cancelled'
-        })
-        .lt('date', dateStr);
+      const updQuery = supabase.from('bookings').update({
+        notes: '__PURGED_PAST_BOOKING__',
+        status: 'cancelled'
+      });
+      if (isPurgeAll) {
+        await updQuery.neq('id', '__never__');
+      } else {
+        await updQuery.lt('date', dateStr);
+      }
     } catch (err) {
       console.warn('Error purging past bookings in Supabase:', err);
     }
 
-    // 3. تثبيت تاريخ القطع في سجل النظام السحابي لتعميمه وحمايته من استرجاع البيانات القديمة
+    // 3. تثبيت تاريخ/لحظة القطع في سجل النظام السحابي لتعميمه وحمايته من استرجاع البيانات القديمة
     try {
       await supabase.from('clinics').upsert({
         id: '_system_bookings_cutoff_date',
@@ -755,7 +865,7 @@ export async function deleteBookingsBeforeDateFromDb(dateStr: string): Promise<b
         room_number: '0',
         floor: '0',
         price: 0,
-        description: dateStr,
+        description: effectiveCutoffToStore,
         is_open_today: false
       });
     } catch (err) {
@@ -768,7 +878,7 @@ export async function deleteBookingsBeforeDateFromDb(dateStr: string): Promise<b
       channel.send({
         type: 'broadcast',
         event: 'bookings_purged',
-        payload: { cutoffDate: dateStr }
+        payload: { cutoffDate: effectiveCutoffToStore }
       });
     } catch {}
 
@@ -800,16 +910,29 @@ export async function updateDoctorStatusInDb(
 
   try {
     await ensureActiveSupabaseSession();
-    const { data, error } = await supabase
+    const payload = {
+      status,
+      unavailable_reason: unavailableReason || null,
+      is_present_today: status !== 'offline'
+    };
+    let { data, error } = await supabase
       .from('doctors')
-      .update({
-        status,
-        unavailable_reason: unavailableReason || null,
-        is_present_today: status !== 'offline'
-      })
+      .update(payload)
       .eq('id', cleanDoctorId)
       .select('id')
       .maybeSingle();
+
+    if (error || !data?.id) {
+      await ensureActiveSupabaseSession(true);
+      const retryRes = await supabase
+        .from('doctors')
+        .update(payload)
+        .eq('id', cleanDoctorId)
+        .select('id')
+        .maybeSingle();
+      data = retryRes.data;
+      error = retryRes.error;
+    }
 
     return Boolean(!error && data?.id);
   } catch (err) {
@@ -831,9 +954,17 @@ export async function saveDailyScheduleToDb(scheduleState: DailyScheduleState): 
         is_open: item.isOpen
       }));
 
-    const { error } = await supabase
+    let { error } = await supabase
       .from('daily_schedule')
       .upsert(rows, { onConflict: 'date,clinic_id' });
+
+    if (error) {
+      await ensureActiveSupabaseSession(true);
+      const retry = await supabase
+        .from('daily_schedule')
+        .upsert(rows, { onConflict: 'date,clinic_id' });
+      error = retry.error;
+    }
 
     // مزامنة حالة الفتح اليومي مع جدول clinics.is_open_today لضمان توافق دالة create_public_booking في قاعدة البيانات
     await Promise.all(
@@ -875,10 +1006,19 @@ export async function updateClinicInDb(clinicId: string, data: Partial<Clinic>):
     if (data.workingDays !== undefined) updates.working_days = data.workingDays;
     if (data.workingHours !== undefined) updates.working_hours = data.workingHours;
 
-    const { error } = await supabase
+    let { error } = await supabase
       .from('clinics')
       .update(updates)
       .eq('id', clinicId);
+
+    if (error) {
+      await ensureActiveSupabaseSession(true);
+      const retry = await supabase
+        .from('clinics')
+        .update(updates)
+        .eq('id', clinicId);
+      error = retry.error;
+    }
 
     if (error) {
       console.warn('Error updating clinic in Supabase:', error);
@@ -1024,12 +1164,24 @@ export async function updateDoctorInDb(doctorId: string, updates: Partial<Doctor
     if (updates.phone !== undefined) dbUpdates.phone = updates.phone;
     if (updates.bio !== undefined) dbUpdates.bio = updates.bio;
 
-    const { data, error } = await supabase
+    let { data, error } = await supabase
       .from('doctors')
       .update(dbUpdates)
       .eq('id', cleanDoctorId)
       .select('id')
       .maybeSingle();
+
+    if (error || !data?.id) {
+      await ensureActiveSupabaseSession(true);
+      const retryRes = await supabase
+        .from('doctors')
+        .update(dbUpdates)
+        .eq('id', cleanDoctorId)
+        .select('id')
+        .maybeSingle();
+      data = retryRes.data;
+      error = retryRes.error;
+    }
 
     return Boolean(!error && data?.id);
   } catch (err) {

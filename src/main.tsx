@@ -69,18 +69,32 @@ const isProduction = import.meta.env.PROD || (typeof process !== 'undefined' && 
 
 if ('serviceWorker' in navigator && isProduction) {
   window.addEventListener('load', () => {
+    if ('caches' in window) {
+      window.caches.keys().then((keys) => {
+        keys.forEach((key) => {
+          if (key !== 'sharaya-clinics-v6') {
+            window.caches.delete(key);
+          }
+        });
+      }).catch(() => {});
+    }
+
     navigator.serviceWorker
-      .register('/sw.js')
+      .register('/sw.js?v=6', { updateViaCache: 'none' })
       .then((registration) => {
-        // فحص وجود أي تحديث جديد تم رفعه إلى Vercel أو الخادم
+        // فحص وجود أي تحديث جديد تم رفعه إلى Vercel أو الخادم بدون الاعتماد على الكاش
         registration.update();
+
+        if (registration.waiting) {
+          registration.waiting.postMessage({ type: 'SKIP_WAITING' });
+        }
 
         registration.addEventListener('updatefound', () => {
           const installingWorker = registration.installing;
           if (installingWorker) {
             installingWorker.addEventListener('statechange', () => {
               if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                console.log('New application version installed, activating...');
+                installingWorker.postMessage({ type: 'SKIP_WAITING' });
               }
             });
           }

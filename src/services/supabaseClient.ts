@@ -14,9 +14,32 @@ const rawKey = BRIDGE_PROXY_KEY_MARKER;
 
 export const isSupabaseConfigured = true;
 
-// جميع الاستعلامات تمر حصرياً عبر جسر الخادم (/api/supabase-bridge) المحمي بـ Server Service Role دون أي اتصال مباشر من المتصفح
+// جميع الاستعلامات تمر حصرياً عبر جسر الخادم (/api/supabase-bridge) مع منع الكاش نهائياً (Cache-Busting + no-store)
 const supabaseBridgeFetch: typeof fetch = async (input, init) => {
-  return await fetch(input, init);
+  const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+  const isRead = method === 'GET' || method === 'HEAD';
+
+  let finalInput: RequestInfo | URL = input;
+  if (isRead) {
+    try {
+      const rawUrlStr =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+          ? input.toString()
+          : input.url;
+      const u = new URL(rawUrlStr, typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:3000');
+      u.searchParams.set('_cb', `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
+      finalInput = u.toString();
+    } catch {
+      finalInput = input;
+    }
+  }
+
+  return await fetch(finalInput, {
+    ...init,
+    cache: 'no-store',
+  });
 };
 
 // قناة تزامن محلية آمنة بين التبويبات بدون كشف أي مفاتيح في عناوين WebSocket
