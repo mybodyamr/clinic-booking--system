@@ -300,8 +300,7 @@ export async function fetchClinicsFromDb(): Promise<Clinic[] | null> {
           row.description !== '__DELETED_CLINIC__'
       )
       .map(mapDbClinic);
-  } catch (err) {
-    console.warn('Could not fetch clinics from Supabase, using local data fallback:', err);
+  } catch {
     return null;
   }
 }
@@ -317,8 +316,7 @@ export async function fetchDoctorsFromDb(): Promise<Doctor[] | null> {
     return (data || [])
       .filter((row: any) => row.bio !== '__DELETED_DOCTOR__')
       .map(mapDbDoctor);
-  } catch (err) {
-    console.warn('Could not fetch doctors from Supabase, using local data fallback:', err);
+  } catch {
     return null;
   }
 }
@@ -468,8 +466,7 @@ export async function fetchBookingsFromDb(): Promise<Booking[] | null> {
     });
 
     return validRows.map(mapDbBooking);
-  } catch (err) {
-    console.warn('Could not fetch bookings from Supabase, using local data fallback:', err);
+  } catch {
     return null;
   }
 }
@@ -493,8 +490,7 @@ export async function fetchDailyScheduleFromDb(dateStr: string): Promise<DailySc
       date: dateStr,
       items
     };
-  } catch (err) {
-    console.warn('Could not fetch daily schedule from Supabase, using local data fallback:', err);
+  } catch {
     return null;
   }
 }
@@ -602,6 +598,43 @@ export async function confirmPaymentRpc(
     return { success: true, data: mapDbBooking(data) };
   } catch (err: any) {
     return { success: false, error: err.message || 'فشل تأكيد الدفع' };
+  }
+}
+
+export interface PatientLiveQueueResult {
+  booking: Booking;
+  isPaidAndConfirmed: boolean;
+  paidWaitingAheadCount: number;
+  totalPaidWaitingInClinic: number;
+  currentInProgressTicket: string | null;
+}
+
+export async function trackPatientQueueByPhoneRpc(
+  patientPhone: string
+): Promise<PatientLiveQueueResult[] | null> {
+  if (!isSupabaseConfigured || !patientPhone) return null;
+  const cleanDigits = patientPhone.replace(/\D/g, '');
+  if (cleanDigits.length < 10) return [];
+
+  try {
+    const { data, error } = await supabase.rpc('track_patient_queue_by_phone', {
+      p_patient_phone: cleanDigits,
+    });
+    if (!error && data && Array.isArray(data.tickets)) {
+      return data.tickets.map((row: any) => ({
+        booking: mapDbBooking(row),
+        isPaidAndConfirmed: Boolean(
+          row.live_queue?.isPaidAndConfirmed ??
+            (row.payment_status === 'paid' || row.payment_status === 'exempt')
+        ),
+        paidWaitingAheadCount: Number(row.live_queue?.paidWaitingAheadCount ?? 0),
+        totalPaidWaitingInClinic: Number(row.live_queue?.totalPaidWaitingInClinic ?? 0),
+        currentInProgressTicket: row.live_queue?.currentInProgressTicket || null,
+      }));
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -1344,8 +1377,8 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
         }
       }
     }
-  } catch (err) {
-    console.warn('Could not fetch system settings from clinics:', err);
+  } catch {
+    // ignore transient network blip during background poll
   }
 
   return map;
@@ -2089,10 +2122,8 @@ export function subscribeToBookingsRealtime(onUpdate: (payload?: any) => void): 
           onUpdate(payload);
         }
       )
-      .subscribe((status, err) => {
-        if (err) {
-          console.warn('Realtime channel status warning:', status, err);
-        }
+      .subscribe(() => {
+        // Reconnects automatically via Supabase client when mobile network or tab resumes
       });
 
     return () => {

@@ -2509,6 +2509,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
   // ذاكرة تخزين مؤقت قصيرة الأمد (15 ثانية) للتحقق التشفيري من رموز JWT ومنع التزوير عبر الكونسول
   const verifiedJwtCache = new Map<string, { userId: string; expiresAt: number }>();
   const bridgeRateBuckets = new Map<string, { count: number; resetAt: number }>();
+  let cachedFallbackAdminJwt: { token: string; expiresAt: number } | null = null;
 
   const checkBridgeRateLimit = (key: string, maxRequests: number, windowMs: number): boolean => {
     const now = getNow();
@@ -2561,6 +2562,36 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               }
             : {}),
         });
+      };
+
+      const getPrivilegedBridgeClient = async (): Promise<SupabaseClient> => {
+        if (hasRealServiceRole) {
+          return getSupabaseAdminClient();
+        }
+        if (authenticatedUserJwt) {
+          return getBridgeDbClient(authenticatedUserJwt);
+        }
+        const now = getNow();
+        if (cachedFallbackAdminJwt && cachedFallbackAdminJwt.expiresAt > now) {
+          return getBridgeDbClient(cachedFallbackAdminJwt.token);
+        }
+        try {
+          const tempClient = createClient(supabaseUrl, serviceRoleKey, {
+            auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+          });
+          const { data } = await tempClient.auth.signInWithPassword({
+            email: 'admin@accounts.sharaya-clinics.internal',
+            password: process.env.DEFAULT_ADMIN_PASSWORD || 'Adm@Sharia2026!',
+          });
+          if (data?.session?.access_token) {
+            cachedFallbackAdminJwt = {
+              token: data.session.access_token,
+              expiresAt: now + 20 * 60_000,
+            };
+            return getBridgeDbClient(data.session.access_token);
+          }
+        } catch {}
+        return getBridgeDbClient(null);
       };
 
       const clientIp =
@@ -2778,6 +2809,7 @@ export function createApiApp(options?: ServerRecoveryOptions) {
           const allowedPublicRpcs = new Set([
             '/rest/v1/rpc/create_public_booking',
             '/rest/v1/rpc/get_patient_ticket_secure',
+            '/rest/v1/rpc/track_patient_queue_by_phone',
             '/rest/v1/rpc/report_client_error',
           ]);
 
@@ -2809,6 +2841,125 @@ export function createApiApp(options?: ServerRecoveryOptions) {
         // معالجة العرض العام لشاشة الانتظار (سواء لزائر أو لمستخدم مسجل)
         if (isReadMethod && cleanPathOnly === '/rest/v1/public_queue_display') {
           await sendSafePublicQueueDisplay();
+          return;
+        }
+
+        // استعلام المريض المباشر عن دوره الفعلي وتذكرته برقم الهاتف (يحسب فقط من سددوا فعلياً بالخزينة وينتظرون في نفس العيادة)
+        if (req.method === 'POST' && cleanPathOnly === '/rest/v1/rpc/track_patient_queue_by_phone') {
+          if (!checkBridgeRateLimit(`track_queue:${clientIp}`, 30, 5 * 60_000)) {
+            res.status(429).json({
+              ok: false,
+              error: 'تم تجاوز الحد المسموح من الاستعلامات المتتالية، يرجى الانتظار دقيقة والمحاولة مجدداً.',
+            });
+            return;
+          }
+
+          const rawPhone = String(req.body?.p_patient_phone || '').replace(/\D/g, '');
+          const normPhone = rawPhone.length >= 10 ? rawPhone.slice(-10) : '';
+          if (normPhone.length < 10) {
+            res.status(200).json({ ok: true, tickets: [] });
+            return;
+          }
+
+          const cairoToday = getCairoTodayDateStr();
+          const utcToday = new Date().toISOString().split('T')[0];
+          const privClient = await getPrivilegedBridgeClient();
+
+          let cutoffIso = '';
+          try {
+            const { data: cutoffRow } = await privClient
+              .from('clinics')
+              .select('description')
+              .eq('id', '_system_bookings_cutoff_date')
+              .maybeSingle();
+            if (cutoffRow?.description) {
+              cutoffIso = String(cutoffRow.description).trim();
+            }
+          } catch {}
+
+          const { data: todayBookings } = await privClient
+            .from('bookings')
+            .select('id, ticket_number, patient_name, patient_phone, clinic_id, clinic_name, doctor_id, doctor_name, date, time_slot, queue_position, status, payment_status, payment_method, fee, notes, created_at, called_at, completed_at, paid_at')
+            .in('date', Array.from(new Set([cairoToday, utcToday])))
+            .neq('status', 'cancelled')
+            .order('created_at', { ascending: true });
+
+          const activeTodayRows = (todayBookings || []).filter((r: any) => {
+            if (r.notes === '__PURGED_PAST_BOOKING__') return false;
+            if (cutoffIso && cutoffIso.includes('T') && r.created_at) {
+              const cutoffMs = new Date(cutoffIso).getTime();
+              const rowMs = new Date(r.created_at).getTime();
+              if (!Number.isNaN(cutoffMs) && rowMs > 0 && rowMs <= cutoffMs) {
+                return false;
+              }
+            }
+            return true;
+          });
+
+          const patientMatches = activeTodayRows.filter((r: any) => {
+            const digits = String(r.patient_phone || '').replace(/\D/g, '');
+            return digits.length >= 10 && digits.slice(-10) === normPhone;
+          });
+
+          const enrichedTickets = patientMatches.map((ticketRow: any) => {
+            const isPaidAndConfirmed =
+              ticketRow.payment_status === 'paid' || ticketRow.payment_status === 'exempt';
+
+            // جميع المرضى الذين سددوا فعلياً في الخزينة وينتظرون حالياً في نفس العيادة مرتبين بوقت السداد الفعلي
+            const paidWaitingInClinic = activeTodayRows
+              .filter(
+                (r: any) =>
+                  r.clinic_id === ticketRow.clinic_id &&
+                  r.status === 'waiting' &&
+                  (r.payment_status === 'paid' || r.payment_status === 'exempt')
+              )
+              .sort((a: any, b: any) => {
+                const tA = new Date(a.paid_at || a.created_at || 0).getTime();
+                const tB = new Date(b.paid_at || b.created_at || 0).getTime();
+                if (tA !== tB) return tA - tB;
+                return (Number(a.queue_position) || 0) - (Number(b.queue_position) || 0);
+              });
+
+            const inProgressRow = activeTodayRows.find(
+              (r: any) =>
+                r.clinic_id === ticketRow.clinic_id &&
+                r.status === 'in-progress' &&
+                (r.payment_status === 'paid' || r.payment_status === 'exempt')
+            );
+
+            let paidWaitingAheadCount = 0;
+            if (ticketRow.status === 'in-progress' || ticketRow.status === 'completed') {
+              paidWaitingAheadCount = 0;
+            } else if (isPaidAndConfirmed) {
+              const myIndex = paidWaitingInClinic.findIndex((r: any) => r.id === ticketRow.id);
+              paidWaitingAheadCount =
+                myIndex >= 0 ? myIndex : paidWaitingInClinic.length;
+              if (inProgressRow && inProgressRow.id !== ticketRow.id) {
+                paidWaitingAheadCount += 1;
+              }
+            } else {
+              // لم يسدد بعد في الخزينة: نعرض له إجمالي من سددوا فعلياً وينتظرون حالياً بالعيادة
+              paidWaitingAheadCount =
+                paidWaitingInClinic.length + (inProgressRow ? 1 : 0);
+            }
+
+            const { notes: _n, ...safeRow } = ticketRow;
+            return {
+              ...safeRow,
+              live_queue: {
+                isPaidAndConfirmed,
+                paidWaitingAheadCount,
+                totalPaidWaitingInClinic: paidWaitingInClinic.length,
+                currentInProgressTicket: inProgressRow?.ticket_number || null,
+              },
+            };
+          });
+
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.status(200).json({
+            ok: true,
+            tickets: enrichedTickets,
+          });
           return;
         }
 

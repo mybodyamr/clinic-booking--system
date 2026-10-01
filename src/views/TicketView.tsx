@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { maskPhoneNumber } from '../services/storage';
+import { trackPatientQueueByPhoneRpc, PatientLiveQueueResult } from '../services/supabaseService';
 import heroHospitalImg from '../assets/images/hospital_doctor_hero_1790597353764.jpg';
 
 export const TicketView: React.FC = () => {
@@ -22,9 +23,30 @@ export const TicketView: React.FC = () => {
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [liveQueueInfo, setLiveQueueInfo] = useState<PatientLiveQueueResult | null>(null);
   const ticketRef = useRef<HTMLDivElement>(null);
 
-  const ticket = (selectedTicket && bookings.find(b => b.id === selectedTicket.id)) || selectedTicket || bookings[0];
+  const baseTicket = (selectedTicket && bookings.find(b => b.id === selectedTicket.id)) || selectedTicket || bookings[0];
+  const ticket = liveQueueInfo?.booking && liveQueueInfo.booking.id === baseTicket?.id ? liveQueueInfo.booking : baseTicket;
+
+  useEffect(() => {
+    let isMounted = true;
+    const refreshLiveTicket = async () => {
+      if (!baseTicket?.patientPhone) return;
+      const results = await trackPatientQueueByPhoneRpc(baseTicket.patientPhone);
+      if (!isMounted || !results) return;
+      const matched = results.find(r => r.booking.id === baseTicket.id) || results[0] || null;
+      if (matched) {
+        setLiveQueueInfo(matched);
+      }
+    };
+    refreshLiveTicket();
+    const interval = setInterval(refreshLiveTicket, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [baseTicket?.id, baseTicket?.patientPhone]);
 
   useEffect(() => {
     if (ticket) {
@@ -70,18 +92,38 @@ export const TicketView: React.FC = () => {
 
   const clinic = clinics.find(c => c.id === ticket.clinicId);
   
-  const waitingInSameClinic = bookings.filter(
-    b => b.clinicId === ticket.clinicId && 
-         b.date === ticket.date &&
-         b.status === 'waiting' && 
-         b.queuePosition < ticket.queuePosition
-  ).length;
+  const paidWaitingInSameClinic = bookings
+    .filter(
+      b =>
+        b.clinicId === ticket.clinicId &&
+        b.date === ticket.date &&
+        b.status === 'waiting' &&
+        (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt')
+    )
+    .sort((a, b) => {
+      const tA = new Date(a.paidAt || a.createdAt || 0).getTime();
+      const tB = new Date(b.paidAt || b.createdAt || 0).getTime();
+      if (tA !== tB) return tA - tB;
+      return (a.queuePosition || 0) - (b.queuePosition || 0);
+    });
 
   const currentInProgress = bookings.find(
-    b => b.clinicId === ticket.clinicId && b.date === ticket.date && b.status === 'in-progress'
+    b =>
+      b.clinicId === ticket.clinicId &&
+      b.date === ticket.date &&
+      b.status === 'in-progress' &&
+      (b.paymentStatus === 'paid' || b.paymentStatus === 'exempt')
   );
 
-  const patientsAhead = waitingInSameClinic + (currentInProgress && currentInProgress.id !== ticket.id ? 1 : 0);
+  const isTicketPaid = ticket.paymentStatus === 'paid' || ticket.paymentStatus === 'exempt';
+  const myPaidIndex = paidWaitingInSameClinic.findIndex(b => b.id === ticket.id);
+  const localPatientsAhead = isTicketPaid
+    ? (myPaidIndex >= 0 ? myPaidIndex : paidWaitingInSameClinic.length) +
+      (currentInProgress && currentInProgress.id !== ticket.id ? 1 : 0)
+    : paidWaitingInSameClinic.length + (currentInProgress ? 1 : 0);
+
+  const patientsAhead =
+    liveQueueInfo !== null ? liveQueueInfo.paidWaitingAheadCount : localPatientsAhead;
   const estimatedWaitMinutes = patientsAhead * 12;
 
   const handleDownloadTicketImage = async () => {

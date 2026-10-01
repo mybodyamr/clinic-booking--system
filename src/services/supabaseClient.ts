@@ -14,20 +14,31 @@ const rawKey = BRIDGE_PROXY_KEY_MARKER;
 
 export const isSupabaseConfigured = true;
 
-// جميع الاستعلامات تمر حصرياً عبر جسر الخادم (/api/supabase-bridge) مع منع الكاش نهائياً (Cache-Busting + no-store)
+const CLOUD_REALTIME_URL =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta.env?.VITE_SUPABASE_PROJECT_URL || import.meta.env?.VITE_SUPABASE_URL)) ||
+  'https://rugwzfaiensjdxtoipop.supabase.co';
+
+const CLOUD_REALTIME_PUB_KEY =
+  (typeof import.meta !== 'undefined' &&
+    (import.meta.env?.VITE_SUPABASE_PUBLIC_KEY || import.meta.env?.VITE_SUPABASE_ANON_KEY)) ||
+  'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2';
+
+// جميع الاستعلامات تمر عبر جسر الخادم (/api/supabase-bridge) مع منع الكاش نهائياً، مع مسار احتياطي مباشر للسحابة عند إعادة تشغيل الخادم
 const supabaseBridgeFetch: typeof fetch = async (input, init) => {
   const method = (init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
   const isRead = method === 'GET' || method === 'HEAD';
 
+  const rawUrlStr =
+    typeof input === 'string'
+      ? input
+      : input instanceof URL
+      ? input.toString()
+      : input.url;
+
   let finalInput: RequestInfo | URL = input;
   if (isRead) {
     try {
-      const rawUrlStr =
-        typeof input === 'string'
-          ? input
-          : input instanceof URL
-          ? input.toString()
-          : input.url;
       const u = new URL(rawUrlStr, typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:3000');
       u.searchParams.set('_cb', `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`);
       finalInput = u.toString();
@@ -36,10 +47,32 @@ const supabaseBridgeFetch: typeof fetch = async (input, init) => {
     }
   }
 
-  return await fetch(finalInput, {
-    ...init,
-    cache: 'no-store',
-  });
+  try {
+    return await fetch(finalInput, {
+      ...init,
+      cache: 'no-store',
+    });
+  } catch (err) {
+    // في حال إعادة تشغيل خادم الواجهة الخلفية لحظياً، نرسل الطلب مباشرة إلى Supabase السحابي لضمان عدم انقطاع الاتصال
+    const targetStr = typeof finalInput === 'string' ? finalInput : rawUrlStr;
+    const bridgeIdx = targetStr.indexOf('/api/supabase-bridge');
+    if (bridgeIdx !== -1) {
+      const subPath = targetStr.slice(bridgeIdx + '/api/supabase-bridge'.length);
+      const directUrl = `${CLOUD_REALTIME_URL.replace(/\/+$/, '')}${subPath}`;
+      const directHeaders = new Headers(init?.headers || (input instanceof Request ? input.headers : undefined));
+      directHeaders.set('apikey', CLOUD_REALTIME_PUB_KEY);
+      const authHeader = directHeaders.get('Authorization') || directHeaders.get('authorization');
+      if (!authHeader || authHeader.includes(BRIDGE_PROXY_KEY_MARKER)) {
+        directHeaders.set('Authorization', `Bearer ${CLOUD_REALTIME_PUB_KEY}`);
+      }
+      return await fetch(directUrl, {
+        ...init,
+        headers: directHeaders,
+        cache: 'no-store',
+      });
+    }
+    throw err;
+  }
 };
 
 // قناة تزامن محلية آمنة بين التبويبات بدون كشف أي مفاتيح في عناوين WebSocket
@@ -71,16 +104,6 @@ const baseClient: SupabaseClient = createClient(rawUrl, rawKey, {
     detectSessionInUrl: false,
   },
 });
-
-const CLOUD_REALTIME_URL =
-  (typeof import.meta !== 'undefined' &&
-    (import.meta.env?.VITE_SUPABASE_PROJECT_URL || import.meta.env?.VITE_SUPABASE_URL)) ||
-  'https://rugwzfaiensjdxtoipop.supabase.co';
-
-const CLOUD_REALTIME_PUB_KEY =
-  (typeof import.meta !== 'undefined' &&
-    (import.meta.env?.VITE_SUPABASE_PUBLIC_KEY || import.meta.env?.VITE_SUPABASE_ANON_KEY)) ||
-  'sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2';
 
 const cloudRealtimeClient: SupabaseClient | null =
   typeof window !== 'undefined'

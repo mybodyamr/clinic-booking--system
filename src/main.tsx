@@ -72,7 +72,7 @@ if ('serviceWorker' in navigator && isProduction) {
     if ('caches' in window) {
       window.caches.keys().then((keys) => {
         keys.forEach((key) => {
-          if (key !== 'sharaya-clinics-v6') {
+          if (key !== 'sharaya-clinics-v8') {
             window.caches.delete(key);
           }
         });
@@ -80,10 +80,20 @@ if ('serviceWorker' in navigator && isProduction) {
     }
 
     navigator.serviceWorker
-      .register('/sw.js?v=6', { updateViaCache: 'none' })
+      .register('/sw.js?v=8', { updateViaCache: 'none' })
       .then((registration) => {
         // فحص وجود أي تحديث جديد تم رفعه إلى Vercel أو الخادم بدون الاعتماد على الكاش
         registration.update();
+
+        // فحص تلقائي للتحديثات عند عودة المستخدم للتطبيق أو كل دقيقة لضمان تحديث فوري للجميع بدون مسح يدوي للكاش
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            registration.update().catch(() => {});
+          }
+        });
+        setInterval(() => {
+          registration.update().catch(() => {});
+        }, 60_000);
 
         if (registration.waiting) {
           registration.waiting.postMessage({ type: 'SKIP_WAITING' });
