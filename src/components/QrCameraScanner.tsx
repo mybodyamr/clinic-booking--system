@@ -18,6 +18,9 @@ interface QrCameraScannerProps {
   hintText?: string;
 }
 
+// وعد مشترك على مستوى المكون لمنع إلغاء نافذة إذن الكاميرا في Chrome عند إعادة التركيب السريع (StrictMode)
+let sharedPendingMediaPromise: Promise<MediaStream> | null = null;
+
 export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
   onScanSuccess,
   active = true,
@@ -27,8 +30,17 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const scanTimerRef = useRef<number | null>(null);
+  const unmountStopTimeoutRef = useRef<number | null>(null);
   const hasScannedRef = useRef<boolean>(false);
+  const isStartingRef = useRef<boolean>(false);
+  const isMountedRef = useRef<boolean>(true);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // حفظ دالة الاستجابة في Ref لمنع إعادة تشغيل الكاميرا أو اختفاء نافذة الإذن عند تحديث الصفحة في الخلفية
+  const onScanSuccessRef = useRef(onScanSuccess);
+  useEffect(() => {
+    onScanSuccessRef.current = onScanSuccess;
+  }, [onScanSuccess]);
 
   const [cameraState, setCameraState] = useState<'starting' | 'active' | 'stopped' | 'error'>('starting');
   const [errorMessage, setErrorMessage] = useState<string>('');
@@ -41,13 +53,15 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
   // صوت صفارة قصيرة عند نجاح قراءة الكود
   const playScanBeep = useCallback(() => {
     try {
-      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(1046.5, ctx.currentTime); // C6
+      osc.frequency.setValueAtTime(1046.5, ctx.currentTime);
       gain.gain.setValueAtTime(0.12, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
       osc.connect(gain);
@@ -82,6 +96,7 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
+    isStartingRef.current = false;
     setTorchOn(false);
     setTorchSupported(false);
   }, []);
@@ -95,14 +110,59 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
       playScanBeep();
       stopCameraStream();
       setCameraState('stopped');
-      onScanSuccess(cleaned);
+      onScanSuccessRef.current(cleaned);
     },
-    [onScanSuccess, playScanBeep, stopCameraStream]
+    [playScanBeep, stopCameraStream]
   );
 
+  const requestCameraStream = async (targetFacing: 'environment' | 'user'): Promise<MediaStream> => {
+    if (sharedPendingMediaPromise) {
+      return sharedPendingMediaPromise;
+    }
+
+    const promise = (async () => {
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: false,
+          video: {
+            facingMode: { ideal: targetFacing },
+            width: { ideal: 720 },
+            height: { ideal: 720 }
+          }
+        });
+      } catch (firstErr: any) {
+        const firstErrName = String(firstErr?.name || '');
+        if (firstErrName !== 'NotAllowedError' && firstErrName !== 'PermissionDeniedError') {
+          return await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: true
+          });
+        }
+        throw firstErr;
+      } finally {
+        sharedPendingMediaPromise = null;
+      }
+    })();
+
+    sharedPendingMediaPromise = promise;
+    return promise;
+  };
+
   const startCameraStream = useCallback(
-    async (targetFacing: 'environment' | 'user') => {
-      stopCameraStream();
+    async (targetFacing: 'environment' | 'user', forceRestart = false) => {
+      if (unmountStopTimeoutRef.current) {
+        window.clearTimeout(unmountStopTimeoutRef.current);
+        unmountStopTimeoutRef.current = null;
+      }
+
+      if (isStartingRef.current && !forceRestart) return;
+      if (streamRef.current && streamRef.current.active && !forceRestart) return;
+
+      if (forceRestart && streamRef.current) {
+        stopCameraStream();
+      }
+
+      isStartingRef.current = true;
       hasScannedRef.current = false;
       setDetectedFlash(false);
       setErrorMessage('');
@@ -113,50 +173,46 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
         !navigator.mediaDevices ||
         typeof navigator.mediaDevices.getUserMedia !== 'function'
       ) {
+        isStartingRef.current = false;
         setCameraState('error');
         setErrorMessage(
-          'متصفحك الحالي لا يدعم تشغيل الكاميرا مباشرة أو أن الاتصال غير آمن (يتطلب HTTPS). يمكنك الضغط على زر "مسح من صورة / كاميرا الهاتف" بالأسفل.'
+          'متصفحك الحالي لا يدعم البث المباشر للكاميرا. اضغط على زر "التقاط صورة الكود بالكاميرا" بالأسفل لمسح التذكرة فوراً.'
         );
         return;
       }
 
       let stream: MediaStream | null = null;
       try {
-        // المحاولة الأولى: الكاميرا المطلوبة (الخلفية افتراضياً) بدقة عالية لقراءة الباركود السريعة
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            facingMode: { ideal: targetFacing },
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          }
-        });
-      } catch {
-        try {
-          // المحاولة الاحتياطية: أي كاميرا متاحة على الجهاز (مفيد للابتوب أو بعض الهواتف)
-          stream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
-            video: true
-          });
-        } catch (err: any) {
-          setCameraState('error');
-          const errName = String(err?.name || '');
-          if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
-            setErrorMessage(
-              'تم رفض إذن الكاميرا من المتصفح. يرجى الضغط على أيقونة القفل 🔒 بجانب رابط الموقع في الأعلى والسماح للكاميرا (Allow)، أو استخدام زر "التقاط صورة الكود" بالأسفل.'
-            );
-          } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
-            setErrorMessage('لم يتم العثور على كاميرا متصلة بهذا الجهاز.');
-          } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
-            setErrorMessage('الكاميرا مستخدمة حالياً بواسطة تطبيق آخر على جهازك. أغلق التطبيق الآخر ثم اضغط إعادة المحاولة.');
-          } else {
-            setErrorMessage('تعذر فتح الكاميرا تلقائياً. تأكد من منح صلاحية الكاميرا للمتصفح أو استخدم زر التقاط صورة الكود.');
-          }
-          return;
+        stream = await requestCameraStream(targetFacing);
+      } catch (err: any) {
+        isStartingRef.current = false;
+        if (!isMountedRef.current) return;
+        setCameraState('error');
+        const errName = String(err?.name || '');
+        if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+          setErrorMessage(
+            'الكاميرا تحتاج موافقتك للعمل: إذا كان هناك أيقونة عائمة على الشاشة (مثل ماسنجر أو مسجل الشاشة) قم بإخفائها لأن نظام أندرويد يمنع الضغط على "Allow" في وجودها، أو اضغط زر "التقاط صورة الكود بالكاميرا (بديل فوري)" بالأسفل.'
+          );
+        } else if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {
+          setErrorMessage('لم يتم العثور على كاميرا متصلة بهذا الجهاز.');
+        } else if (errName === 'NotReadableError' || errName === 'TrackStartError') {
+          setErrorMessage('الكاميرا مشغولة بتطبيق آخر حالياً. أغلق التطبيقات الأخرى واضغط إعادة المحاولة.');
+        } else {
+          setErrorMessage('تعذر فتح البث المباشر للكاميرا. اضغط "تشغيل الكاميرا الآن" أو استخدم زر "التقاط صورة الكود".');
         }
+        return;
       }
 
-      if (!stream) return;
+      isStartingRef.current = false;
+      if (!isMountedRef.current) {
+        stream.getTracks().forEach(t => {
+          try {
+            t.stop();
+          } catch {}
+        });
+        return;
+      }
+
       streamRef.current = stream;
 
       // فحص دعم الفلاش (Torch) في الكاميرا الخلفية
@@ -182,7 +238,6 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
 
       setCameraState('active');
 
-      // تجهيز BarcodeDetector الأصلي في المتصفح إن وجد لتسريع القراءة بجانب محرك jsQR
       let nativeDetector: any = null;
       if ('BarcodeDetector' in window) {
         try {
@@ -193,7 +248,10 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
         }
       }
 
-      // حلقة المسح الضوئي المستمرة كل 130 مللي ثانية
+      if (scanTimerRef.current) {
+        window.clearInterval(scanTimerRef.current);
+      }
+
       scanTimerRef.current = window.setInterval(async () => {
         if (hasScannedRef.current) return;
         const video = videoRef.current;
@@ -204,7 +262,6 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
         const vh = video.videoHeight;
         if (!vw || !vh) return;
 
-        // 1) الفحص عبر BarcodeDetector الأصلي إن توفر
         if (nativeDetector) {
           try {
             const barcodes = await nativeDetector.detect(video);
@@ -217,8 +274,7 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
           }
         }
 
-        // 2) الفحص عبر محرك jsQR الموثوق على جميع المتصفحات (أندرويد وآيفون وكمبيوتر)
-        const maxDim = 640;
+        const maxDim = 600;
         const scale = Math.min(1, maxDim / Math.max(vw, vh));
         const cw = Math.max(1, Math.floor(vw * scale));
         const ch = Math.max(1, Math.floor(vh * scale));
@@ -238,20 +294,33 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
         if (qrCode && qrCode.data && qrCode.data.trim()) {
           handleDecodedResult(qrCode.data);
         }
-      }, 130);
+      }, 140);
     },
     [handleDecodedResult, stopCameraStream]
   );
 
+  // تشغيل الكاميرا بثبات تام دون تأثر بـ StrictMode أو إعادة الرسم
   useEffect(() => {
+    isMountedRef.current = true;
+    if (unmountStopTimeoutRef.current) {
+      window.clearTimeout(unmountStopTimeoutRef.current);
+      unmountStopTimeoutRef.current = null;
+    }
+
     if (active) {
-      startCameraStream(facingMode);
+      startCameraStream(facingMode, false);
     } else {
       stopCameraStream();
       setCameraState('stopped');
     }
+
     return () => {
-      stopCameraStream();
+      isMountedRef.current = false;
+      unmountStopTimeoutRef.current = window.setTimeout(() => {
+        if (!isMountedRef.current) {
+          stopCameraStream();
+        }
+      }, 150);
     };
   }, [active, facingMode, startCameraStream, stopCameraStream]);
 
@@ -266,15 +335,17 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
       });
       setTorchOn(nextTorch);
     } catch {
-      // torch not supported on this track
+      // torch not supported
     }
   };
 
   const handleSwitchCamera = () => {
-    setFacingMode(prev => (prev === 'environment' ? 'user' : 'environment'));
+    const nextMode = facingMode === 'environment' ? 'user' : 'environment';
+    setFacingMode(nextMode);
+    startCameraStream(nextMode, true);
   };
 
-  // قراءة رمز QR من صورة ملتقطة بالكاميرا أو مرفوعة من المعرض (حل احتياطي مضمون 100%)
+  // قراءة رمز QR من صورة ملتقطة بالكاميرا أو مرفوعة من المعرض (يدعم BarcodeDetector + jsQR متعدد الأحجام)
   const handleFileCaptureChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -284,28 +355,49 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
     const reader = new FileReader();
     reader.onload = () => {
       const img = new Image();
-      img.onload = () => {
+      img.onload = async () => {
         try {
-          const canvas = document.createElement('canvas');
-          const maxDim = 1000;
-          const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-          canvas.width = Math.max(1, Math.floor(img.width * scale));
-          canvas.height = Math.max(1, Math.floor(img.height * scale));
-          const ctx = canvas.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-            const code = jsQR(imageData.data, imageData.width, imageData.height, {
-              inversionAttempts: 'attemptBoth'
-            });
-            if (code && code.data) {
-              setIsProcessingImage(false);
-              handleDecodedResult(code.data);
-              return;
+          // 1. محاولة القراءة السريعة بمحرك المتصفح الأصلي BarcodeDetector إن وجد
+          if ('BarcodeDetector' in window) {
+            try {
+              const BarcodeDetectorClass = (window as any).BarcodeDetector;
+              const detector = new BarcodeDetectorClass({ formats: ['qr_code'] });
+              const found = await detector.detect(img);
+              if (found && found.length > 0 && found[0].rawValue) {
+                setIsProcessingImage(false);
+                handleDecodedResult(String(found[0].rawValue));
+                return;
+              }
+            } catch {
+              // نكمل بـ jsQR بالأسفل
             }
           }
+
+          // 2. محاولة القراءة عبر jsQR بعدة أحجام لضمان قراءة صور الكاميرا عالية الدقة
+          const canvas = document.createElement('canvas');
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          const targetSizes = [1000, 650, 1400];
+
+          if (ctx) {
+            for (const maxDim of targetSizes) {
+              const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+              canvas.width = Math.max(1, Math.floor(img.width * scale));
+              canvas.height = Math.max(1, Math.floor(img.height * scale));
+              ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+              const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                inversionAttempts: 'attemptBoth'
+              });
+              if (code && code.data && code.data.trim()) {
+                setIsProcessingImage(false);
+                handleDecodedResult(code.data);
+                return;
+              }
+            }
+          }
+
           setIsProcessingImage(false);
-          setErrorMessage('لم يتم العثور على رمز QR واضح داخل الصورة الملتقطة. يرجى تقريب الكاميرا من مربع الـ QR والمحاولة مرة أخرى.');
+          setErrorMessage('لم يتم العثور على رمز QR واضح داخل الصورة. يرجى تقريب الكاميرا من مربع الـ QR والمحاولة مرة أخرى.');
         } catch {
           setIsProcessingImage(false);
           setErrorMessage('تعذر تحليل الصورة. يرجى المحاولة مرة أخرى.');
@@ -324,8 +416,14 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
   return (
     <div className="space-y-2.5">
       <div className="bg-slate-950 rounded-2xl overflow-hidden border-2 border-emerald-500/70 relative shadow-inner">
-        {/* شاشة الفيديو الحية للكاميرا */}
-        <div className="relative w-full aspect-4/3 sm:aspect-16/10 max-h-[280px] bg-slate-950 flex items-center justify-center overflow-hidden">
+        {/* حاوية الكاميرا المرنة — لا تقص الأزرار في حالة الخطأ أو التوقف */}
+        <div
+          className={`relative w-full bg-slate-950 flex items-center justify-center overflow-hidden ${
+            cameraState === 'active'
+              ? 'aspect-4/3 sm:aspect-16/10 max-h-[260px]'
+              : 'min-h-[210px] py-5 px-4'
+          }`}
+        >
           <video
             ref={videoRef}
             playsInline
@@ -339,25 +437,22 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
 
           {/* إطار التوجيه الأخضر وخط الليزر المتحرك أثناء عمل الكاميرا */}
           {cameraState === 'active' && (
-            <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-4">
+            <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-3">
               <div
-                className={`w-44 h-44 sm:w-48 sm:h-48 rounded-2xl border-2 transition-all relative ${
+                className={`w-40 h-40 sm:w-44 sm:h-44 rounded-2xl border-2 transition-all relative ${
                   detectedFlash
                     ? 'border-emerald-300 bg-emerald-400/20 scale-105'
                     : 'border-emerald-400/90 shadow-[0_0_0_9999px_rgba(2,6,23,0.45)]'
                 }`}
               >
-                {/* زوايا التركيز البصري */}
                 <div className="absolute -top-0.5 -right-0.5 w-6 h-6 border-t-4 border-r-4 border-amber-400 rounded-tr-xl" />
                 <div className="absolute -top-0.5 -left-0.5 w-6 h-6 border-t-4 border-l-4 border-amber-400 rounded-tl-xl" />
                 <div className="absolute -bottom-0.5 -right-0.5 w-6 h-6 border-b-4 border-r-4 border-amber-400 rounded-br-xl" />
                 <div className="absolute -bottom-0.5 -left-0.5 w-6 h-6 border-b-4 border-l-4 border-amber-400 rounded-bl-xl" />
-
-                {/* خط الليزر المتحرك */}
                 <div className="absolute inset-x-2 top-1/2 h-0.5 bg-emerald-400 shadow-[0_0_12px_#34d399] animate-pulse" />
               </div>
 
-              <span className="mt-3 px-3 py-1 rounded-full bg-slate-950/80 text-emerald-200 text-[11px] font-bold backdrop-blur-xs border border-emerald-500/30">
+              <span className="mt-2.5 px-3 py-1 rounded-full bg-slate-950/85 text-emerald-200 text-[11px] font-bold backdrop-blur-xs border border-emerald-500/30">
                 الكاميرا تعمل الآن — ضع رمز QR داخل المربع
               </span>
             </div>
@@ -365,30 +460,30 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
 
           {/* حالة جاري تشغيل الكاميرا */}
           {cameraState === 'starting' && (
-            <div className="p-6 text-center space-y-3 text-white">
-              <div className="w-16 h-16 mx-auto rounded-2xl bg-emerald-950/80 border border-emerald-500/40 flex items-center justify-center">
-                <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
+            <div className="text-center space-y-2.5 text-white">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-emerald-950/80 border border-emerald-500/40 flex items-center justify-center">
+                <Loader2 className="w-7 h-7 text-emerald-400 animate-spin" />
               </div>
               <div className="text-xs font-bold text-emerald-200">
                 جاري فتح كاميرا الجهاز لمسح رمز QR...
               </div>
-              <p className="text-[11px] text-slate-400">
-                يرجى الضغط على "سماح / Allow" إذا طلب المتصفح إذن استخدام الكاميرا
+              <p className="text-[11px] text-slate-300 max-w-xs mx-auto leading-relaxed">
+                اضغط على <strong>"Allow while visiting the site"</strong> عند ظهور رسالة المتصفح (وتأكد من إبعاد أي أيقونة عائمة على الشاشة).
               </p>
             </div>
           )}
 
           {/* حالة إيقاف الكاميرا مؤقتاً */}
           {cameraState === 'stopped' && (
-            <div className="p-6 text-center space-y-3 text-white">
-              <div className="w-16 h-16 mx-auto rounded-2xl bg-slate-900 border border-slate-700 flex items-center justify-center">
-                <Camera className="w-8 h-8 text-emerald-400" />
+            <div className="text-center space-y-3 text-white">
+              <div className="w-14 h-14 mx-auto rounded-2xl bg-slate-900 border border-slate-700 flex items-center justify-center">
+                <Camera className="w-7 h-7 text-emerald-400" />
               </div>
               <div className="text-xs font-bold text-slate-200">تم إيقاف الكاميرا مؤقتاً</div>
               <button
                 type="button"
-                onClick={() => startCameraStream(facingMode)}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+                onClick={() => startCameraStream(facingMode, true)}
+                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
               >
                 <Camera className="w-4 h-4" />
                 <span>تشغيل الكاميرا الآن</span>
@@ -398,29 +493,29 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
 
           {/* حالة تعذر فتح الكاميرا أو رفض الإذن */}
           {cameraState === 'error' && (
-            <div className="p-5 text-center space-y-3 text-white max-w-md mx-auto">
-              <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center">
-                <AlertTriangle className="w-7 h-7 text-amber-400" />
+            <div className="text-center space-y-3 text-white max-w-md mx-auto">
+              <div className="w-12 h-12 mx-auto rounded-2xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center">
+                <AlertTriangle className="w-6 h-6 text-amber-400" />
               </div>
               <div className="text-xs font-bold text-amber-200 leading-relaxed">
-                {errorMessage || 'تعذر تشغيل الكاميرا المباشرة في المتصفح'}
+                {errorMessage || 'تعذر تشغيل البث المباشر للكاميرا في المتصفح'}
               </div>
-              <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-center gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => startCameraStream(facingMode)}
-                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  onClick={() => startCameraStream(facingMode, true)}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>إعادة محاولة فتح الكاميرا</span>
+                  <RefreshCw className="w-4 h-4" />
+                  <span>تشغيل الكاميرا المباشرة</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
-                  className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                  className="px-4 py-2.5 rounded-xl bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-extrabold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                 >
-                  <Camera className="w-3.5 h-3.5" />
-                  <span>التقاط صورة الكود بالكاميرا</span>
+                  <Camera className="w-4 h-4" />
+                  <span>التقاط صورة الكود بالكاميرا (بديل فوري)</span>
                 </button>
               </div>
             </div>
@@ -473,7 +568,7 @@ export const QrCameraScanner: React.FC<QrCameraScannerProps> = ({
             ) : (
               <button
                 type="button"
-                onClick={() => startCameraStream(facingMode)}
+                onClick={() => startCameraStream(facingMode, true)}
                 className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[11px] inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <Camera className="w-3.5 h-3.5" />

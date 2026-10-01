@@ -72,7 +72,7 @@ if ('serviceWorker' in navigator && isProduction) {
     if ('caches' in window) {
       window.caches.keys().then((keys) => {
         keys.forEach((key) => {
-          if (key !== 'sharaya-clinics-v17') {
+          if (key !== 'sharaya-clinics-v19') {
             window.caches.delete(key);
           }
         });
@@ -80,7 +80,7 @@ if ('serviceWorker' in navigator && isProduction) {
     }
 
     navigator.serviceWorker
-      .register('/sw.js?v=17', { updateViaCache: 'none' })
+      .register('/sw.js?v=19', { updateViaCache: 'none' })
       .then((registration) => {
         // فحص وجود أي تحديث جديد تم رفعه إلى Vercel أو الخادم بدون الاعتماد على الكاش
         registration.update();
