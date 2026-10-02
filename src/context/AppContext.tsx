@@ -30,7 +30,8 @@ import {
   SystemTrialLicenseConfig,
   SecurityAttemptType,
   SecurityIntrusionAttempt,
-  BlockedSecurityEntity
+  BlockedSecurityEntity,
+  LiveConnectedDevice
 } from '../types';
 import { 
   getStoredClinics, 
@@ -314,6 +315,11 @@ interface AppContextType {
   trialLicenseConfig: SystemTrialLicenseConfig;
   updateTrialLicenseConfig: (nextConfig: SystemTrialLicenseConfig) => Promise<boolean>;
   reportSecurityIntrusion: (type: SecurityAttemptType, customLabel?: string) => Promise<void>;
+  liveConnectedDevices: LiveConnectedDevice[];
+  forceLogoutDevice: (targetFingerprint: string) => Promise<void>;
+  injectIsolatedDemoData: () => Promise<{ success: boolean; addedCount: number }>;
+  removeIsolatedDemoDataOnly: () => Promise<{ success: boolean; removedCount: number }>;
+  isolatedDemoRecordsCount: number;
   isDeveloperPortalOpen: boolean;
   setIsDeveloperPortalOpen: (open: boolean) => void;
 }
@@ -396,6 +402,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getStoredTrialLicenseConfig
   );
   const [isDeveloperPortalOpen, setIsDeveloperPortalOpen] = useState<boolean>(false);
+  const [liveConnectedDevices, setLiveConnectedDevices] = useState<LiveConnectedDevice[]>([]);
 
   const mergeErrorLogLists = (cloudList: SystemErrorLog[], localList: SystemErrorLog[]): SystemErrorLog[] => {
     const map = new Map<string, SystemErrorLog>();
@@ -448,14 +455,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const isDoctorRoleSession = () => getStoredSession()?.role === 'doctor';
 
     const mergeWithSelectedTicket = (list: Booking[]): Booking[] => {
+      const cloudDemoBookings = Array.isArray(trialConfigRef.current?.isolatedDemoBookings)
+        ? trialConfigRef.current.isolatedDemoBookings
+        : [];
+      const storedDemoBookings = getStoredBookings().filter((b) =>
+        String(b.id).startsWith('demo_preview_')
+      );
+      const effectiveDemoBookings =
+        cloudDemoBookings.length > 0 ? cloudDemoBookings : storedDemoBookings;
+      const withoutDupDemo = list.filter((b) => !String(b.id).startsWith('demo_preview_'));
+      const baseList =
+        effectiveDemoBookings.length > 0 && trialConfigRef.current?.demoPreviewActive
+          ? [...effectiveDemoBookings, ...withoutDupDemo]
+          : withoutDupDemo;
+
       const currentTicket = selectedTicketRef.current;
-      if (!currentTicket || getStoredSession()) return list;
-      if (getDeletedBookingIds().has(currentTicket.id)) return list;
-      const exists = list.some(b => b.id === currentTicket.id);
+      if (!currentTicket || getStoredSession()) return baseList;
+      if (getDeletedBookingIds().has(currentTicket.id)) return baseList;
+      const exists = baseList.some(b => b.id === currentTicket.id);
       if (!exists) {
-        return [currentTicket, ...list];
+        return [currentTicket, ...baseList];
       }
-      return list.map(b =>
+      return baseList.map(b =>
         b.id === currentTicket.id
           ? {
               ...b,
@@ -906,10 +927,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           try {
             const parsed = JSON.parse(rawVal);
             if (parsed && typeof parsed === 'object' && parsed.mode) {
+              trialConfigRef.current = parsed;
               setTrialLicenseConfig(parsed);
               saveTrialLicenseConfig(parsed);
+              setBookings((prev) => {
+                const withoutDemo = prev.filter((b) => !String(b.id).startsWith('demo_preview_'));
+                const next =
+                  parsed.demoPreviewActive && Array.isArray(parsed.isolatedDemoBookings)
+                    ? [...parsed.isolatedDemoBookings, ...withoutDemo]
+                    : withoutDemo;
+                saveBookings(next);
+                return next;
+              });
             }
           } catch {}
+        }
+      })
+      .on('broadcast', { event: 'device_heartbeat' }, (payload: any) => {
+        if (!isMounted) return;
+        const dev = payload?.payload?.device as LiveConnectedDevice | undefined;
+        if (dev && dev.deviceFingerprint) {
+          setLiveConnectedDevices((prev) => {
+            const now = Date.now();
+            const filtered = prev.filter(
+              (item) =>
+                item.deviceFingerprint !== dev.deviceFingerprint &&
+                now - new Date(item.lastSeenAt).getTime() < 35000
+            );
+            return [dev, ...filtered].slice(0, 40);
+          });
+        }
+      })
+      .on('broadcast', { event: 'force_logout_device' }, (payload: any) => {
+        if (!isMounted) return;
+        const targetFp = payload?.payload?.targetFingerprint;
+        const myFp = getHardwareDeviceFingerprint().fingerprintId;
+        if (targetFp && targetFp === myFp) {
+          setCurrentUser(null);
+          saveSession(null);
+          logoutFromSupabase().catch(() => {});
+          setActiveView('landing');
+          addToast({
+            type: 'warning',
+            title: 'تم إنهاء الجلسة عن بُعد 🚪',
+            message: 'تم إغلاق جلستك الحالية بواسطة مسؤول تطوير المنظومة.',
+          });
         }
       })
       .on('broadcast', { event: 'doctors_updated' }, async () => {
@@ -5109,6 +5171,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         clock_rollback: 'محاولة تأخير تاريخ وساعة الجهاز لخداع الفترة التجريبية',
         storage_tamper: 'محاولة تلاعب وتزوير في ملفات المتصفح (LocalStorage / Session)',
         brute_force_login: 'محاولات متكررة لتخمين كلمة المرور (Brute Force)',
+        vpn_geo_block: 'محاولة اتصال عبر VPN أو من خارج جمهورية مصر العربية',
       };
 
       const prevConfig = trialConfigRef.current;
@@ -5193,6 +5256,316 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.addEventListener('sharaya:security-tamper-detected', onTamperDetected);
     return () => window.removeEventListener('sharaya:security-tamper-detected', onTamperDetected);
   }, []);
+
+  // إرسال نبضة حضور حية (Live Presence Heartbeat) كل 8 ثوانٍ لرادار المتواجدين الآن
+  useEffect(() => {
+    let mounted = true;
+    const sendHeartbeat = async () => {
+      if (!mounted) return;
+      try {
+        const hw = getHardwareDeviceFingerprint();
+        const net = await fetchVisitorNetworkIdentity();
+        const sess = getStoredSession();
+        const myDevice: LiveConnectedDevice = {
+          deviceFingerprint: hw.fingerprintId,
+          deviceDetails: hw.deviceDetails,
+          ip: net.ip,
+          ispLocation: net.ispLocation,
+          countryCode: net.countryCode,
+          activeUsername: sess ? `${sess.displayName} (${sess.username})` : 'زائر بالصفحة العامة',
+          activeRole: sess?.role || 'visitor',
+          currentView: activeView,
+          lastSeenAt: new Date().toISOString(),
+        };
+
+        setLiveConnectedDevices((prev) => {
+          const now = Date.now();
+          const others = prev.filter(
+            (item) =>
+              item.deviceFingerprint !== myDevice.deviceFingerprint &&
+              now - new Date(item.lastSeenAt).getTime() < 35000
+          );
+          return [myDevice, ...others].slice(0, 40);
+        });
+
+        if (isSupabaseConfigured) {
+          const ch = supabase.channel('system_updates');
+          ch.send({
+            type: 'broadcast',
+            event: 'device_heartbeat',
+            payload: { device: myDevice },
+          });
+        }
+      } catch {}
+    };
+
+    sendHeartbeat();
+    const hbTimer = window.setInterval(sendHeartbeat, 8000);
+    return () => {
+      mounted = false;
+      window.clearInterval(hbTimer);
+    };
+  }, [activeView, currentUser]);
+
+  const forceLogoutDevice = async (targetFingerprint: string): Promise<void> => {
+    if (!targetFingerprint) return;
+    if (isSupabaseConfigured) {
+      try {
+        const ch = supabase.channel('system_updates');
+        await ch.send({
+          type: 'broadcast',
+          event: 'force_logout_device',
+          payload: { targetFingerprint },
+        });
+      } catch {}
+    }
+    const myFp = getHardwareDeviceFingerprint().fingerprintId;
+    if (targetFingerprint === myFp) {
+      logout();
+    }
+    addToast({
+      type: 'success',
+      title: 'تم إرسال أمر إغلاق الجلسة 🚪',
+      message: `تم طرد الجهاز (${targetFingerprint}) من الجلسة النشطة فوراً.`,
+    });
+  };
+
+  // حساب عدد السجلات التجريبية المعزولة (demo_preview_...) الموجودة حالياً
+  const isIsolatedDemoRecord = (id?: string, notes?: string): boolean => {
+    return (
+      Boolean(id && String(id).startsWith('demo_preview_')) ||
+      Boolean(notes && String(notes).includes('[بيانات عرض تجريبية]'))
+    );
+  };
+
+  const isolatedDemoRecordsCount =
+    bookings.filter((b) => isIsolatedDemoRecord(b.id, b.notes)).length +
+    shiftHandovers.filter((h) => isIsolatedDemoRecord(h.id, h.notes)).length +
+    financeLedger.expenses.filter((e) => isIsolatedDemoRecord(e.id, e.notes)).length;
+
+  /**
+   * حقن بيانات عرض تجريبية معزولة بختم خاص (demo_preview_) لمعاينة التقارير دون المساس بأي بيانات أصلية
+   */
+  const injectIsolatedDemoData = async (): Promise<{ success: boolean; addedCount: number }> => {
+    const todayStr = getLocalDateStr(new Date());
+    const nowIso = new Date().toISOString();
+    const activeClinicsList = clinics.length > 0 ? clinics : [];
+    const activeDoctorsList = doctors.length > 0 ? doctors : [];
+
+    if (activeClinicsList.length === 0) {
+      return { success: false, addedCount: 0 };
+    }
+
+    const samplePatients = [
+      { name: 'محمد عبد الرحمن السيد', phone: '01012345601', status: 'completed' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'cash' as PaymentMethod },
+      { name: 'أحمد محمود مصطفى حسن', phone: '01123456702', status: 'completed' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'instapay' as PaymentMethod },
+      { name: 'فاطمة الزهراء كامل علي', phone: '01234567803', status: 'completed' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'insurance' as PaymentMethod },
+      { name: 'ابراهيم خليل عبد العزيز', phone: '01545678904', status: 'in_progress' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'cash' as PaymentMethod },
+      { name: 'سارة طارق محمد الشناوي', phone: '01098765405', status: 'called' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'vodafone_cash' as PaymentMethod },
+      { name: 'عمر خالد عبد المنعم', phone: '01187654306', status: 'waiting' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'cash' as PaymentMethod },
+      { name: 'محمود سعيد عبد اللطيف', phone: '01276543207', status: 'waiting' as BookingStatus, pay: 'unpaid' as PaymentStatus, method: undefined },
+      { name: 'هدى حسن ابراهيم منصور', phone: '01065432108', status: 'completed' as BookingStatus, pay: 'exempt' as PaymentStatus, method: 'exemption' as PaymentMethod },
+      { name: 'يوسف أيمن كمال الدين', phone: '01154321009', status: 'completed' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'consultation' as PaymentMethod },
+      { name: 'منى عادل عبد الفتاح', phone: '01043210910', status: 'completed' as BookingStatus, pay: 'paid' as PaymentStatus, method: 'insurance' as PaymentMethod },
+    ];
+
+    const demoBookings: Booking[] = samplePatients.map((p, idx) => {
+      const clinic = activeClinicsList[idx % activeClinicsList.length];
+      const doc =
+        activeDoctorsList.find((d) => d.clinicId === clinic.id) ||
+        activeDoctorsList[idx % Math.max(1, activeDoctorsList.length)];
+      const baseFee = Number(clinic.fee) || 100;
+      const isConsultation = p.method === 'consultation';
+      const isExempt = p.pay === 'exempt';
+      const isInsurance = p.method === 'insurance';
+
+      const insContract = insuranceContracts[0];
+      const patientPaidAmount = Math.round(baseFee * 0.2);
+      const insuranceCoveredAmount = Math.round(baseFee * 0.8);
+      const insuranceDetails: BookingInsuranceDetails | undefined = isInsurance
+        ? {
+            companyId: insContract?.id || 'ins-1',
+            companyName: insContract?.companyName || 'نقابة المهندسين / الرعاية الصحية',
+            cardCategory: 'الفئة الذهبية (تغطية 80%)',
+            cardNumber: `INS-2026-${100 + idx}`,
+            copayInputRaw: '20%',
+            copayRateText: '20%',
+            copayPercentage: 20,
+            originalFee: baseFee,
+            originalClinicFee: baseFee,
+            patientPaidAmount,
+            insuranceCoveredAmount,
+            insuranceClaimAmount: insuranceCoveredAmount,
+            recordedBy: 'أ. محمود إبراهيم (الاستقبال)',
+            recordedAt: nowIso,
+          }
+        : undefined;
+
+      return {
+        id: `demo_preview_bk_${idx + 1}`,
+        ticketNumber: `${clinic.code || 'D'}-${String(90 + idx)}`,
+        patientName: p.name,
+        patientPhone: p.phone,
+        clinicId: clinic.id,
+        clinicName: clinic.name,
+        doctorId: doc?.id || 'doc-1',
+        doctorName: doc?.name || 'طبيب استشاري',
+        date: todayStr,
+        timeSlot: 'الفترة الصباحية والمسائية',
+        queuePosition: 90 + idx,
+        status: p.status,
+        paymentStatus: p.pay,
+        paymentMethod: p.method,
+        fee: isConsultation || isExempt ? 0 : baseFee,
+        notes: '[بيانات عرض تجريبية] — حجز معاينة تجريبي لمجلس الإدارة',
+        createdAt: nowIso,
+        paidAt: p.pay === 'paid' || p.pay === 'exempt' ? nowIso : undefined,
+        completedAt: p.status === 'completed' ? nowIso : undefined,
+        insuranceDetails,
+      };
+    });
+
+    const demoHandover: ShiftHandoverRecord = {
+      id: 'demo_preview_handover_1',
+      department: 'cashier',
+      handoverType: 'cashier_to_management',
+      fromStaffId: 'staff-cashier',
+      fromStaffUsername: 'cashier',
+      fromStaffName: 'أ. محمود إبراهيم (بيانات عرض تجريبية)',
+      toStaffId: 'staff-admin',
+      toStaffUsername: 'admin',
+      toStaffName: 'الإدارة المالية',
+      shiftDate: todayStr,
+      createdAt: nowIso,
+      expectedAmount: 650,
+      actualReceivedAmount: 650,
+      status: 'delivered_to_management',
+      acknowledgedAt: nowIso,
+      notes: '[بيانات عرض تجريبية] — تسليم خزينة تجريبي للمعاينة',
+    };
+
+    const demoExpense: FinanceExpenseRecord = {
+      id: 'demo_preview_exp_1',
+      date: todayStr,
+      category: 'medical_supplies',
+      title: 'مستلزمات طبية ومعقمات [بيانات عرض تجريبية]',
+      amount: 120,
+      notes: '[بيانات عرض تجريبية] — مصروف معاينة تجريبي',
+      recordedBy: 'مدير المالية',
+      recordedByUsername: 'finance',
+      createdAt: nowIso,
+    };
+
+    // دمج البيانات التجريبية مع الحفاظ التام على جميع البيانات الحقيقية الموجودة
+    const nonDemoBookings = bookings.filter((b) => !isIsolatedDemoRecord(b.id, b.notes));
+    const nextBookings = [...demoBookings, ...nonDemoBookings];
+    setBookings(nextBookings);
+    saveBookings(nextBookings);
+
+    const nonDemoHandovers = shiftHandovers.filter((h) => !isIsolatedDemoRecord(h.id, h.notes));
+    const nextHandovers = [demoHandover, ...nonDemoHandovers];
+    setShiftHandovers(nextHandovers);
+    saveShiftHandovers(nextHandovers);
+
+    const nonDemoExpenses = financeLedger.expenses.filter(
+      (e) => !isIsolatedDemoRecord(e.id, e.notes)
+    );
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      expenses: [demoExpense, ...nonDemoExpenses],
+    };
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...trialConfigRef.current,
+      demoPreviewActive: true,
+      isolatedDemoBookings: demoBookings,
+      updatedAt: nowIso,
+    };
+    trialConfigRef.current = nextConfig;
+    setTrialLicenseConfig(nextConfig);
+    saveTrialLicenseConfig(nextConfig);
+
+    if (isSupabaseConfigured) {
+      await Promise.all([
+        saveShiftHandoversToDb(nextHandovers),
+        saveFinanceLedgerToDb(nextLedger),
+        saveTrialLicenseConfigToDb(nextConfig),
+      ]).catch(() => {});
+    }
+
+    const totalAdded = demoBookings.length + 2;
+    addToast({
+      type: 'success',
+      title: 'تم حقن بيانات العرض التجريبية بنجاح ✨',
+      message: `تم إضافة ${totalAdded} سجل تجريبي معزول لمعاينة التقارير دون المساس بأي بيانات أصلية.`,
+    });
+
+    return { success: true, addedCount: totalAdded };
+  };
+
+  /**
+   * سحب وإزالة البيانات التجريبية المعزولة فقط (demo_preview_) مع الحفاظ التام 100% على كل البيانات الأصلية أو المدخلة
+   */
+  const removeIsolatedDemoDataOnly = async (): Promise<{
+    success: boolean;
+    removedCount: number;
+  }> => {
+    const demoBookingsToRemove = bookings.filter((b) => isIsolatedDemoRecord(b.id, b.notes));
+    const cleanBookings = bookings.filter((b) => !isIsolatedDemoRecord(b.id, b.notes));
+
+    const demoHandoversToRemove = shiftHandovers.filter((h) =>
+      isIsolatedDemoRecord(h.id, h.notes)
+    );
+    const cleanHandovers = shiftHandovers.filter((h) => !isIsolatedDemoRecord(h.id, h.notes));
+
+    const demoExpensesToRemove = financeLedger.expenses.filter((e) =>
+      isIsolatedDemoRecord(e.id, e.notes)
+    );
+    const cleanLedger: FinanceLedgerState = {
+      ...financeLedger,
+      expenses: financeLedger.expenses.filter((e) => !isIsolatedDemoRecord(e.id, e.notes)),
+    };
+
+    const removedTotal =
+      demoBookingsToRemove.length + demoHandoversToRemove.length + demoExpensesToRemove.length;
+
+    setBookings(cleanBookings);
+    saveBookings(cleanBookings);
+
+    setShiftHandovers(cleanHandovers);
+    saveShiftHandovers(cleanHandovers);
+
+    setFinanceLedger(cleanLedger);
+    saveFinanceLedger(cleanLedger);
+
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...trialConfigRef.current,
+      demoPreviewActive: false,
+      isolatedDemoBookings: [],
+      updatedAt: new Date().toISOString(),
+    };
+    trialConfigRef.current = nextConfig;
+    setTrialLicenseConfig(nextConfig);
+    saveTrialLicenseConfig(nextConfig);
+
+    if (isSupabaseConfigured) {
+      await Promise.all([
+        saveShiftHandoversToDb(cleanHandovers),
+        saveFinanceLedgerToDb(cleanLedger),
+        saveTrialLicenseConfigToDb(nextConfig),
+      ]).catch(() => {});
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم سحب البيانات التجريبية فقط بنجاح 🧹',
+      message: `تم إزالة ${removedTotal} سجل تجريبي معزول، وجميع البيانات الأصلية والمدخلة محفوظة بالكامل 100%.`,
+    });
+
+    return { success: true, removedCount: removedTotal };
+  };
 
   return (
     <AppContext.Provider
@@ -5285,6 +5658,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         trialLicenseConfig,
         updateTrialLicenseConfig,
         reportSecurityIntrusion,
+        liveConnectedDevices,
+        forceLogoutDevice,
+        injectIsolatedDemoData,
+        removeIsolatedDemoDataOnly,
+        isolatedDemoRecordsCount,
         isDeveloperPortalOpen,
         setIsDeveloperPortalOpen
       }}

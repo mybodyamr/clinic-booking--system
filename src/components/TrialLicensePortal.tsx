@@ -26,12 +26,19 @@ import {
   Cpu,
   Globe,
   Radar,
+  Megaphone,
+  Send,
+  Users,
+  LogOut,
+  Database,
+  Layers,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
   SystemTrialLicenseConfig,
   BlockedSecurityEntity,
   SecurityIntrusionAttempt,
+  DeveloperBroadcastMessage,
 } from '../types';
 import {
   verifySecretDeveloperCredentials,
@@ -51,14 +58,33 @@ const ORIGINAL_CONSOLE = {
   clear: typeof console !== 'undefined' ? console.clear?.bind(console) : () => {},
 };
 
+const VIEW_ARABIC_NAMES: Record<string, string> = {
+  landing: 'الصفحة الرئيسية العامة',
+  booking: 'شاشة حجز موعد مريض',
+  ticket: 'شاشة عرض تذكرة الحجز',
+  queue: 'شاشة النداء والانتظار',
+  login: 'صفحة تسجيل دخول الموظفين',
+  reception: 'مكتب الاستقبال',
+  doctor: 'بوابة الطبيب',
+  cashier: 'شاشة الخزينة والتحصيل',
+  finance: 'الإدارة المالية والتأمين',
+  admin: 'لوحة الإدارة العليا والتقارير',
+};
+
 export const TrialLicensePortal: React.FC = () => {
   const {
     trialLicenseConfig,
     updateTrialLicenseConfig,
     reportSecurityIntrusion,
+    liveConnectedDevices,
+    forceLogoutDevice,
+    injectIsolatedDemoData,
+    removeIsolatedDemoDataOnly,
+    isolatedDemoRecordsCount,
     isDeveloperPortalOpen,
     setIsDeveloperPortalOpen,
     currentView,
+    currentUser,
     selectivePurgeRecords,
     addToast,
   } = useApp();
@@ -68,11 +94,16 @@ export const TrialLicensePortal: React.FC = () => {
   const [devSessionBypass, setDevSessionBypass] = useState<boolean>(false);
   const devToolsStrikeCountRef = useRef<number>(0);
 
-  // بيانات بصمة الجهاز الحالي وعنوان الـ IP
+  // بيانات بصمة الجهاز الحالي وعنوان الـ IP والدولة
   const [myDeviceHw] = useState(() => getHardwareDeviceFingerprint());
-  const [myNetworkInfo, setMyNetworkInfo] = useState<{ ip: string; ispLocation: string }>({
+  const [myNetworkInfo, setMyNetworkInfo] = useState<{
+    ip: string;
+    ispLocation: string;
+    countryCode: string;
+  }>({
     ip: 'جاري الفحص...',
     ispLocation: '',
+    countryCode: 'UNKNOWN',
   });
 
   useEffect(() => {
@@ -104,6 +135,27 @@ export const TrialLicensePortal: React.FC = () => {
         )
       : undefined;
 
+  // فحص حظر الـ VPN أو الاتصال من خارج جمهورية مصر العربية (Geo-Fence Egypt Only)
+  const isVpnOrOutsideEgyptBlocked =
+    Boolean(trialLicenseConfig.blockNonEgyptVpn) &&
+    !isDeveloperPortalOpen &&
+    !devSessionBypass &&
+    myNetworkInfo.countryCode !== 'UNKNOWN' &&
+    myNetworkInfo.countryCode !== 'EG';
+
+  const vpnBlockReportedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (isVpnOrOutsideEgyptBlocked && !vpnBlockReportedRef.current) {
+      vpnBlockReportedRef.current = true;
+      reportSecurityIntrusion(
+        'vpn_geo_block',
+        `محاولة فتح النظام عبر VPN أو من خارج مصر (${myNetworkInfo.countryCode} - ${myNetworkInfo.ispLocation})`
+      );
+    } else if (!isVpnOrOutsideEgyptBlocked) {
+      vpnBlockReportedRef.current = false;
+    }
+  }, [isVpnOrOutsideEgyptBlocked, myNetworkInfo.countryCode, myNetworkInfo.ispLocation]);
+
   // فحص التلاعب بتأخير ساعة الجهاز (Anti-Time Travel)
   const clockTamperStatus =
     !isDeveloperPortalOpen && !devSessionBypass
@@ -122,6 +174,38 @@ export const TrialLicensePortal: React.FC = () => {
       clockTamperReportedRef.current = false;
     }
   }, [clockTamperStatus.isTampered, clockTamperStatus.behindByMinutes]);
+
+  // منع النسخ وتحديد النصوص وسحب الصور عند تفعيل خيار Anti-Copy
+  useEffect(() => {
+    if (!trialLicenseConfig.antiCopyAndPrint || isDeveloperPortalOpen || devSessionBypass) {
+      return;
+    }
+
+    const preventAction = (e: Event) => {
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
+
+    window.addEventListener('copy', preventAction, true);
+    window.addEventListener('cut', preventAction, true);
+    window.addEventListener('dragstart', preventAction, true);
+    window.addEventListener('selectstart', preventAction, true);
+
+    return () => {
+      window.removeEventListener('copy', preventAction, true);
+      window.removeEventListener('cut', preventAction, true);
+      window.removeEventListener('dragstart', preventAction, true);
+      window.removeEventListener('selectstart', preventAction, true);
+    };
+  }, [trialLicenseConfig.antiCopyAndPrint, isDeveloperPortalOpen, devSessionBypass]);
 
   // تحديث العداد كل 15 ثانية لضمان دقة العد التنازلي والإغلاق اللحظي فور انتهاء الوقت
   useEffect(() => {
@@ -159,7 +243,6 @@ export const TrialLicensePortal: React.FC = () => {
       } catch {}
     };
 
-    // 1. تفريغ وتعطيل أوامر الكونسول بالكامل
     printSecurityWarning();
     const noop = () => {};
     console.log = noop;
@@ -169,14 +252,12 @@ export const TrialLicensePortal: React.FC = () => {
     console.table = noop;
     console.dir = noop;
 
-    // 2. منع كليك يمين (Right-Click Inspect)
     const handleContextMenu = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
       return false;
     };
 
-    // 3. منع جميع اختصارات الكيبورد الخاصة بفتح الكونسول أو عرض المصدر (F12, Ctrl+Shift+I/J/C/K, Ctrl+U)
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = (e.key || '').toUpperCase();
       const code = e.keyCode || e.which;
@@ -211,7 +292,6 @@ export const TrialLicensePortal: React.FC = () => {
       }
     };
 
-    // 4. الرصد النشط لفتح الكونسول من قائمة المتصفح العلوية (More Tools -> Developer Tools)
     const detectOpenDevTools = () => {
       let detectedNow = false;
 
@@ -284,6 +364,20 @@ export const TrialLicensePortal: React.FC = () => {
   const [unlockError, setUnlockError] = useState('');
   const [unlockLoading, setUnlockLoading] = useState(false);
 
+  // حالات الرسالة المنبثقة الفورية من المطور
+  const [dismissedBroadcastId, setDismissedBroadcastId] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem('sharaya_dismissed_broadcast_id') || '';
+    } catch {
+      return '';
+    }
+  });
+  const [broadcastTitleInput, setBroadcastTitleInput] = useState('تنبيه من مسؤول تطوير المنظومة');
+  const [broadcastBodyInput, setBroadcastBodyInput] = useState('');
+  const [broadcastTargetInput, setBroadcastTargetInput] = useState<'staff_only' | 'everyone'>(
+    'staff_only'
+  );
+
   // حالات لوحة تحكم المطور السرية
   const [draftConfig, setDraftConfig] = useState<SystemTrialLicenseConfig>(trialLicenseConfig);
   const [customDaysInput, setCustomDaysInput] = useState<string>(
@@ -294,6 +388,7 @@ export const TrialLicensePortal: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [confirmPurgeOpen, setConfirmPurgeOpen] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
+  const [isDemoLoading, setIsDemoLoading] = useState(false);
 
   // مزامنة المسودة عند فتح البوابة أو تغير الإعدادات السحابية
   useEffect(() => {
@@ -331,6 +426,19 @@ export const TrialLicensePortal: React.FC = () => {
 
   const shouldShowLockScreen =
     isSystemLocked && (trialLicenseConfig.lockPublicPagesOnExpiry || isStaffView);
+
+  // هل يجب إظهار الرسالة المنبثقة الفورية من المطور؟
+  const activeBroadcast = trialLicenseConfig.activeBroadcastMessage;
+  const shouldShowBroadcastModal =
+    Boolean(activeBroadcast && activeBroadcast.id && activeBroadcast.id !== dismissedBroadcastId) &&
+    (activeBroadcast?.target === 'everyone' || Boolean(currentUser) || isStaffView);
+
+  const handleDismissBroadcast = (id: string) => {
+    setDismissedBroadcastId(id);
+    try {
+      sessionStorage.setItem('sharaya_dismissed_broadcast_id', id);
+    } catch {}
+  };
 
   // حساب الأيام والساعات والدقائق المتبقية
   const getRemainingParts = (targetIso: string) => {
@@ -432,24 +540,57 @@ export const TrialLicensePortal: React.FC = () => {
     });
   };
 
-  // حظر فوري لـ IP وبصمة جهاز من سجل الرادار
-  const handleBanAttemptEntity = async (attempt: SecurityIntrusionAttempt) => {
+  // إرسال رسالة منبثقة فورية لجميع الشاشات المفتوحة
+  const handleSendLiveBroadcast = async () => {
+    if (!broadcastBodyInput.trim()) return;
+    const newMsg: DeveloperBroadcastMessage = {
+      id: `bcast-${Date.now()}`,
+      title: broadcastTitleInput.trim() || 'تنبيه من مسؤول تطوير المنظومة',
+      message: broadcastBodyInput.trim(),
+      target: broadcastTargetInput,
+      sentAt: new Date().toISOString(),
+    };
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      activeBroadcastMessage: newMsg,
+    };
+    setBroadcastBodyInput('');
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  const handleClearLiveBroadcast = async () => {
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      activeBroadcastMessage: null,
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // حظر فوري لـ IP وبصمة جهاز من سجل الرادار أو المتصلين لايف
+  const handleBanAttemptEntity = async (attempt: {
+    ip?: string;
+    deviceFingerprint: string;
+    deviceDetails: string;
+    typeLabel?: string;
+  }) => {
     const currentBlocked = Array.isArray(draftConfig.blockedEntities)
       ? draftConfig.blockedEntities
       : [];
     const alreadyBanned = currentBlocked.some(
       (b) =>
         (b.deviceFingerprint && b.deviceFingerprint === attempt.deviceFingerprint) ||
-        (b.ip && attempt.ip !== 'غير معروف' && b.ip === attempt.ip)
+        (b.ip && attempt.ip && attempt.ip !== 'غير معروف' && b.ip === attempt.ip)
     );
     if (alreadyBanned) return;
 
     const newBan: BlockedSecurityEntity = {
       id: `ban-${Date.now()}`,
-      ip: attempt.ip !== 'غير معروف' ? attempt.ip : undefined,
+      ip: attempt.ip && attempt.ip !== 'غير معروف' ? attempt.ip : undefined,
       deviceFingerprint: attempt.deviceFingerprint,
       deviceDetails: attempt.deviceDetails,
-      reason: `حظر بأمر المطور بسبب: ${attempt.typeLabel}`,
+      reason: `حظر بأمر المطور${attempt.typeLabel ? ` (${attempt.typeLabel})` : ''}`,
       blockedAt: new Date().toISOString(),
       autoBlocked: false,
     };
@@ -534,6 +675,70 @@ export const TrialLicensePortal: React.FC = () => {
 
   return (
     <>
+      {/* علامة مائية خفيفة في الخلفية أثناء الفترة التجريبية (تختفي تلقائياً عند تفعيل النسخة الدائمة) */}
+      {isTrialActive && trialLicenseConfig.showTrialWatermark && (
+        <div
+          aria-hidden="true"
+          className="fixed inset-0 z-[35] pointer-events-none select-none overflow-hidden flex flex-wrap items-center justify-around opacity-[0.045] dark:opacity-[0.06] no-print"
+        >
+          {Array.from({ length: 12 }).map((_, idx) => (
+            <div
+              key={idx}
+              className="-rotate-12 text-lg sm:text-2xl font-black text-slate-900 dark:text-amber-300 whitespace-nowrap p-8"
+            >
+              نسخة معاينة تجريبية • عيادات الجمعية الشرعية بأوسيم • تطوير م. عمرو
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* نافذة الرسالة المنبثقة الفورية المرسلة من المطور لجميع الشاشات */}
+      <AnimatePresence>
+        {shouldShowBroadcastModal && activeBroadcast && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9996] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 no-print"
+          >
+            <motion.div
+              initial={{ scale: 0.92, y: 16, opacity: 0 }}
+              animate={{ scale: 1, y: 0, opacity: 1 }}
+              exit={{ scale: 0.92, y: 16, opacity: 0 }}
+              className="max-w-lg w-full bg-white dark:bg-slate-900 border-2 border-[#062142] dark:border-amber-400/50 rounded-3xl overflow-hidden shadow-2xl"
+            >
+              <div className="bg-gradient-to-r from-[#062142] via-[#0b315e] to-[#062142] text-white px-6 py-4 flex items-center gap-3 border-b border-amber-400/30">
+                <div className="w-10 h-10 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shrink-0">
+                  <Megaphone className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-white">{activeBroadcast.title}</h3>
+                  <p className="text-[11px] text-amber-200">
+                    إشعار فوري مباشر • {new Date(activeBroadcast.sentAt).toLocaleTimeString('ar-EG')}
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-6 space-y-5">
+                <p className="text-sm sm:text-base font-bold text-slate-800 dark:text-slate-100 leading-relaxed whitespace-pre-line bg-slate-50 dark:bg-slate-800/70 p-4 rounded-2xl border border-slate-200 dark:border-slate-700">
+                  {activeBroadcast.message}
+                </p>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => handleDismissBroadcast(activeBroadcast.id)}
+                    className="px-6 py-2.5 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs sm:text-sm font-extrabold shadow-md transition-all"
+                  >
+                    تم الاطلاع — متابعة العمل
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 0-أ. شاشة الحظر الأمني الكامل للـ IP وبصمة عتاد الجهاز (حتى مع تشغيل VPN) */}
       <AnimatePresence>
         {matchedBanEntity && !isDeveloperPortalOpen && (
@@ -583,6 +788,53 @@ export const TrialLicensePortal: React.FC = () => {
                     setUnlockModalOpen(true);
                   }}
                   className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-bold border border-white/10 transition-all"
+                >
+                  بوابة المطور 🔑
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 0-أ-2. شاشة حظر برامج الـ VPN أو الاتصال من خارج مصر */}
+      <AnimatePresence>
+        {isVpnOrOutsideEgyptBlocked && !matchedBanEntity && !isDeveloperPortalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9997] bg-gradient-to-br from-[#04152b] via-[#170b29] to-slate-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 text-center no-print select-none"
+          >
+            <div className="max-w-lg w-full bg-white/5 backdrop-blur-xl border-2 border-rose-400/50 rounded-3xl p-6 sm:p-9 shadow-2xl space-y-5">
+              <div className="w-20 h-20 rounded-3xl bg-rose-500/20 border-2 border-rose-400/60 text-rose-300 flex items-center justify-center mx-auto shadow-lg">
+                <Globe className="w-10 h-10" />
+              </div>
+
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-400/40 text-rose-300 text-xs font-extrabold">
+                  حماية النطاق الجغرافي المصري 🇪🇬
+                </span>
+                <h2 className="text-xl sm:text-2xl font-black text-white">
+                  ⛔ يُمنع استخدام برامج الـ VPN أو الاتصال من خارج مصر
+                </h2>
+              </div>
+
+              <p className="text-sm text-slate-200 leading-relaxed font-medium bg-white/5 border border-white/10 rounded-2xl p-4">
+                هذه المنظومة الطبية مخصصة للعمل داخل جمهورية مصر العربية فقط. يرجى إيقاف برنامج الـ
+                VPN أو البروكسي فوراً وإعادة تحميل الصفحة للمتابعة.
+              </p>
+
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUnlockUser('');
+                    setUnlockPass('');
+                    setUnlockError('');
+                    setUnlockModalOpen(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-slate-300 text-xs font-bold border border-white/15"
                 >
                   بوابة المطور 🔑
                 </button>
@@ -917,7 +1169,7 @@ export const TrialLicensePortal: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* 4. البوابة السرية الكاملة للمطور (م. عمرو) للتحكم في الفترة التجريبية والرادار الأمني عن بُعد */}
+      {/* 4. البوابة السرية الكاملة للمطور (م. عمرو) */}
       <AnimatePresence>
         {isDeveloperPortalOpen && (
           <motion.div
@@ -941,15 +1193,15 @@ export const TrialLicensePortal: React.FC = () => {
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="text-base sm:text-lg font-black text-white">
-                        بوابة المطور السرية — التحكم في الترخيص ورادار الحماية السيبرانية
+                        بوابة المطور السرية — التحكم المركزي الشامل ورادار الحماية السيبرانية
                       </h2>
                       <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40">
                         Supabase Realtime Sync
                       </span>
                     </div>
                     <p className="text-xs text-slate-300 mt-0.5">
-                      مرحباً م. عمرو (`Amrr`) • تحكم كامل عن بُعد في أيام التجربة، منع الكونسول،
-                      رادار كشف المخترقين، وحظر الـ IP وبصمة الجهاز
+                      مرحباً م. عمرو (`Amrr`) • تحكم كامل عن بُعد في التجربة، المتصلين لايف، البث
+                      الفوري، البيانات المعزولة، وحظر المخترقين
                     </p>
                   </div>
                 </div>
@@ -1249,10 +1501,132 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 3: دروع الحماية السيبرانية وخيارات العرض */}
+                {/* القسم 3: حقن وسحب بيانات العرض التجريبية المعزولة بضغطة زر */}
+                <div className="rounded-2xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 p-4 sm:p-5 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                        <Database className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                          3. بيانات العرض التجريبية المعزولة (بدون لمس أي بيانات أصلية أو مدخلة)
+                        </h3>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                          بضغطة زر يمكنك إضافة حركات تجريبية لمعاينة التقارير، وبضغطة زر تسحبها
+                          وحدها وتترك كل بياناتهم كما هي 100%
+                        </p>
+                      </div>
+                    </div>
+
+                    <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
+                      السجلات التجريبية المعزولة حالياً: {isolatedDemoRecordsCount} سجل
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      disabled={isDemoLoading}
+                      onClick={async () => {
+                        setIsDemoLoading(true);
+                        await injectIsolatedDemoData();
+                        setIsDemoLoading(false);
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-extrabold shadow-sm transition-all"
+                    >
+                      <Layers className="w-4 h-4" />
+                      <span>➕ حقن بيانات عرض تجريبية واقعية الآن</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      disabled={isDemoLoading || isolatedDemoRecordsCount === 0}
+                      onClick={async () => {
+                        setIsDemoLoading(true);
+                        await removeIsolatedDemoDataOnly();
+                        setIsDemoLoading(false);
+                      }}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-amber-50 text-amber-800 dark:text-amber-300 border-2 border-amber-400/60 text-xs font-extrabold transition-all disabled:opacity-50"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>🧹 سحب وإزالة البيانات التجريبية فقط (مع حفظ بياناتهم 100%)</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* القسم 4: إرسال رسالة منبثقة فورية لجميع الشاشات المفتوحة الآن */}
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-3 bg-white dark:bg-slate-900">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Megaphone className="w-4 h-4 text-amber-500" />
+                      <span>4. إرسال رسالة منبثقة فورية على شاشة الإدارة والموظفين لايف</span>
+                    </h3>
+                    {draftConfig.activeBroadcastMessage && (
+                      <button
+                        type="button"
+                        onClick={handleClearLiveBroadcast}
+                        className="px-3 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 text-xs font-bold border border-rose-200 dark:border-rose-800"
+                      >
+                        إلغاء وإخفاء الرسالة المعروضة حالياً
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input
+                      type="text"
+                      value={broadcastTitleInput}
+                      onChange={(e) => setBroadcastTitleInput(e.target.value)}
+                      placeholder="عنوان الرسالة..."
+                      className="px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={broadcastBodyInput}
+                      onChange={(e) => setBroadcastBodyInput(e.target.value)}
+                      placeholder="اكتب نص الرسالة الفورية التي ستظهر في منتصف الشاشة..."
+                      className="sm:col-span-2 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 text-xs font-bold text-slate-700 dark:text-slate-300">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bcastTarget"
+                          checked={broadcastTargetInput === 'staff_only'}
+                          onChange={() => setBroadcastTargetInput('staff_only')}
+                        />
+                        <span>للموظفين والإدارة فقط</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bcastTarget"
+                          checked={broadcastTargetInput === 'everyone'}
+                          onChange={() => setBroadcastTargetInput('everyone')}
+                        />
+                        <span>لجميع الشاشات المفتوحة (بما فيها الرئيسية)</span>
+                      </label>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleSendLiveBroadcast}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs font-extrabold shadow-xs"
+                    >
+                      <Send className="w-3.5 h-3.5 text-amber-300" />
+                      <span>إرسال الرسالة للشاشات الآن 🚀</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* القسم 5: دروع الحماية السيبرانية وخيارات العرض */}
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
                   <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                    3. دروع الحماية السيبرانية وخيارات العرض
+                    5. دروع الحماية السيبرانية وخيارات العرض
                   </h3>
 
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -1319,6 +1693,72 @@ export const TrialLicensePortal: React.FC = () => {
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
                           يكشف فوراً أي محاولة لإرجاع تاريخ الكمبيوتر أو الموبايل للوراء لخداع
                           التجربة.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draftConfig.blockNonEgyptVpn)}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            blockNonEgyptVpn: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-[#062142]"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          🇪🇬 منع الـ VPN والاتصال من خارج مصر
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يقفل النظام أمام أي اتصال قادم عبر VPN أجنبي خارج جمهورية مصر العربية.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draftConfig.antiCopyAndPrint)}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            antiCopyAndPrint: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-[#062142]"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          🚫 منع تحديد ونسخ النصوص والصور (Anti-Copy)
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يمنع نسخ الجداول والنصوص أو سحب الصور من شاشات النظام.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draftConfig.showTrialWatermark)}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            showTrialWatermark: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-[#062142]"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          💧 علامة مائية خفيفة في الخلفية أثناء التجربة
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          تظهر في الخلفية وقت التجربة وتختفي أوتوماتيك عند تفعيل النسخة الدائمة.
                         </p>
                       </div>
                     </label>
@@ -1406,7 +1846,93 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 4: رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز */}
+                {/* القسم 6: الأجهزة المتصلة بالنظام الآن لايف (Live Online Sessions) */}
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-3 bg-white dark:bg-slate-900">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-xl bg-emerald-500/15 text-emerald-600 flex items-center justify-center">
+                        <Users className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                          6. الأجهزة المتصلة بالنظام الآن لايف ({liveConnectedDevices.length})
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يعرض كل من يفتح الموقع في هذه اللحظة مع إمكانية طرده من الجلسة أو حظر
+                          جهازه فوراً
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2 max-h-60 overflow-y-auto">
+                    {liveConnectedDevices.map((dev) => {
+                      const isMe = dev.deviceFingerprint === myDeviceHw.fingerprintId;
+                      return (
+                        <div
+                          key={dev.deviceFingerprint}
+                          className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                        >
+                          <div className="space-y-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                              <span className="text-xs font-extrabold text-slate-900 dark:text-white">
+                                {dev.activeUsername}
+                              </span>
+                              <span className="px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300 text-[11px] font-bold">
+                                الشاشة الحالية: {VIEW_ARABIC_NAMES[dev.currentView] || dev.currentView}
+                              </span>
+                              {isMe && (
+                                <span className="px-2 py-0.5 rounded-md bg-emerald-600 text-white text-[10px] font-extrabold">
+                                  جهازك الحالي كمطور
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400 font-mono">
+                              <span>IP: {dev.ip}</span>
+                              {dev.ispLocation && <span className="font-sans">({dev.ispLocation})</span>}
+                              <span>• {dev.deviceFingerprint}</span>
+                            </div>
+                            <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                              {dev.deviceDetails}
+                            </div>
+                          </div>
+
+                          {!isMe && (
+                            <div className="flex items-center gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => forceLogoutDevice(dev.deviceFingerprint)}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-extrabold shadow-2xs"
+                              >
+                                <LogOut className="w-3.5 h-3.5" />
+                                <span>طرد من الجلسة</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleBanAttemptEntity({
+                                    ip: dev.ip,
+                                    deviceFingerprint: dev.deviceFingerprint,
+                                    deviceDetails: dev.deviceDetails,
+                                    typeLabel: 'حظر مباشر من شاشة المتصلين لايف',
+                                  })
+                                }
+                                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold shadow-2xs"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>حظر الجهاز</span>
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* القسم 7: رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز */}
                 <div className="rounded-2xl border-2 border-[#062142]/30 dark:border-amber-400/30 bg-slate-50/70 dark:bg-slate-800/40 p-4 sm:p-5 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
@@ -1415,7 +1941,7 @@ export const TrialLicensePortal: React.FC = () => {
                       </span>
                       <div>
                         <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                          4. رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز (حتى مع VPN)
+                          7. رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز (حتى مع VPN)
                         </h3>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
                           يسجل عنوان الـ IP، شركة الإنترنت، وبصمة كارت الشاشة والمعالج لأي شخص يحاول
@@ -1607,19 +2133,18 @@ export const TrialLicensePortal: React.FC = () => {
                   )}
                 </div>
 
-                {/* القسم 5: تصفير داتا التجربة لبدء التشغيل الرسمي النظيف */}
+                {/* القسم 8: تصفير شامل لجميع الحجوزات عند بدء التشغيل الرسمي */}
                 <div className="rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h4 className="text-xs sm:text-sm font-extrabold text-rose-900 dark:text-rose-300 flex items-center gap-1.5">
                       <Trash2 className="w-4 h-4" />
                       <span>
-                        5. تصفير الحجوزات والعمليات التجريبية لبدء التشغيل الرسمي (بضغطة واحدة)
+                        8. مسح شامل لجميع الحجوزات والعمليات (لتسليم النظام فارغاً بالكامل)
                       </span>
                     </h4>
                     <p className="text-[11px] text-rose-700 dark:text-rose-400 leading-relaxed">
-                      يمسح جميع الحجوزات التجريبية، تسليمات الشفتات، المصروفات التجريبية، وبصمات
-                      الاستشارة — مع الحفاظ التام على جميع العيادات، الأطباء، الجداول، وحسابات
-                      الموظفين.
+                      يمسح كافة الحجوزات والتسليمات والمصروفات بالكامل لتسليم النظام في أول يوم عمل
+                      رسمي — مع الحفاظ على العيادات والأطباء والجداول.
                     </p>
                   </div>
 
@@ -1629,7 +2154,7 @@ export const TrialLicensePortal: React.FC = () => {
                       onClick={() => setConfirmPurgeOpen(true)}
                       className="px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-rose-600 hover:text-white text-rose-700 dark:text-rose-300 border border-rose-300 dark:border-rose-800 text-xs font-extrabold transition-all shrink-0"
                     >
-                      تصفير بيانات التجربة 🧹
+                      تصفير شامل للعمليات 🧹
                     </button>
                   ) : (
                     <div className="flex items-center gap-2 shrink-0">

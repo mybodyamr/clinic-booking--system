@@ -330,7 +330,8 @@ export type SecurityAttemptType =
   | 'shortcut_inspect'
   | 'clock_rollback'
   | 'storage_tamper'
-  | 'brute_force_login';
+  | 'brute_force_login'
+  | 'vpn_geo_block';
 
 export interface SecurityIntrusionAttempt {
   id: string;
@@ -356,6 +357,26 @@ export interface BlockedSecurityEntity {
   autoBlocked?: boolean;
 }
 
+export interface DeveloperBroadcastMessage {
+  id: string;
+  title: string;
+  message: string;
+  target: 'staff_only' | 'everyone';
+  sentAt: string;
+}
+
+export interface LiveConnectedDevice {
+  deviceFingerprint: string;
+  deviceDetails: string;
+  ip: string;
+  ispLocation?: string;
+  countryCode?: string;
+  activeUsername: string;
+  activeRole: string;
+  currentView: string;
+  lastSeenAt: string;
+}
+
 export interface SystemTrialLicenseConfig {
   mode: SystemLicenseMode;
   trialDays: number;
@@ -367,6 +388,12 @@ export interface SystemTrialLicenseConfig {
   autoBanAfterStrikes?: boolean;
   maxStrikesBeforeBan?: number;
   antiClockTamper?: boolean;
+  blockNonEgyptVpn?: boolean;
+  antiCopyAndPrint?: boolean;
+  showTrialWatermark?: boolean;
+  demoPreviewActive?: boolean;
+  isolatedDemoBookings?: Booking[];
+  activeBroadcastMessage?: DeveloperBroadcastMessage | null;
   lastKnownServerTimeMs?: number;
   blockedEntities?: BlockedSecurityEntity[];
   intrusionLogs?: SecurityIntrusionAttempt[];

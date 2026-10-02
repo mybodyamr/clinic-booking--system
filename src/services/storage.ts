@@ -57,7 +57,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v18_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v19_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -2141,6 +2141,10 @@ export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   autoBanAfterStrikes: true,
   maxStrikesBeforeBan: 3,
   antiClockTamper: true,
+  blockNonEgyptVpn: false,
+  antiCopyAndPrint: false,
+  showTrialWatermark: false,
+  activeBroadcastMessage: null,
   blockedEntities: [],
   intrusionLogs: [],
   lockMessage:
@@ -2228,7 +2232,7 @@ export function saveTrialLicenseConfig(config: SystemTrialLicenseConfig): void {
 // ==================== بصمة الهاردوير (Hardware Fingerprint) وعنوان الـ IP ومكافحة تأخير الساعة ====================
 
 let cachedHardwareFingerprint: { fingerprintId: string; deviceDetails: string } | null = null;
-let cachedVisitorIpInfo: { ip: string; ispLocation: string } | null = null;
+let cachedVisitorIpInfo: { ip: string; ispLocation: string; countryCode: string } | null = null;
 
 /**
  * استخراج بصمة عتاد الجهاز الفريدة (GPU + CPU + RAM + Screen + OS + Canvas)
@@ -2331,12 +2335,13 @@ export function getHardwareDeviceFingerprint(): {
 export async function fetchVisitorNetworkIdentity(): Promise<{
   ip: string;
   ispLocation: string;
+  countryCode: string;
 }> {
   if (cachedVisitorIpInfo && cachedVisitorIpInfo.ip !== 'غير معروف') {
     return cachedVisitorIpInfo;
   }
 
-  // المحاولة 1: ipwho.is (يدعم HTTPS و CORS ويعطي الـ IP والمدينة وشركة الإنترنت)
+  // المحاولة 1: ipwho.is (يدعم HTTPS و CORS ويعطي الـ IP والدولة والمدينة وشركة الإنترنت)
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3500);
@@ -2350,13 +2355,34 @@ export async function fetchVisitorNetworkIdentity(): Promise<{
         cachedVisitorIpInfo = {
           ip: String(data.ip),
           ispLocation: loc || 'اتصال مباشر',
+          countryCode: String(data.country_code || 'UNKNOWN').toUpperCase(),
         };
         return cachedVisitorIpInfo;
       }
     }
   } catch {}
 
-  // المحاولة 2: api.ipify.org
+  // المحاولة 2: ipapi.co
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch('https://ipapi.co/json/', { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ip) {
+        const loc = [data.country_name, data.city, data.org].filter(Boolean).join(' • ');
+        cachedVisitorIpInfo = {
+          ip: String(data.ip),
+          ispLocation: loc || 'شبكة إنترنت عامة',
+          countryCode: String(data.country_code || 'UNKNOWN').toUpperCase(),
+        };
+        return cachedVisitorIpInfo;
+      }
+    }
+  } catch {}
+
+  // المحاولة 3: api.ipify.org
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
@@ -2368,13 +2394,14 @@ export async function fetchVisitorNetworkIdentity(): Promise<{
         cachedVisitorIpInfo = {
           ip: String(data.ip),
           ispLocation: 'شبكة إنترنت عامة',
+          countryCode: 'UNKNOWN',
         };
         return cachedVisitorIpInfo;
       }
     }
   } catch {}
 
-  return { ip: 'غير معروف', ispLocation: 'غير متاح' };
+  return { ip: 'غير معروف', ispLocation: 'غير متاح', countryCode: 'UNKNOWN' };
 }
 
 const CLOCK_WATERMARK_KEY = 'sharaya_clock_watermark_v1';
