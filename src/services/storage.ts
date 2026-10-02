@@ -52,7 +52,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v11_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v13_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -913,6 +913,7 @@ export function buildFormattedRtlWorksheet(
         reportTitle: string;
         reportSubtitle: string;
         rows: Record<string, any>[];
+        columns?: string[];
         totalsRow?: Record<string, any>;
         emptyMessage?: string;
         enableAutoFilter?: boolean;
@@ -921,6 +922,7 @@ export function buildFormattedRtlWorksheet(
   maybeOptions?: {
     reportTitle?: string;
     reportSubtitle?: string;
+    columns?: string[];
     totalsRow?: Record<string, any>;
     emptyMessage?: string;
     enableAutoFilter?: boolean;
@@ -929,8 +931,9 @@ export function buildFormattedRtlWorksheet(
 ): XLSX.WorkSheet {
   const isArrayArg = Array.isArray(rowsOrOptions);
   const rows = isArrayArg ? rowsOrOptions : rowsOrOptions.rows;
+  const explicitColumns = isArrayArg ? maybeOptions?.columns : rowsOrOptions.columns;
   const reportTitle = isArrayArg
-    ? maybeOptions?.reportTitle || 'عيادات الشرايح التخصصية'
+    ? maybeOptions?.reportTitle || 'عيادات الجمعية الشرعية'
     : rowsOrOptions.reportTitle;
   const reportSubtitle = isArrayArg
     ? maybeOptions?.reportSubtitle || ''
@@ -943,12 +946,14 @@ export function buildFormattedRtlWorksheet(
   const headerBgColor =
     (isArrayArg ? maybeOptions?.headerBgColor : rowsOrOptions.headerBgColor) || '0F766E';
 
-  const effectiveRows =
-    rows.length > 0
-      ? rows
-      : [{ 'البيان / الملاحظة': emptyMessage || 'لا توجد سجلات مطابقة للفترة أو الفلاتر المحددة' }];
+  const hasDataRows = rows.length > 0;
+  const headers: string[] =
+    hasDataRows
+      ? Object.keys(rows[0])
+      : explicitColumns && explicitColumns.length > 0
+      ? explicitColumns
+      : ['م', 'البيان / التفاصيل', 'الحالة / القيمة'];
 
-  const headers = Object.keys(effectiveRows[0]);
   const numCols = Math.max(1, headers.length);
 
   // بناء المصفوفة الثنائية (Array of Arrays) لضمان ترتيب الترويسة والجدول بدقة
@@ -967,87 +972,141 @@ export function buildFormattedRtlWorksheet(
   // الصف 3 (r=2): صف فارغ للفصل البصري المريح
   aoa.push(new Array(numCols).fill(''));
 
-  // الصف 4 (r=3): رؤوس الأعمدة
+  // الصف 4 (r=3): رؤوس الأعمدة الرسمية كاملة دائماً
   aoa.push(headers.map((h) => sanitizeSpreadsheetCell(h)));
 
-  // الصفوف 5..N (r=4..): صفوف البيانات الفعلية
-  for (const r of effectiveRows) {
-    const isAllBlank = headers.every((h) => r[h] === '' || r[h] === undefined || r[h] === null);
-    if (isAllBlank) {
-      aoa.push(new Array(numCols).fill(''));
-    } else {
-      aoa.push(headers.map((h) => sanitizeSpreadsheetCell(r[h] ?? '—')));
+  // الصفوف 5..N (r=4..): صفوف البيانات الفعلية أو صف تنبيه منسق مدمج عند عدم وجود سجلات
+  if (hasDataRows) {
+    for (const r of rows) {
+      const isAllBlank = headers.every((h) => r[h] === '' || r[h] === undefined || r[h] === null);
+      if (isAllBlank) {
+        aoa.push(new Array(numCols).fill(''));
+      } else {
+        aoa.push(headers.map((h) => sanitizeSpreadsheetCell(r[h] ?? '—')));
+      }
     }
+  } else {
+    const emptyRow: (string | number)[] = new Array(numCols).fill('');
+    emptyRow[0] = sanitizeSpreadsheetCell(
+      emptyMessage || 'لا توجد سجلات مسجلة في هذه الفترة الزمنية حتى الآن (0)'
+    );
+    aoa.push(emptyRow);
   }
 
-  // صف الإجمالي العام في نهاية الجدول (إن وجد وكان هناك بيانات)
-  if (totalsRow && rows.length > 0) {
-    aoa.push(headers.map((h) => sanitizeSpreadsheetCell(totalsRow[h] ?? '')));
+  // صف الإجمالي العام في نهاية الجدول (إن وجد)
+  if (totalsRow) {
+    aoa.push(headers.map((h) => sanitizeSpreadsheetCell(totalsRow[h] ?? '—')));
   }
 
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa) as XLSX.WorkSheet;
 
-  // 1. تفعيل اتجاه الورقة من اليمين لليسار (RTL)
+  // 1. تفعيل اتجاه الورقة من اليمين لليسار (RTL) وإعداد الطباعة بالعرض في صفحة واحدة
   ws['!views'] = [{ rightToLeft: true }];
+  (ws as any)['!pageSetup'] = {
+    orientation: 'landscape',
+    fitToWidth: 1,
+    fitToHeight: 0,
+    paperSize: 9,
+  };
 
-  // 2. دمج خلايا العنوان الرئيسي والعنوان الفرعي عبر جميع أعمدة الجدول
+  // 2. دمج خلايا العنوان الرئيسي والعنوان الفرعي (ودمج صف عدم وجود سجلات إن كان الجدول فارغاً)
+  const merges: XLSX.Range[] = [];
   if (numCols > 1) {
-    ws['!merges'] = [
+    merges.push(
       { s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } },
-      { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } },
-    ];
+      { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } }
+    );
+    if (!hasDataRows) {
+      merges.push({ s: { r: 4, c: 0 }, e: { r: 4, c: numCols - 1 } });
+    }
+  }
+  if (merges.length > 0) {
+    ws['!merges'] = merges;
   }
 
-  // 3. حساب عرض كل عمود تلقائياً (Auto-fit) مع هامش إضافي للخط العربي العريض
+  // 3. حساب عرض كل عمود بذكاء ليظهر الجدول كاملاً في شاشة كمبيوتر واحدة بدون سحب يمين وشمال (مع التفاف النص التلقائي)
+  const isWideMultiColSheet = numCols >= 10;
+  const isMediumSheet = numCols >= 8 && numCols < 10;
+
   const colWidths = headers.map((headerText, colIdx) => {
     const cleanHeader = String(headerText || '').trim();
     if (cleanHeader === 'م' || cleanHeader === '#') {
-      return { wch: 10 };
+      return { wch: 6 };
     }
 
-    let maxLen = cleanHeader.length;
-    for (let rIdx = 4; rIdx < aoa.length; rIdx++) {
-      const cellVal = aoa[rIdx]?.[colIdx];
-      if (cellVal !== undefined && cellVal !== null) {
-        const strVal =
-          typeof cellVal === 'number'
-            ? cellVal.toLocaleString('en-US')
-            : String(cellVal).trim();
-        if (strVal.length > maxLen) {
-          maxLen = strVal.length;
+    // السماح بالتفاف عنوان العمود الطويل على سطرين بدلاً من توسيع العمود بشكل مبالغ فيه
+    const effectiveHeaderLen =
+      cleanHeader.length > 15 ? Math.ceil(cleanHeader.length * 0.62) : cleanHeader.length;
+
+    let maxDataLen = effectiveHeaderLen;
+    if (hasDataRows) {
+      for (let rIdx = 4; rIdx < aoa.length; rIdx++) {
+        const rowFirstCell = String(aoa[rIdx]?.[0] ?? '').trim();
+        const isSummaryRow =
+          rowFirstCell === 'الإجمالي' ||
+          rowFirstCell === 'إجمالي' ||
+          rowFirstCell === '—' ||
+          rowFirstCell === '★' ||
+          rowFirstCell === '■';
+
+        const cellVal = aoa[rIdx]?.[colIdx];
+        if (cellVal !== undefined && cellVal !== null) {
+          const strVal =
+            typeof cellVal === 'number'
+              ? cellVal.toLocaleString('en-US')
+              : String(cellVal).trim();
+          // نصوص صفوف الإجمالي الطويلة تلتف على سطرين ولا نسمح لها بمط العمود على حساب الشاشة
+          const effectiveCellLen =
+            isSummaryRow && strVal.length > 18
+              ? Math.ceil(strVal.length * 0.55)
+              : strVal.length > 26
+              ? Math.ceil(strVal.length * 0.62)
+              : strVal.length;
+
+          if (effectiveCellLen > maxDataLen) {
+            maxDataLen = effectiveCellLen;
+          }
         }
       }
     }
 
-    const extraFilterPadding = enableAutoFilter ? 6 : 0;
-    const paddedWidth = Math.min(
-      56,
-      Math.max(18, Math.ceil(maxLen * 1.3) + 7 + extraFilterPadding)
-    );
-    return { wch: paddedWidth };
+    const extraFilterPadding = enableAutoFilter ? 3 : 0;
+    const minW = isWideMultiColSheet ? 10 : isMediumSheet ? 13 : 15;
+    const maxW = isWideMultiColSheet ? 21 : isMediumSheet ? 24 : 32;
+    const computed = Math.ceil(maxDataLen * 1.12) + 3 + extraFilterPadding;
+    return { wch: Math.min(maxW, Math.max(minW, computed)) };
   });
   ws['!cols'] = colWidths;
 
-  // 4. ضبط ارتفاع الصفوف لتكون مريحة وواضحة في القراءة على الموبايل والكمبيوتر
+  // 4. ضبط ارتفاع الصفوف لتكون مريحة وتستوعب التفاف النصوص على سطرين بوضوح تام
   const rowHeights: { hpt: number }[] = [
     { hpt: 34 }, // صف العنوان الرئيسي
     { hpt: 24 }, // صف العنوان الفرعي
-    { hpt: 10 }, // صف الفاصل
-    { hpt: 30 }, // صف رؤوس الأعمدة
+    { hpt: 8 },  // صف الفاصل
+    { hpt: 36 }, // صف رؤوس الأعمدة (يتسع لسطرين بوضوح)
   ];
-  for (let i = 0; i < effectiveRows.length; i++) {
-    const rObj = effectiveRows[i];
-    const firstVal = String(rObj?.[headers[0]] ?? '');
-    const isSpecialSummary =
-      firstVal === 'الإجمالي' ||
-      firstVal === 'إجمالي' ||
-      firstVal === '—' ||
-      firstVal === '★' ||
-      firstVal === '■';
-    rowHeights.push({ hpt: isSpecialSummary ? 27 : 24 });
+  if (hasDataRows) {
+    for (let i = 0; i < rows.length; i++) {
+      const rObj = rows[i];
+      const firstVal = String(rObj?.[headers[0]] ?? '');
+      const isSpecialSummary =
+        firstVal === 'الإجمالي' ||
+        firstVal === 'إجمالي' ||
+        firstVal === '—' ||
+        firstVal === '★' ||
+        firstVal === '■';
+      const hasLongWrappedCell = headers.some(
+        (h) => String(rObj?.[h] ?? '').trim().length > 24
+      );
+      rowHeights.push({
+        hpt: isSpecialSummary ? 32 : hasLongWrappedCell ? 30 : 25,
+      });
+    }
+  } else {
+    rowHeights.push({ hpt: 34 }); // صف التنبيه المدمج عند عدم وجود سجلات
   }
-  if (totalsRow && rows.length > 0) {
-    rowHeights.push({ hpt: 28 }); // صف الإجمالي العام
+  if (totalsRow) {
+    rowHeights.push({ hpt: 30 }); // صف الإجمالي العام
   }
   ws['!rows'] = rowHeights;
 
@@ -1104,9 +1163,17 @@ export function buildFormattedRtlWorksheet(
         // صف رؤوس الأعمدة: خلفية تيل/كحلي رسمية وخط أبيض عريض في المنتصف
         cell.s = {
           fill: { patternType: 'solid', fgColor: { rgb: headerBgColor } },
-          font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+          font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
           alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
           border: strongBorder,
+        };
+      } else if (!hasDataRows && r === 4) {
+        // صف التنبيه المدمج عندما لا توجد سجلات في الفترة
+        cell.s = {
+          fill: { patternType: 'solid', fgColor: { rgb: 'F8FAFC' } },
+          font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '475569' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+          border: thinBorder,
         };
       } else {
         // صفوف البيانات والإجماليات
@@ -1138,28 +1205,28 @@ export function buildFormattedRtlWorksheet(
         if (isSectionHeader) {
           cell.s = {
             fill: { patternType: 'solid', fgColor: { rgb: '1E3A8A' } },
-            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+            font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
             alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
             border: strongBorder,
           };
         } else if (isNetCashRow) {
           cell.s = {
             fill: { patternType: 'solid', fgColor: { rgb: 'D1FAE5' } },
-            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '065F46' } },
+            font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: '065F46' } },
             alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
             border: strongBorder,
           };
         } else if (isExpenseDeductionRow) {
           cell.s = {
             fill: { patternType: 'solid', fgColor: { rgb: 'FFE4E6' } },
-            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '9F1239' } },
+            font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: '9F1239' } },
             alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
             border: strongBorder,
           };
         } else if (isTotalsRow) {
           cell.s = {
             fill: { patternType: 'solid', fgColor: { rgb: 'FEF3C7' } },
-            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '78350F' } },
+            font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: '78350F' } },
             alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
             border: strongBorder,
           };
@@ -1185,11 +1252,11 @@ export function buildFormattedRtlWorksheet(
   }
 
   // 6. الفلتر التلقائي (AutoFilter) معطل افتراضياً لمنع سهم الفلتر (▼) من أكل أول الحروف العربية على الموبايل، ويتفعل فقط عند الطلب
-  if (enableAutoFilter && rows.length > 0 && numCols > 1) {
+  if (enableAutoFilter && numCols > 1) {
     ws['!autofilter'] = {
       ref: XLSXStyle.utils.encode_range({
         s: { r: 3, c: 0 },
-        e: { r: 3 + rows.length, c: numCols - 1 },
+        e: { r: 3 + Math.max(1, rows.length), c: numCols - 1 },
       }),
     };
   }
@@ -1230,6 +1297,7 @@ export function exportSingleStyledSheetToExcel(options: {
   reportTitle: string;
   reportSubtitle: string;
   rows: Record<string, any>[];
+  columns?: string[];
   totalsRow?: Record<string, any>;
   emptyMessage?: string;
   enableAutoFilter?: boolean;
@@ -1240,6 +1308,7 @@ export function exportSingleStyledSheetToExcel(options: {
     reportTitle: options.reportTitle,
     reportSubtitle: options.reportSubtitle,
     rows: options.rows,
+    columns: options.columns,
     totalsRow: options.totalsRow,
     emptyMessage: options.emptyMessage,
     enableAutoFilter: options.enableAutoFilter,

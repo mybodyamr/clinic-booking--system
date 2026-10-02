@@ -401,8 +401,36 @@ export const FinanceManagerView: React.FC = () => {
       }
     }
 
+    // تضمين جميع الأطباء والعيادات المطابقين للفلتر حتى عند عدم وجود حالات مسجلة في اليوم ليظهر الجدول والطباعة كاملين دائماً
+    const doctorsToInclude =
+      selectedClinicId === 'all'
+        ? doctors
+        : doctors.filter(d => d.clinicId === selectedClinicId);
+
+    for (const doc of doctorsToInclude) {
+      if (selectedDoctorId !== 'all' && doc.id !== selectedDoctorId) continue;
+      const key = `${doc.clinicId}__${doc.id}`;
+      if (!map.has(key)) {
+        const matchedClinic = clinics.find(c => c.id === doc.clinicId);
+        map.set(key, {
+          clinicId: doc.clinicId,
+          clinicName: matchedClinic?.name || doc.clinicName || 'عيادة تخصصية',
+          doctorId: doc.id,
+          doctorName: doc.name,
+          totalPatients: 0,
+          cashCount: 0,
+          insuranceCount: 0,
+          consultationCount: 0,
+          exemptCount: 0,
+          cashInSafe: 0,
+          insuranceClaim: 0,
+          grossRevenue: 0
+        });
+      }
+    }
+
     return Array.from(map.values()).sort((a, b) => b.grossRevenue - a.grossRevenue);
-  }, [filteredBookings]);
+  }, [filteredBookings, doctors, clinics, selectedClinicId, selectedDoctorId]);
 
   // ============================================================================
   // الحساب التلقائي الذكي لشرائح ونسب ومستحقات الأطباء (حسب إعدادات مدير المالية)
@@ -467,19 +495,19 @@ export const FinanceManagerView: React.FC = () => {
 
         if (paidExamCases === 0) {
           appliedTierKey = 'none';
-          appliedTierLabel = `لا توجد كشوفات (شريحة الناقص ${belowPercentage}%)`;
-          appliedPercentage = belowPercentage;
+          appliedTierLabel = 'لا توجد حالات (0)';
+          appliedPercentage = 0;
         } else if (paidExamCases >= aboveCasesCount) {
           appliedTierKey = 'above';
-          appliedTierLabel = `شريحة الزيادة (${aboveCasesCount} حالة فأكثر)`;
+          appliedTierLabel = `شريحة الزيادة (≥${aboveCasesCount})`;
           appliedPercentage = abovePercentage;
         } else if (paidExamCases < targetCasesCount || paidExamCases <= belowCasesCount) {
           appliedTierKey = 'below';
-          appliedTierLabel = `شريحة الناقص (${belowCasesCount} حالات فأقل)`;
+          appliedTierLabel = `شريحة الناقص (≤${belowCasesCount})`;
           appliedPercentage = belowPercentage;
         } else {
           appliedTierKey = 'target';
-          appliedTierLabel = `شريحة المطلوب (${targetCasesCount} إلى ${aboveCasesCount - 1} حالة)`;
+          appliedTierLabel = `شريحة المطلوب (${targetCasesCount})`;
           appliedPercentage = targetPercentage;
         }
 
@@ -680,9 +708,104 @@ export const FinanceManagerView: React.FC = () => {
   // دوال تجهيز البيانات المنسقة والملونة للإكسل (المحدد محدد والشامل شامل)
   // ============================================================================
 
-  // 1. بناء صفوف شيت ملخص العيادات والخزينة (مدمج وأنيق بدون تكرار أرقام الحالات)
+  const DETAILED_BOOKINGS_COLUMNS = [
+    'م',
+    'التاريخ',
+    'رقم التذكرة',
+    'اسم المريض بالكامل',
+    'رقم الهاتف',
+    'العيادة التخصصية',
+    'الطبيب المعالج',
+    'طريقة السداد',
+    'شركة التأمين',
+    'فئة ورقم الكارت',
+    'نسبة التحمل بالكارت',
+    'قيمة الكشف (ج.م)',
+    'المحصل بالخزينة (ج.م)',
+    'تحمل التأمين (ج.م)'
+  ];
+
+  const INSURANCE_CLAIMS_COLUMNS = [
+    'م',
+    'اسم شركة التأمين',
+    'فئات الكروت المتعاقدة',
+    'عدد الكشوفات',
+    'قيمة الكشوفات (ج.م)',
+    'تحمل المرضى نقداً (ج.م)',
+    'إجمالي المطالبة (ج.م)',
+    'المسدد من الشركة (ج.م)',
+    'المديونية المتبقية (ج.م)'
+  ];
+
+  const EXPENSES_COLUMNS = [
+    'م',
+    'التاريخ',
+    'بيان المصروف / سبب السحب',
+    'تصنيف المصروف',
+    'المبلغ المنصرف (ج.م)',
+    'المستلم / الجهة',
+    'مسجل العملية',
+    'ملاحظات إضافية'
+  ];
+
+  const HANDOVERS_COLUMNS = [
+    'م',
+    'التاريخ',
+    'القسم',
+    'الموظف المُسلِّم',
+    'الجهة / المُستلِم',
+    'نوع التسليم',
+    'المبلغ المُسلَّم (ج.م)',
+    'الفعلي المستلم (ج.م)',
+    'الفرق المالي (ج.م)',
+    'حالة الاستلام',
+    'اعتماد مدير المالية',
+    'ملاحظات'
+  ];
+
+  // 1. بناء صفوف شيت ملخص العيادات والخزينة (شامل جميع العيادات والأطباء حتى عند عدم وجود حالات، وبدون مط الأعمدة)
   const buildClinicSummarySheetRows = () => {
-    const rows: Record<string, any>[] = clinicDoctorBreakdown.map((r, idx) => {
+    const activeEntriesMap = new Map<string, (typeof clinicDoctorBreakdown)[number]>();
+    for (const r of clinicDoctorBreakdown) {
+      activeEntriesMap.set(`${r.clinicId}__${r.doctorId}`, r);
+    }
+
+    // تضمين كافة الأطباء والعيادات المطابقين للفلتر حتى لو كان عدد حالاتهم (0) ليظهر الجدول كاملاً ومنظماً
+    const doctorsForSheet =
+      selectedClinicId === 'all'
+        ? doctors
+        : doctors.filter(d => d.clinicId === selectedClinicId);
+
+    const filteredDoctorsForSheet = doctorsForSheet.filter(
+      d => selectedDoctorId === 'all' || d.id === selectedDoctorId
+    );
+
+    for (const doc of filteredDoctorsForSheet) {
+      const key = `${doc.clinicId}__${doc.id}`;
+      if (!activeEntriesMap.has(key)) {
+        const matchedClinic = clinics.find(c => c.id === doc.clinicId);
+        activeEntriesMap.set(key, {
+          clinicId: doc.clinicId,
+          clinicName: matchedClinic?.name || doc.clinicName || 'عيادة تخصصية',
+          doctorId: doc.id,
+          doctorName: doc.name,
+          totalPatients: 0,
+          cashCount: 0,
+          insuranceCount: 0,
+          consultationCount: 0,
+          exemptCount: 0,
+          cashInSafe: 0,
+          insuranceClaim: 0,
+          grossRevenue: 0
+        });
+      }
+    }
+
+    const fullList = Array.from(activeEntriesMap.values()).sort(
+      (a, b) => b.grossRevenue - a.grossRevenue
+    );
+
+    const rows: Record<string, any>[] = fullList.map((r, idx) => {
       const breakdownParts: string[] = [];
       if (r.cashCount > 0) breakdownParts.push(`${r.cashCount} نقدي`);
       if (r.insuranceCount > 0) breakdownParts.push(`${r.insuranceCount} تأمين`);
@@ -694,10 +817,10 @@ export const FinanceManagerView: React.FC = () => {
         'العيادة التخصصية': r.clinicName,
         'الطبيب المعالج': r.doctorName,
         'إجمالي الحالات': r.totalPatients,
-        'تفصيل الحالات': breakdownParts.join(' · ') || '—',
-        'المحصل نقداً بالخزينة (ج.م)': r.cashInSafe,
-        'مطالبة شركة التأمين (ج.م)': r.insuranceClaim,
-        'إجمالي إيراد العيادة (ج.م)': r.grossRevenue
+        'تفصيل الحالات': breakdownParts.join(' · ') || 'لا توجد حالات (0)',
+        'المحصل بالخزينة (ج.م)': r.cashInSafe,
+        'مطالبة التأمين (ج.م)': r.insuranceClaim,
+        'إجمالي الإيراد (ج.م)': r.grossRevenue
       };
     });
 
@@ -705,56 +828,56 @@ export const FinanceManagerView: React.FC = () => {
     rows.push({
       'م': 'الإجمالي',
       'العيادة التخصصية': 'إجمالي إيرادات العيادات التخصصية',
-      'الطبيب المعالج': `${clinicDoctorBreakdown.length} عيادة / طبيب`,
+      'الطبيب المعالج': `${fullList.length} عيادة / طبيب`,
       'إجمالي الحالات': financialMetrics.totalCases,
       'تفصيل الحالات': `${financialMetrics.cashBookingsCount} نقدي · ${financialMetrics.insuranceBookingsCount} تأمين · ${financialMetrics.consultationCount} استشارة`,
-      'المحصل نقداً بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
-      'مطالبة شركة التأمين (ج.م)': financialMetrics.insuranceReceivables,
-      'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue
+      'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
+      'مطالبة التأمين (ج.م)': financialMetrics.insuranceReceivables,
+      'إجمالي الإيراد (ج.م)': financialMetrics.totalGrossRevenue
     });
 
     // صف خصم المصروفات النثرية (بدون تكرار عدد الحالات حتى لا يختلط الجدول)
     rows.push({
       'م': '—',
-      'العيادة التخصصية': 'يُخصم: إجمالي المصروفات النثرية والمنصرف من الخزينة (-)',
+      'العيادة التخصصية': 'يُخصم: المصروفات النثرية والمنصرف (-)',
       'الطبيب المعالج': `${filteredExpenses.length} حركة صرف`,
       'إجمالي الحالات': '—',
-      'تفصيل الحالات': 'تُخصم مباشرة من النقدية بالخزينة',
-      'المحصل نقداً بالخزينة (ج.م)': -financialMetrics.totalExpenses,
-      'مطالبة شركة التأمين (ج.م)': '—',
-      'إجمالي إيراد العيادة (ج.م)': -financialMetrics.totalExpenses
+      'تفصيل الحالات': 'تُخصم من النقدية بالخزينة',
+      'المحصل بالخزينة (ج.م)': -financialMetrics.totalExpenses,
+      'مطالبة التأمين (ج.م)': 0,
+      'إجمالي الإيراد (ج.م)': -financialMetrics.totalExpenses
     });
 
     // صف صافي النقدية الفعلي المتبقي بالخزينة (مميز باللون الأخضر والذهبي)
     rows.push({
       'م': '★',
-      'العيادة التخصصية': 'صافي النقدية الفعلي المتبقي بالخزينة (الرصيد الفعلي)',
-      'الطبيب المعالج': 'بعد خصم المصروفات النثرية',
+      'العيادة التخصصية': 'صافي النقدية الفعلي المتبقي بالخزينة',
+      'الطبيب المعالج': 'الرصيد الفعلي بعد المصروفات',
       'إجمالي الحالات': '—',
-      'تفصيل الحالات': `مستحقات الأطباء المحسوبة: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م`,
-      'المحصل نقداً بالخزينة (ج.م)': financialMetrics.netCashAfterExpenses,
-      'مطالبة شركة التأمين (ج.م)': financialMetrics.insuranceReceivables,
-      'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses
+      'تفصيل الحالات': `مستحقات الأطباء: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م`,
+      'المحصل بالخزينة (ج.م)': financialMetrics.netCashAfterExpenses,
+      'مطالبة التأمين (ج.م)': financialMetrics.insuranceReceivables,
+      'إجمالي الإيراد (ج.م)': financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses
     });
 
     return rows;
   };
 
-  // 2. بناء صفوف شيت مستحقات ونسب الأطباء
+  // 2. بناء صفوف شيت مستحقات ونسب الأطباء (مدمج ليظهر بالكامل في شاشة واحدة بدون سحب يمين وشمال)
   const buildDoctorCommissionsSheetRows = () => {
     const rows: Record<string, any>[] = doctorCommissionRows.map((r, idx) => ({
       'م': idx + 1,
       'اسم الطبيب': r.doctorName,
       'العيادة التخصصية': r.clinicName,
-      'سعر كشف الدكتور (ج.م)': r.consultationFee,
-      'شروط الشرائح (ناقص / مطلوب / زيادة)': `ناقص (≤${r.belowCasesCount}): ${r.belowPercentage}% | مطلوب (${r.targetCasesCount}): ${r.targetPercentage}% | زيادة (≥${r.aboveCasesCount}): ${r.abovePercentage}%`,
-      'عدد الكشوفات المسددة': r.paidExamCases,
+      'سعر الكشف (ج.م)': r.consultationFee,
+      'شرائح النسب (ناقص | مطلوب | زيادة)': `≤${r.belowCasesCount}: ${r.belowPercentage}% | (${r.targetCasesCount}): ${r.targetPercentage}% | ≥${r.aboveCasesCount}: ${r.abovePercentage}%`,
+      'كشوفات مسددة': r.paidExamCases,
       'استشارات مجانية': r.consultationCases,
-      'إجمالي قيمة الكشوفات (ج.م)': r.totalExamValueByDoctorFee,
-      'الشريحة المطبقة تلقائياً': r.appliedTierLabel,
-      'النسبة المستحقة (%)': `${r.appliedPercentage}%`,
-      'مستحقات الطبيب الصافية (ج.م)': r.doctorCommissionAmount,
-      'صافي نصيب العيادة / المركز (ج.م)': r.clinicNetShareAmount
+      'قيمة الكشوفات (ج.م)': r.totalExamValueByDoctorFee,
+      'الشريحة المطبقة': r.appliedTierLabel,
+      'النسبة (%)': `${r.appliedPercentage}%`,
+      'مستحق الطبيب (ج.م)': r.doctorCommissionAmount,
+      'نصيب المركز (ج.م)': r.clinicNetShareAmount
     }));
 
     if (rows.length > 0) {
@@ -762,15 +885,15 @@ export const FinanceManagerView: React.FC = () => {
         'م': 'الإجمالي',
         'اسم الطبيب': 'إجمالي مستحقات الأطباء ونصيب المركز',
         'العيادة التخصصية': `${doctorCommissionRows.length} طبيب`,
-        'سعر كشف الدكتور (ج.م)': '—',
-        'شروط الشرائح (ناقص / مطلوب / زيادة)': 'حساب تلقائي حسب شريحة كل طبيب',
-        'عدد الكشوفات المسددة': doctorCommissionTotals.totalPaidCases,
+        'سعر الكشف (ج.م)': '—',
+        'شرائح النسب (ناقص | مطلوب | زيادة)': 'حساب تلقائي حسب شريحة كل طبيب',
+        'كشوفات مسددة': doctorCommissionTotals.totalPaidCases,
         'استشارات مجانية': doctorCommissionTotals.totalConsultationCases,
-        'إجمالي قيمة الكشوفات (ج.م)': doctorCommissionTotals.totalExamValue,
-        'الشريحة المطبقة تلقائياً': '—',
-        'النسبة المستحقة (%)': '—',
-        'مستحقات الطبيب الصافية (ج.م)': doctorCommissionTotals.totalDoctorShare,
-        'صافي نصيب العيادة / المركز (ج.م)': doctorCommissionTotals.totalClinicShare
+        'قيمة الكشوفات (ج.م)': doctorCommissionTotals.totalExamValue,
+        'الشريحة المطبقة': '—',
+        'النسبة (%)': '—',
+        'مستحق الطبيب (ج.م)': doctorCommissionTotals.totalDoctorShare,
+        'نصيب المركز (ج.م)': doctorCommissionTotals.totalClinicShare
       });
     }
 
@@ -818,59 +941,110 @@ export const FinanceManagerView: React.FC = () => {
       'نسبة التحمل بالكارت': b.insuranceDetails?.copayInputRaw
         ? `${b.insuranceDetails.copayInputRaw} (${b.insuranceDetails.copayPercentage}%)`
         : '—',
-      'قيمة الكشف الأصلية (ج.م)': origFee,
+      'قيمة الكشف (ج.م)': origFee,
       'المحصل بالخزينة (ج.م)': cashPaid,
-      'تحمل شركة التأمين (ج.م)': insCovered
+      'تحمل التأمين (ج.م)': insCovered
     };
   };
+
+  const buildDetailedBookingsTotalsRow = () => ({
+    'م': 'الإجمالي',
+    'التاريخ': '—',
+    'رقم التذكرة': `${filteredBookings.length} تذكرة`,
+    'اسم المريض بالكامل': 'إجمالي السجل التفصيلي للكشوفات',
+    'رقم الهاتف': '—',
+    'العيادة التخصصية': '—',
+    'الطبيب المعالج': '—',
+    'طريقة السداد': '—',
+    'شركة التأمين': '—',
+    'فئة ورقم الكارت': '—',
+    'نسبة التحمل بالكارت': '—',
+    'قيمة الكشف (ج.م)': financialMetrics.totalGrossRevenue,
+    'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
+    'تحمل التأمين (ج.م)': financialMetrics.insuranceReceivables
+  });
 
   const buildDetailedBookingsSheetRows = () => {
     const rows: Record<string, any>[] = filteredBookings.map((b, i) => formatBookingRow(b, i));
     if (rows.length > 0) {
-      rows.push({
-        'م': 'الإجمالي',
-        'التاريخ': '—',
-        'رقم التذكرة': `${filteredBookings.length} تذكرة`,
-        'اسم المريض بالكامل': 'إجمالي السجل التفصيلي للكشوفات',
-        'رقم الهاتف': '—',
-        'العيادة التخصصية': '—',
-        'الطبيب المعالج': '—',
-        'طريقة السداد': '—',
-        'شركة التأمين': '—',
-        'فئة ورقم الكارت': '—',
-        'نسبة التحمل بالكارت': '—',
-        'قيمة الكشف الأصلية (ج.م)': financialMetrics.totalGrossRevenue,
-        'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
-        'تحمل شركة التأمين (ج.م)': financialMetrics.insuranceReceivables
-      });
+      rows.push(buildDetailedBookingsTotalsRow());
     }
     return rows;
   };
 
-  // 4. بناء صفوف شيت مطالبات شركات التأمين
+  // 4. بناء صفوف شيت مطالبات شركات التأمين (يظهر كافة الشركات المتعاقدة حتى لو كان عدد الحالات 0)
   const buildInsuranceClaimsSheetRows = () => {
-    const rows: Record<string, any>[] = insuranceClaimsSummary.map((item, idx) => ({
+    const combinedCompaniesMap = new Map<
+      string,
+      {
+        companyName: string;
+        cardsList: string;
+        casesCount: number;
+        totalOriginalFees: number;
+        totalPatientCopay: number;
+        totalCompanyReceivable: number;
+        settledAmount: number;
+        remainingBalance: number;
+      }
+    >();
+
+    for (const item of insuranceClaimsSummary) {
+      combinedCompaniesMap.set(item.companyName.trim(), {
+        companyName: item.companyName,
+        cardsList: item.cardsList,
+        casesCount: item.casesCount,
+        totalOriginalFees: item.totalOriginalFees,
+        totalPatientCopay: item.totalPatientCopay,
+        totalCompanyReceivable: item.totalCompanyReceivable,
+        settledAmount: item.settledAmount,
+        remainingBalance: item.remainingBalance
+      });
+    }
+
+    const settlementsList = financeLedger?.settlements || [];
+    for (const contract of insuranceContracts) {
+      const key = contract.companyName.trim();
+      if (!combinedCompaniesMap.has(key)) {
+        const settledAmount = settlementsList
+          .filter(s => s.companyId === contract.id || s.companyName.trim() === key)
+          .reduce((acc, s) => acc + (Number(s.paidAmount ?? s.amountPaid) || 0), 0);
+        combinedCompaniesMap.set(key, {
+          companyName: contract.companyName,
+          cardsList: contract.cardCategories.join(' · ') || 'جميع الفئات',
+          casesCount: 0,
+          totalOriginalFees: 0,
+          totalPatientCopay: 0,
+          totalCompanyReceivable: 0,
+          settledAmount,
+          remainingBalance: 0
+        });
+      }
+    }
+
+    const allCompanies = Array.from(combinedCompaniesMap.values());
+    const rows: Record<string, any>[] = allCompanies.map((item, idx) => ({
       'م': idx + 1,
       'اسم شركة التأمين': item.companyName,
-      'فئات الكروت المستخدمة': item.cardsList,
+      'فئات الكروت المتعاقدة': item.cardsList,
       'عدد الكشوفات': item.casesCount,
-      'إجمالي قيمة الكشوفات (ج.م)': item.totalOriginalFees,
+      'قيمة الكشوفات (ج.م)': item.totalOriginalFees,
       'تحمل المرضى نقداً (ج.م)': item.totalPatientCopay,
-      'إجمالي المطالبة على الشركة (ج.م)': item.totalCompanyReceivable,
+      'إجمالي المطالبة (ج.م)': item.totalCompanyReceivable,
       'المسدد من الشركة (ج.م)': item.settledAmount,
-      'المديونية المتبقية على الشركة (ج.م)': item.remainingBalance
+      'المديونية المتبقية (ج.م)': item.remainingBalance
     }));
+
     if (rows.length > 0) {
       rows.push({
         'م': 'الإجمالي',
         'اسم شركة التأمين': 'إجمالي مطالبات وتسديدات شركات التأمين',
-        'فئات الكروت المستخدمة': `${insuranceClaimsSummary.length} شركة`,
+        'فئات الكروت المتعاقدة': `${allCompanies.length} شركة تأمين`,
         'عدد الكشوفات': financialMetrics.insuranceBookingsCount,
-        'إجمالي قيمة الكشوفات (ج.م)': insuranceClaimsSummary.reduce((s, x) => s + x.totalOriginalFees, 0),
-        'تحمل المرضى نقداً (ج.م)': insuranceClaimsSummary.reduce((s, x) => s + x.totalPatientCopay, 0),
-        'إجمالي المطالبة على الشركة (ج.م)': financialMetrics.insuranceReceivables,
+        'قيمة الكشوفات (ج.م)': allCompanies.reduce((s, x) => s + x.totalOriginalFees, 0),
+        'تحمل المرضى نقداً (ج.م)': allCompanies.reduce((s, x) => s + x.totalPatientCopay, 0),
+        'إجمالي المطالبة (ج.م)': financialMetrics.insuranceReceivables,
         'المسدد من الشركة (ج.م)': financialMetrics.totalSettledFromInsurance,
-        'المديونية المتبقية على الشركة (ج.م)': Math.max(
+        'المديونية المتبقية (ج.م)': Math.max(
           0,
           financialMetrics.insuranceReceivables - financialMetrics.totalSettledFromInsurance
         )
@@ -880,6 +1054,17 @@ export const FinanceManagerView: React.FC = () => {
   };
 
   // 5. بناء صفوف شيت المصروفات النثرية
+  const buildExpensesTotalsRow = () => ({
+    'م': 'الإجمالي',
+    'التاريخ': '—',
+    'بيان المصروف / سبب السحب': 'إجمالي المصروفات المنصرفة من الخزينة',
+    'تصنيف المصروف': `${filteredExpenses.length} حركة صرف`,
+    'المبلغ المنصرف (ج.م)': financialMetrics.totalExpenses,
+    'المستلم / الجهة': '—',
+    'مسجل العملية': '—',
+    'ملاحظات إضافية': '—'
+  });
+
   const buildExpensesSheetRows = () => {
     const rows: Record<string, any>[] = filteredExpenses.map((exp, idx) => ({
       'م': idx + 1,
@@ -892,38 +1077,51 @@ export const FinanceManagerView: React.FC = () => {
       'ملاحظات إضافية': exp.notes || '—'
     }));
     if (rows.length > 0) {
-      rows.push({
-        'م': 'الإجمالي',
-        'التاريخ': '—',
-        'بيان المصروف / سبب السحب': 'إجمالي المصروفات المنصرفة من الخزينة',
-        'تصنيف المصروف': `${filteredExpenses.length} حركة صرف`,
-        'المبلغ المنصرف (ج.م)': financialMetrics.totalExpenses,
-        'المستلم / الجهة': '—',
-        'مسجل العملية': '—',
-        'ملاحظات إضافية': '—'
-      });
+      rows.push(buildExpensesTotalsRow());
     }
     return rows;
   };
 
   // 6. بناء صفوف شيت تسليم الشفتات
+  const buildHandoversTotalsRow = () => ({
+    'م': 'الإجمالي',
+    'التاريخ': '—',
+    'القسم': 'جميع الأقسام',
+    'الموظف المُسلِّم': `${filteredHandovers.length} عملية تسليم`,
+    'الجهة / المُستلِم': '—',
+    'نوع التسليم': '—',
+    'المبلغ المُسلَّم (ج.م)': filteredHandovers.reduce((s, h) => s + (Number(h.expectedAmount) || 0), 0),
+    'الفعلي المستلم (ج.م)': filteredHandovers.reduce(
+      (s, h) =>
+        s +
+        (Number(
+          h.status === 'delivered_to_management' ? h.expectedAmount : h.actualReceivedAmount
+        ) || 0),
+      0
+    ),
+    'الفرق المالي (ج.م)': 0,
+    'حالة الاستلام': '—',
+    'اعتماد مدير المالية': '—',
+    'ملاحظات': '—'
+  });
+
   const buildHandoversSheetRows = () => {
-    return filteredHandovers.map((h, idx) => ({
+    const rows: Record<string, any>[] = filteredHandovers.map((h, idx) => ({
       'م': idx + 1,
       'التاريخ': h.shiftDate,
       'القسم': h.department === 'cashier' ? 'الخزينة (الكاشير)' : 'الاستقبال',
       'الموظف المُسلِّم': h.fromStaffName,
-      'الجهة / الموظف المُستلِم': h.toStaffName,
+      'الجهة / المُستلِم': h.toStaffName,
       'نوع التسليم':
         h.handoverType === 'cashier_to_management'
           ? 'تسليم المبلغ للإدارة'
           : h.handoverType === 'cashier_to_colleague'
           ? 'تسليم الخزينة للزميل'
           : 'تسليم شفت استقبال',
-      'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? '—',
-      'المبلغ الفعلي المستلم (ج.م)':
+      'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? 0,
+      'الفعلي المستلم (ج.م)':
         h.status === 'delivered_to_management'
-          ? (h.expectedAmount ?? '—')
+          ? (h.expectedAmount ?? 0)
           : (h.actualReceivedAmount ?? 'قيد الاستلام'),
       'الفرق المالي (ج.م)':
         h.actualReceivedAmount !== undefined && h.expectedAmount !== undefined
@@ -942,6 +1140,10 @@ export const FinanceManagerView: React.FC = () => {
         : 'قيد المراجعة',
       'ملاحظات': h.acknowledgmentNotes || h.notes || '—'
     }));
+    if (rows.length > 0) {
+      rows.push(buildHandoversTotalsRow());
+    }
+    return rows;
   };
 
   // ============================================================================
@@ -954,7 +1156,7 @@ export const FinanceManagerView: React.FC = () => {
       exportSingleStyledSheetToExcel({
         sheetName: 'ملخص العيادات والخزينة',
         fileName: `ملخص_العيادات_والخزينة_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات وصافي الخزينة',
+        reportTitle: 'عيادات الجمعية الشرعية — ملخص إيرادات العيادات وصافي الخزينة',
         reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`,
         rows: buildClinicSummarySheetRows(),
         enableAutoFilter: enableExcelAutoFilter,
@@ -976,7 +1178,7 @@ export const FinanceManagerView: React.FC = () => {
       exportSingleStyledSheetToExcel({
         sheetName: 'مستحقات ونسب الأطباء',
         fileName: `مستحقات_ونسب_الأطباء_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب شرائح ونسب ومستحقات الأطباء',
+        reportTitle: 'عيادات الجمعية الشرعية — كشف حساب شرائح ونسب ومستحقات الأطباء',
         reportSubtitle: `${periodSubtitleLabel} · إجمالي مستحقات الأطباء: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م · نصيب المركز: ${doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م`,
         rows: buildDoctorCommissionsSheetRows(),
         enableAutoFilter: enableExcelAutoFilter,
@@ -995,12 +1197,16 @@ export const FinanceManagerView: React.FC = () => {
   // ج) تصدير شيت الكشوفات التفصيلية المفلترة فقط
   const handleExportDetailedBookingsOnlyExcel = () => {
     try {
+      const bookingRows = buildDetailedBookingsSheetRows();
       exportSingleStyledSheetToExcel({
         sheetName: 'سجل الكشوفات التفصيلي',
         fileName: `سجل_الكشوفات_المفلتر_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — السجل التفصيلي للكشوفات المفلترة',
+        reportTitle: 'عيادات الجمعية الشرعية — السجل التفصيلي للكشوفات المفلترة',
         reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${filteredBookings.length}`,
-        rows: buildDetailedBookingsSheetRows(),
+        rows: bookingRows,
+        columns: DETAILED_BOOKINGS_COLUMNS,
+        totalsRow: bookingRows.length === 0 ? buildDetailedBookingsTotalsRow() : undefined,
+        emptyMessage: 'لا توجد كشوفات مسجلة مطابقة للفترة أو الفلاتر المحددة حتى الآن (0 حالة)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '047857'
       });
@@ -1017,12 +1223,16 @@ export const FinanceManagerView: React.FC = () => {
   // د) تصدير شيت المصروفات النثرية فقط
   const handleExportExpensesOnlyExcel = () => {
     try {
+      const expRows = buildExpensesSheetRows();
       exportSingleStyledSheetToExcel({
         sheetName: 'المصروفات النثرية',
         fileName: `سجل_المصروفات_النثرية_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — سجل المصروفات النثرية والمنصرف من الخزينة',
+        reportTitle: 'عيادات الجمعية الشرعية — سجل المصروفات النثرية والمنصرف من الخزينة',
         reportSubtitle: `${periodSubtitleLabel} · إجمالي المنصرف: ${financialMetrics.totalExpenses.toLocaleString()} ج.م`,
-        rows: buildExpensesSheetRows(),
+        rows: expRows,
+        columns: EXPENSES_COLUMNS,
+        totalsRow: expRows.length === 0 ? buildExpensesTotalsRow() : undefined,
+        emptyMessage: 'لا توجد مصروفات نثرية مسجلة في هذه الفترة الزمنية حتى الآن (0 ج.م)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: 'B45309'
       });
@@ -1042,9 +1252,10 @@ export const FinanceManagerView: React.FC = () => {
       exportSingleStyledSheetToExcel({
         sheetName: 'مطالبات شركات التأمين',
         fileName: `مطالبات_شركات_التأمين_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب ومطالبات شركات التأمين المتعاقدة',
+        reportTitle: 'عيادات الجمعية الشرعية — كشف حساب ومطالبات شركات التأمين المتعاقدة',
         reportSubtitle: `${periodSubtitleLabel} · إجمالي المطالبات: ${financialMetrics.insuranceReceivables.toLocaleString()} ج.م`,
         rows: buildInsuranceClaimsSheetRows(),
+        columns: INSURANCE_CLAIMS_COLUMNS,
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '1D4ED8'
       });
@@ -1061,12 +1272,16 @@ export const FinanceManagerView: React.FC = () => {
   // و) تصدير شيت تسليم الشفتات فقط
   const handleExportHandoversOnlyExcel = () => {
     try {
+      const handoverRows = buildHandoversSheetRows();
       exportSingleStyledSheetToExcel({
         sheetName: 'سجل تسليم الشفتات',
         fileName: `سجل_تسليم_الشفتات_${filePeriodSuffix}.xlsx`,
-        reportTitle: 'عيادات الشرايح التخصصية — سجل تسليم واستلام الشفتات واعتماد الإدارة المالية',
+        reportTitle: 'عيادات الجمعية الشرعية — سجل تسليم واستلام الشفتات واعتماد الإدارة المالية',
         reportSubtitle: `إجمالي السجلات المعروضة: ${filteredHandovers.length}`,
-        rows: buildHandoversSheetRows(),
+        rows: handoverRows,
+        columns: HANDOVERS_COLUMNS,
+        totalsRow: handoverRows.length === 0 ? buildHandoversTotalsRow() : undefined,
+        emptyMessage: 'لا توجد سجلات تسليم شفتات مسجلة حتى الآن (0 عملية)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '4338CA'
       });
@@ -1087,7 +1302,7 @@ export const FinanceManagerView: React.FC = () => {
 
       // 1. ورقة ملخص العيادات والخزينة
       const wsSummary = buildFormattedRtlWorksheet(buildClinicSummarySheetRows(), {
-        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات والأطباء وصافي الخزينة',
+        reportTitle: 'عيادات الجمعية الشرعية — ملخص إيرادات العيادات والأطباء وصافي الخزينة',
         reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`,
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '0F766E'
@@ -1096,17 +1311,21 @@ export const FinanceManagerView: React.FC = () => {
 
       // 2. ورقة مستحقات ونسب الأطباء
       const wsCommissions = buildFormattedRtlWorksheet(buildDoctorCommissionsSheetRows(), {
-        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب شرائح ونسب ومستحقات الأطباء',
+        reportTitle: 'عيادات الجمعية الشرعية — كشف حساب شرائح ونسب ومستحقات الأطباء',
         reportSubtitle: `${periodSubtitleLabel} · مستحقات الأطباء: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م · نصيب المركز: ${doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م`,
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '1E3A8A'
       });
       XLSXStyle.utils.book_append_sheet(wb as any, wsCommissions as any, 'مستحقات ونسب الأطباء');
 
-      // 3. ورقة السجل التفصيلي للكشوفات
-      const wsAllDetailed = buildFormattedRtlWorksheet(buildDetailedBookingsSheetRows(), {
+      // 3. ورقة السجل التفصيلي للكشوفات (تحتفظ بكافة الأعمدة الـ 14 حتى لو كانت الحالات 0)
+      const detailedRows = buildDetailedBookingsSheetRows();
+      const wsAllDetailed = buildFormattedRtlWorksheet(detailedRows, {
         reportTitle: 'السجل التفصيلي الكامل للكشوفات وتفاصيل كروت التأمين الطبي',
-        reportSubtitle: periodSubtitleLabel,
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${filteredBookings.length}`,
+        columns: DETAILED_BOOKINGS_COLUMNS,
+        totalsRow: detailedRows.length === 0 ? buildDetailedBookingsTotalsRow() : undefined,
+        emptyMessage: 'لا توجد كشوفات مسجلة في هذه الفترة الزمنية حتى الآن (0 حالة)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '047857'
       });
@@ -1115,25 +1334,34 @@ export const FinanceManagerView: React.FC = () => {
       // 4. ورقة مطالبات شركات التأمين
       const wsInsurance = buildFormattedRtlWorksheet(buildInsuranceClaimsSheetRows(), {
         reportTitle: 'كشف حساب ومطالبات شركات التأمين الطبي المتعاقدة',
-        reportSubtitle: periodSubtitleLabel,
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي المطالبات: ${financialMetrics.insuranceReceivables.toLocaleString()} ج.م`,
+        columns: INSURANCE_CLAIMS_COLUMNS,
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '1D4ED8'
       });
       XLSXStyle.utils.book_append_sheet(wb as any, wsInsurance as any, 'مطالبات شركات التأمين');
 
-      // 5. ورقة المصروفات النثرية
-      const wsExpenses = buildFormattedRtlWorksheet(buildExpensesSheetRows(), {
+      // 5. ورقة المصروفات النثرية (تحتفظ بكافة الأعمدة الـ 8 حتى لو كانت المصروفات 0)
+      const expenseRows = buildExpensesSheetRows();
+      const wsExpenses = buildFormattedRtlWorksheet(expenseRows, {
         reportTitle: 'سجل المصروفات النثرية والمنصرف النقدي من الخزينة',
-        reportSubtitle: periodSubtitleLabel,
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي المنصرف: ${financialMetrics.totalExpenses.toLocaleString()} ج.م`,
+        columns: EXPENSES_COLUMNS,
+        totalsRow: expenseRows.length === 0 ? buildExpensesTotalsRow() : undefined,
+        emptyMessage: 'لا توجد مصروفات نثرية مسجلة في هذه الفترة الزمنية حتى الآن (0 ج.م)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: 'B45309'
       });
       XLSXStyle.utils.book_append_sheet(wb as any, wsExpenses as any, 'المصروفات النثرية');
 
-      // 6. ورقة تسليم الشفتات
-      const wsHandovers = buildFormattedRtlWorksheet(buildHandoversSheetRows(), {
+      // 6. ورقة تسليم الشفتات (تحتفظ بكافة الأعمدة الـ 12 حتى لو كانت السجلات 0)
+      const handoverRows = buildHandoversSheetRows();
+      const wsHandovers = buildFormattedRtlWorksheet(handoverRows, {
         reportTitle: 'سجل تسليم واستلام الشفتات وعهدة الخزينة واعتماد الإدارة المالية',
         reportSubtitle: `إجمالي العمليات المسجلة: ${shiftHandovers.length}`,
+        columns: HANDOVERS_COLUMNS,
+        totalsRow: handoverRows.length === 0 ? buildHandoversTotalsRow() : undefined,
+        emptyMessage: 'لا توجد سجلات تسليم شفتات مسجلة حتى الآن (0 عملية)',
         enableAutoFilter: enableExcelAutoFilter,
         headerBgColor: '4338CA'
       });
@@ -1151,11 +1379,11 @@ export const FinanceManagerView: React.FC = () => {
           0
         );
         const clinicInsTotal = clinicRows.reduce(
-          (acc, r) => acc + (Number(r['تحمل شركة التأمين (ج.م)']) || 0),
+          (acc, r) => acc + (Number(r['تحمل التأمين (ج.م)']) || 0),
           0
         );
         const clinicOrigTotal = clinicRows.reduce(
-          (acc, r) => acc + (Number(r['قيمة الكشف الأصلية (ج.م)']) || 0),
+          (acc, r) => acc + (Number(r['قيمة الكشف (ج.م)']) || 0),
           0
         );
 
@@ -1171,14 +1399,15 @@ export const FinanceManagerView: React.FC = () => {
           'شركة التأمين': '—',
           'فئة ورقم الكارت': '—',
           'نسبة التحمل بالكارت': '—',
-          'قيمة الكشف الأصلية (ج.م)': clinicOrigTotal,
+          'قيمة الكشف (ج.م)': clinicOrigTotal,
           'المحصل بالخزينة (ج.م)': clinicCashTotal,
-          'تحمل شركة التأمين (ج.م)': clinicInsTotal
+          'تحمل التأمين (ج.م)': clinicInsTotal
         });
 
         const wsClinic = buildFormattedRtlWorksheet(clinicRows, {
           reportTitle: `كشف حساب وحجوزات: ${clinic.name}`,
           reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${clinicBookings.length}`,
+          columns: DETAILED_BOOKINGS_COLUMNS,
           enableAutoFilter: enableExcelAutoFilter,
           headerBgColor: '0F766E'
         });
@@ -1190,7 +1419,7 @@ export const FinanceManagerView: React.FC = () => {
         }
       }
 
-      writeStyledWorkbookFile(wb, `الشيت_المالي_الشامل_عيادات_الشرايح_${filePeriodSuffix}.xlsx`);
+      writeStyledWorkbookFile(wb, `الشيت_المالي_الشامل_عيادات_الجمعية_الشرعية_${filePeriodSuffix}.xlsx`);
 
       addToast({
         type: 'success',
@@ -1360,51 +1589,67 @@ export const FinanceManagerView: React.FC = () => {
       {/* ================================================================= */}
       {/* نسخة الطباعة الرسمية للتقرير المالي اليومي المختوم (تظهر عند الطباعة فقط A4) */}
       {/* ================================================================= */}
-      <div className="hidden print:block bg-white text-slate-900 p-6 space-y-5 border border-slate-300 rounded-xl">
-        <div className="flex items-center justify-between border-b-2 border-slate-800 pb-4">
+      <div className="hidden print:block bg-white text-slate-900 p-5 space-y-4 border border-slate-300 rounded-xl">
+        <div className="flex items-start justify-between gap-4 border-b-2 border-slate-800 pb-3.5">
           <div>
-            <h1 className="text-xl font-black">عيادات الشرايح التخصصية — الإدارة المالية</h1>
-            <p className="text-sm font-bold text-slate-600 mt-0.5">
-              تقرير التقفيل المالي وإيرادات العيادات وصافي الخزينة ({periodSubtitleLabel})
+            <h1 className="text-lg font-black text-slate-900">
+              عيادات الجمعية الشرعية — الإدارة المالية والتعاقدات
+            </h1>
+            <p className="text-xs font-bold text-slate-600 mt-1">
+              تقرير التقفيل المالي وإيرادات العيادات ونسب الأطباء وصافي الخزينة ({periodSubtitleLabel})
             </p>
           </div>
-          <div className="text-left text-xs font-mono">
-            <div>تاريخ الطباعة: {new Date().toLocaleDateString('ar-EG')}</div>
-            <div>الوقت: {new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
-            <div>المسؤول: {currentUser?.displayName}</div>
+          <div className="text-left text-xs space-y-0.5 shrink-0">
+            <div className="font-bold text-slate-700">
+              تاريخ الطباعة: <span className="font-mono">{new Date().toLocaleDateString('ar-EG')}</span>
+            </div>
+            <div className="font-bold text-slate-700">
+              الوقت:{' '}
+              <span className="font-mono">
+                {new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+            <div className="font-extrabold text-slate-900">
+              المسؤول: {currentUser?.displayName}
+            </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-5 gap-3 text-center border border-slate-300 rounded-xl p-3 bg-slate-50">
+        <div className="grid grid-cols-6 gap-2 text-center border border-slate-300 rounded-xl p-2.5 bg-slate-50">
           <div>
-            <div className="text-[11px] font-bold text-slate-600">إجمالي إيراد العيادات</div>
-            <div className="text-base font-black font-mono">{financialMetrics.totalGrossRevenue.toLocaleString()} ج.م</div>
+            <div className="text-[10px] font-bold text-slate-600">إجمالي إيراد العيادات</div>
+            <div className="text-sm font-black font-mono mt-0.5">{financialMetrics.totalGrossRevenue.toLocaleString()} ج.م</div>
           </div>
           <div>
-            <div className="text-[11px] font-bold text-slate-600">المحصل نقداً بالخزينة</div>
-            <div className="text-base font-black font-mono text-emerald-700">{financialMetrics.actualCashInSafe.toLocaleString()} ج.م</div>
+            <div className="text-[10px] font-bold text-slate-600">المحصل نقداً بالخزينة</div>
+            <div className="text-sm font-black font-mono text-emerald-700 mt-0.5">{financialMetrics.actualCashInSafe.toLocaleString()} ج.م</div>
           </div>
           <div>
-            <div className="text-[11px] font-bold text-slate-600">المصروفات النثرية (-)</div>
-            <div className="text-base font-black font-mono text-rose-700">{financialMetrics.totalExpenses.toLocaleString()} ج.م</div>
+            <div className="text-[10px] font-bold text-slate-600">المصروفات النثرية (-)</div>
+            <div className="text-sm font-black font-mono text-rose-700 mt-0.5">{financialMetrics.totalExpenses.toLocaleString()} ج.م</div>
           </div>
           <div>
-            <div className="text-[11px] font-bold text-slate-900">صافي النقدية الفعلي بالخزينة</div>
-            <div className="text-base font-black font-mono text-emerald-900">{financialMetrics.netCashAfterExpenses.toLocaleString()} ج.م</div>
+            <div className="text-[10px] font-bold text-slate-900">صافي النقدية بالخزينة</div>
+            <div className="text-sm font-black font-mono text-emerald-900 mt-0.5">{financialMetrics.netCashAfterExpenses.toLocaleString()} ج.م</div>
           </div>
           <div>
-            <div className="text-[11px] font-bold text-slate-600">مطالبات شركات التأمين</div>
-            <div className="text-base font-black font-mono text-blue-700">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</div>
+            <div className="text-[10px] font-bold text-purple-800">مستحقات ونسب الأطباء</div>
+            <div className="text-sm font-black font-mono text-purple-700 mt-0.5">{doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م</div>
+          </div>
+          <div>
+            <div className="text-[10px] font-bold text-slate-600">مطالبات شركات التأمين</div>
+            <div className="text-sm font-black font-mono text-blue-700 mt-0.5">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</div>
           </div>
         </div>
 
         <div>
-          <h2 className="text-sm font-black mb-2">أولاً: ملخص إيرادات العيادات والأطباء</h2>
-          <table className="w-full text-right text-xs border-collapse border border-slate-400">
+          <h2 className="text-xs font-black mb-1.5">أولاً: ملخص إيرادات العيادات والأطباء وصافي الخزينة</h2>
+          <table className="w-full text-right text-[11px] border-collapse border border-slate-400">
             <thead>
               <tr className="bg-slate-100">
-                <th className="border border-slate-400 p-1.5">العيادة</th>
-                <th className="border border-slate-400 p-1.5">الطبيب</th>
+                <th className="border border-slate-400 p-1.5 text-center w-8">م</th>
+                <th className="border border-slate-400 p-1.5">العيادة التخصصية</th>
+                <th className="border border-slate-400 p-1.5">الطبيب المعالج</th>
                 <th className="border border-slate-400 p-1.5 text-center">الحالات</th>
                 <th className="border border-slate-400 p-1.5 text-center">نقدي</th>
                 <th className="border border-slate-400 p-1.5 text-center">تأمين</th>
@@ -1414,26 +1659,107 @@ export const FinanceManagerView: React.FC = () => {
               </tr>
             </thead>
             <tbody>
-              {clinicDoctorBreakdown.map(r => (
+              {clinicDoctorBreakdown.map((r, idx) => (
                 <tr key={`${r.clinicId}_${r.doctorId}`}>
-                  <td className="border border-slate-400 p-1.5 font-bold">{r.clinicName}</td>
-                  <td className="border border-slate-400 p-1.5">{r.doctorName}</td>
-                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.totalPatients}</td>
-                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.cashCount}</td>
-                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.insuranceCount}</td>
-                  <td className="border border-slate-400 p-1.5 font-mono font-bold">{r.cashInSafe.toLocaleString()} ج.م</td>
-                  <td className="border border-slate-400 p-1.5 font-mono">{r.insuranceClaim.toLocaleString()} ج.م</td>
-                  <td className="border border-slate-400 p-1.5 font-mono font-black">{r.grossRevenue.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{idx + 1}</td>
+                  <td className="border border-slate-400 p-1 font-bold">{r.clinicName}</td>
+                  <td className="border border-slate-400 p-1">{r.doctorName}</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{r.totalPatients}</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{r.cashCount}</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{r.insuranceCount}</td>
+                  <td className="border border-slate-400 p-1 font-mono font-bold">{r.cashInSafe.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 font-mono">{r.insuranceClaim.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 font-mono font-black">{r.grossRevenue.toLocaleString()} ج.م</td>
                 </tr>
               ))}
+              <tr className="bg-amber-50 font-black">
+                <td className="border border-slate-400 p-1.5 text-center">الإجمالي</td>
+                <td className="border border-slate-400 p-1.5">إجمالي إيرادات العيادات</td>
+                <td className="border border-slate-400 p-1.5">{clinicDoctorBreakdown.length} عيادة / طبيب</td>
+                <td className="border border-slate-400 p-1.5 text-center font-mono">{financialMetrics.totalCases}</td>
+                <td className="border border-slate-400 p-1.5 text-center font-mono">{financialMetrics.cashBookingsCount}</td>
+                <td className="border border-slate-400 p-1.5 text-center font-mono">{financialMetrics.insuranceBookingsCount}</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{financialMetrics.actualCashInSafe.toLocaleString()} ج.م</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{financialMetrics.totalGrossRevenue.toLocaleString()} ج.م</td>
+              </tr>
+              <tr className="bg-emerald-50 font-black">
+                <td className="border border-slate-400 p-1.5 text-center">★</td>
+                <td className="border border-slate-400 p-1.5" colSpan={2}>
+                  صافي النقدية الفعلي المتبقي بالخزينة (بعد خصم المصروفات النثرية: {financialMetrics.totalExpenses.toLocaleString()} ج.م)
+                </td>
+                <td className="border border-slate-400 p-1.5 text-center" colSpan={3}>
+                  مستحقات الأطباء: {doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م
+                </td>
+                <td className="border border-slate-400 p-1.5 font-mono text-emerald-900">
+                  {financialMetrics.netCashAfterExpenses.toLocaleString()} ج.م
+                </td>
+                <td className="border border-slate-400 p-1.5 font-mono">
+                  {financialMetrics.insuranceReceivables.toLocaleString()} ج.م
+                </td>
+                <td className="border border-slate-400 p-1.5 font-mono">
+                  {(financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses).toLocaleString()} ج.م
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div>
+          <h2 className="text-xs font-black mb-1.5">ثانياً: كشف حساب شرائح ونسب ومستحقات الأطباء وحصة المركز</h2>
+          <table className="w-full text-right text-[11px] border-collapse border border-slate-400">
+            <thead>
+              <tr className="bg-slate-100">
+                <th className="border border-slate-400 p-1.5 text-center w-8">م</th>
+                <th className="border border-slate-400 p-1.5">اسم الطبيب</th>
+                <th className="border border-slate-400 p-1.5">العيادة</th>
+                <th className="border border-slate-400 p-1.5 text-center">سعر الكشف</th>
+                <th className="border border-slate-400 p-1.5 text-center">شرائح النسب (ناقص | مطلوب | زيادة)</th>
+                <th className="border border-slate-400 p-1.5 text-center">الحالات</th>
+                <th className="border border-slate-400 p-1.5 text-center">الشريحة والنسبة</th>
+                <th className="border border-slate-400 p-1.5">إجمالي الكشوفات</th>
+                <th className="border border-slate-400 p-1.5">مستحق الطبيب</th>
+                <th className="border border-slate-400 p-1.5">نصيب المركز</th>
+              </tr>
+            </thead>
+            <tbody>
+              {doctorCommissionRows.map((d, idx) => (
+                <tr key={d.doctorId}>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{idx + 1}</td>
+                  <td className="border border-slate-400 p-1 font-bold">{d.doctorName}</td>
+                  <td className="border border-slate-400 p-1">{d.clinicName}</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono">{d.consultationFee.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 text-center font-mono text-[10px]">
+                    ≤{d.belowCasesCount}: {d.belowPercentage}% | ({d.targetCasesCount}): {d.targetPercentage}% | ≥{d.aboveCasesCount}: {d.abovePercentage}%
+                  </td>
+                  <td className="border border-slate-400 p-1 text-center font-mono font-bold">{d.paidExamCases}</td>
+                  <td className="border border-slate-400 p-1 text-center font-bold">
+                    {d.appliedTierLabel} ({d.appliedPercentage}%)
+                  </td>
+                  <td className="border border-slate-400 p-1 font-mono">{d.totalExamValueByDoctorFee.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 font-mono font-bold">{d.doctorCommissionAmount.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1 font-mono font-bold">{d.clinicNetShareAmount.toLocaleString()} ج.م</td>
+                </tr>
+              ))}
+              <tr className="bg-amber-50 font-black">
+                <td className="border border-slate-400 p-1.5 text-center">الإجمالي</td>
+                <td className="border border-slate-400 p-1.5" colSpan={4}>
+                  إجمالي مستحقات الأطباء وصافي نصيب المركز ({doctorCommissionRows.length} طبيب)
+                </td>
+                <td className="border border-slate-400 p-1.5 text-center font-mono">{doctorCommissionTotals.totalPaidCases}</td>
+                <td className="border border-slate-400 p-1.5 text-center">—</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{doctorCommissionTotals.totalExamValue.toLocaleString()} ج.م</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م</td>
+                <td className="border border-slate-400 p-1.5 font-mono">{doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م</td>
+              </tr>
             </tbody>
           </table>
         </div>
 
         {filteredExpenses.length > 0 && (
           <div>
-            <h2 className="text-sm font-black mb-2">ثانياً: بيان المصروفات النثرية والمنصرف من الخزينة</h2>
-            <table className="w-full text-right text-xs border-collapse border border-slate-400">
+            <h2 className="text-xs font-black mb-1.5">ثالثاً: بيان المصروفات النثرية والمنصرف من الخزينة</h2>
+            <table className="w-full text-right text-[11px] border-collapse border border-slate-400">
               <thead>
                 <tr className="bg-slate-100">
                   <th className="border border-slate-400 p-1.5">التاريخ</th>
@@ -1458,10 +1784,11 @@ export const FinanceManagerView: React.FC = () => {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-6 pt-8 text-center text-xs font-bold">
-          <div className="border-t border-slate-400 pt-2">توقيع مسؤول الخزينة</div>
-          <div className="border-t border-slate-400 pt-2">مراجعة واعتماد مدير المالية ({currentUser?.displayName})</div>
-          <div className="border-t border-slate-400 pt-2">اعتماد إدارة عيادات الشرايح</div>
+        <div className="grid grid-cols-2 gap-12 pt-8 text-center text-xs font-bold">
+          <div className="border-t-2 border-slate-500 pt-2.5">توقيع مسؤول الخزينة</div>
+          <div className="border-t-2 border-slate-500 pt-2.5">
+            مراجعة واعتماد مدير المالية ({currentUser?.displayName})
+          </div>
         </div>
       </div>
 
