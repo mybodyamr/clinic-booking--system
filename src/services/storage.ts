@@ -52,7 +52,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v13_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v14_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {

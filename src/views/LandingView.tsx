@@ -589,7 +589,7 @@ export const LandingView: React.FC = () => {
             </div>
             <div>
               <h4 className="font-bold text-xs text-slate-500 dark:text-amber-300">عنوان المجمع الطبي</h4>
-              <p className="text-xs sm:text-sm text-slate-900 dark:text-white font-bold mt-1 leading-relaxed">المقر الرئيسي — مبنى العيادات التخصصية</p>
+              <p className="text-xs sm:text-sm text-slate-900 dark:text-white font-bold mt-1 leading-relaxed">عيادات الجمعية الشرعية بأوسيم</p>
             </div>
           </div>
 

@@ -443,7 +443,7 @@ export const AdminView: React.FC = () => {
           ? dataToExport
           : [{ 'بيان': 'لا توجد حجوزات مطابقة للفلاتر المحددة' }],
         {
-          reportTitle: 'عيادات الشرايح التخصصية — تقرير حجوزات العيادات',
+          reportTitle: 'عيادات الجمعية الشرعية بأوسيم — تقرير حجوزات العيادات',
           reportSubtitle: `تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')} · إجمالي السجلات: ${dataToExport.length}`
         }
       );
@@ -2753,6 +2753,7 @@ export const AdminView: React.FC = () => {
         scheduleDate={dailySchedule.date}
         initialMode={exportScheduleInitialMode}
         officialWorkingHours={officialWorkingHours}
+        supportInfoText={supportInfoText}
         onSuccess={(msg) => addToast({ type: 'success', title: 'تم التنزيل بنجاح', message: msg })}
         onError={(msg) => addToast({ type: 'error', title: 'خطأ في التنزيل', message: msg })}
       />

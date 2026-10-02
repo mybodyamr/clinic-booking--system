@@ -6,15 +6,11 @@ import {
   Download, 
   Calendar, 
   CalendarDays,
-  CheckCircle2, 
   Eye, 
   Loader2,
   Stethoscope,
-  Clock,
-  ShieldCheck,
   MapPin,
-  Sparkles,
-  Check
+  PhoneCall
 } from 'lucide-react';
 import { Clinic, Doctor, DailyClinicScheduleItem } from '../types';
 import { 
@@ -38,8 +34,48 @@ interface DailyScheduleExportModalProps {
   scheduleDate: string;
   initialMode?: ScheduleExportMode;
   officialWorkingHours?: string;
+  supportInfoText?: string;
   onSuccess: (message: string) => void;
   onError: (message: string) => void;
+}
+
+/**
+ * تحويل صيغة الموعد الطويلة إلى صيغة مختصرة وأنيقة مثل البوستر المرجعي:
+ * مثال: "من 09:00 صباحاً إلى 06:00 عصراً" -> "9:00 ص - 6:00 م"
+ */
+function formatCompactPosterTiming(rawTiming: string): string {
+  if (!rawTiming) return '9 ص - 9 م';
+  let s = rawTiming.trim();
+  s = s
+    .replace(/من\s+/g, '')
+    .replace(/\s+(إلى|الى|حتى)\s+/g, ' - ')
+    .replace(/صباحاً|صباحا/g, 'ص')
+    .replace(/ظهراً|ظهرا/g, 'ظ')
+    .replace(/عصراً|عصرا/g, 'عصراً')
+    .replace(/مساءً|مساءا|مساء/g, 'م')
+    .replace(/\b0(\d):00\b/g, '$1')
+    .replace(/\b(\d{2}):00\b/g, '$1')
+    .replace(/\b0(\d):(\d{2})\b/g, '$1:$2');
+  return s;
+}
+
+/**
+ * اختصار اسم العيادة ليظهر كاسم تخصص أنيق ومباشر في عمود "التخصص"
+ */
+function formatSpecialtyDisplayName(clinicName: string): string {
+  if (!clinicName) return 'عيادة تخصصية';
+  const cleaned = clinicName.replace(/^عياد(ة|ات)\s+/i, '').trim();
+  return cleaned || clinicName;
+}
+
+/**
+ * اختصار عرض أيام العمل في الجدول الأسبوعي بشكل ملموم وأنيق
+ */
+function formatCompactWorkingDays(days: string[]): string {
+  if (!days || days.length === 0) return 'طوال الأسبوع';
+  if (days.length === 7) return 'يومياً (طوال الأسبوع)';
+  if (days.length === 6 && !days.includes('الجمعة')) return 'يومياً عدا الجمعة';
+  return days.join(' - ');
 }
 
 export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> = ({
@@ -51,6 +87,7 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
   scheduleDate,
   initialMode = 'daily',
   officialWorkingHours = 'يومياً من 9:00 صباحاً حتى 10:00 مساءً',
+  supportInfoText = '01000000000',
   onSuccess,
   onError
 }) => {
@@ -73,8 +110,20 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
   const todayDayName = getArabicDayName(actualTodayStr);
   const todayFullArabic = formatArabicFullDate(actualTodayStr);
 
+  // استخراج رقم/نص التواصل والاستعلام بشكل نظيف للفوتر
+  const contactDisplayLine = (() => {
+    const raw = (supportInfoText || '').trim();
+    if (!raw) return officialWorkingHours;
+    // استخراج الأرقام الهاتفية إن وجدت أو عرض النص المختصر
+    const phoneMatches = raw.match(/\d[\d\s-]{6,}\d/g);
+    if (phoneMatches && phoneMatches.length > 0) {
+      return phoneMatches.map(p => p.trim()).join(' - ');
+    }
+    return raw.length > 48 ? `${raw.slice(0, 48)}...` : raw;
+  })();
+
   // ============================================================================
-  // 1. استخراج العيادات المفتوحة والعاملة في اليوم الفعلي فقط (بدون أي عيادة مغلقة أو غير مجدولة اليوم)
+  // 1. استخراج صفوف جدول اليوم الفعلي (العيادات المفتوحة والأطباء المتاحين اليوم)
   // ============================================================================
   const openDailyRows = clinics
     .filter(clinic => {
@@ -83,44 +132,41 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
       const isOpenToday = schedItem ? schedItem.isOpen : (clinic.isOpenToday !== false);
       return isOpenToday;
     })
-    .map(clinic => {
+    .flatMap(clinic => {
       const schedItem = scheduleItems.find(i => i.clinicId === clinic.id);
       const scheduledDoc = schedItem?.doctorId
         ? doctors.find(d => d.id === schedItem.doctorId && d.clinicId === clinic.id)
         : undefined;
 
-      // يجب أن يكون الطبيب متاحاً اليوم (ليس offline) ومجدولاً في اليوم الفعلي من الأسبوع
-      const activeDoctor =
-        (scheduledDoc && scheduledDoc.status !== 'offline' && isDoctorScheduledOnDate(scheduledDoc, actualTodayStr)
-          ? scheduledDoc
-          : undefined) ||
-        doctors.find(
-          d => d.clinicId === clinic.id && d.status !== 'offline' && isDoctorScheduledOnDate(d, actualTodayStr)
-        );
+      // جمع كل أطباء العيادة المتاحين والمجدولين في هذا اليوم
+      const clinicScheduledDocs = doctors.filter(
+        d => d.clinicId === clinic.id && d.status !== 'offline' && isDoctorScheduledOnDate(d, actualTodayStr)
+      );
 
-      if (!activeDoctor) return null;
+      let docsForToday: Doctor[] = [];
+      if (clinicScheduledDocs.length > 0) {
+        docsForToday = clinicScheduledDocs;
+      } else if (scheduledDoc && scheduledDoc.status !== 'offline' && isDoctorScheduledOnDate(scheduledDoc, actualTodayStr)) {
+        docsForToday = [scheduledDoc];
+      }
 
-      const shift = parseDoctorShiftTimes(activeDoctor);
-      const locationParts = [
-        clinic.room ? (clinic.room.includes('غرفة') ? clinic.room : `غرفة ${clinic.room}`) : '',
-        clinic.floor ? (clinic.floor.includes('الطابق') || clinic.floor.includes('الدور') ? clinic.floor : `الطابق ${clinic.floor}`) : ''
-      ].filter(Boolean);
+      return docsForToday.map(activeDoctor => {
+        const shift = parseDoctorShiftTimes(activeDoctor);
+        const rawTiming = shift.formattedDisplay || activeDoctor.scheduleHours || clinic.workingHours || '9:00 ص - 3:00 م';
 
-      return {
-        clinicId: clinic.id,
-        clinicName: clinic.name,
-        specialty: clinic.specialty || clinic.department || 'عيادة تخصصية',
-        location: locationParts.join(' • ') || 'المبنى الرئيسي',
-        doctorName: activeDoctor.name.startsWith('د.') ? activeDoctor.name : `د. ${activeDoctor.name}`,
-        doctorTitle: activeDoctor.title || 'استشاري / أخصائي',
-        timing: shift.formattedDisplay || activeDoctor.scheduleHours || clinic.workingHours || 'من 09:00 صباحاً إلى 03:00 عصراً',
-        fee: `${clinic.fee} ج.م`
-      };
-    })
-    .filter((row): row is NonNullable<typeof row> => row !== null);
+        return {
+          rowKey: `${clinic.id}-${activeDoctor.id}`,
+          clinicId: clinic.id,
+          clinicName: formatSpecialtyDisplayName(clinic.name),
+          doctorName: activeDoctor.name.startsWith('د.') ? activeDoctor.name : `د. ${activeDoctor.name}`,
+          timing: formatCompactPosterTiming(rawTiming),
+          fee: `${clinic.fee} ج.م`
+        };
+      });
+    });
 
   // ============================================================================
-  // 2. استخراج الجدول الأسبوعي الكامل لجميع أيام الأسبوع (السبت — الجمعة)
+  // 2. استخراج الجدول الأسبوعي الكامل لجميع العيادات والأطباء
   // ============================================================================
   const activeClinics = clinics.filter(c => c.active !== false && c.isActive !== false);
 
@@ -128,12 +174,7 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
     const clinicDocs = doctors.filter(d => d.clinicId === clinic.id);
     const docsToUse = clinicDocs.length > 0 ? clinicDocs : [undefined];
 
-    const locationParts = [
-      clinic.room ? (clinic.room.includes('غرفة') ? clinic.room : `غرفة ${clinic.room}`) : '',
-      clinic.floor ? (clinic.floor.includes('الطابق') || clinic.floor.includes('الدور') ? clinic.floor : `الطابق ${clinic.floor}`) : ''
-    ].filter(Boolean);
-
-    return docsToUse.map(doc => {
+    return docsToUse.map((doc, idx) => {
       const normalizedDocDays = (doc?.scheduleDays || clinic.workingDays || [])
         .map(d => normalizeArabicDay(d))
         .filter(Boolean);
@@ -142,42 +183,40 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
         : [...ARABIC_DAYS];
 
       const shift = doc ? parseDoctorShiftTimes(doc) : null;
+      const rawTiming = shift?.formattedDisplay || doc?.scheduleHours || clinic.workingHours || '9:00 ص - 3:00 م';
 
       return {
+        rowKey: `${clinic.id}-${doc?.id || idx}`,
         clinicId: clinic.id,
-        clinicName: clinic.name,
-        location: locationParts.join(' • ') || 'المبنى الرئيسي',
+        clinicName: formatSpecialtyDisplayName(clinic.name),
         doctorName: doc ? (doc.name.startsWith('د.') ? doc.name : `د. ${doc.name}`) : 'طبيب مناوب',
-        doctorTitle: doc?.title || clinic.specialty || 'أخصائي',
         workingDays,
-        timing: shift?.formattedDisplay || doc?.scheduleHours || clinic.workingHours || 'من 09:00 صباحاً إلى 03:00 عصراً',
+        workingDaysText: formatCompactWorkingDays(workingDays),
+        timing: formatCompactPosterTiming(rawTiming),
         fee: `${clinic.fee} ج.م`
       };
     });
   });
 
-  // توزيع العيادات حسب كل يوم من أيام الأسبوع السبعة
-  const weeklyByDay = ARABIC_DAYS.map(dayName => {
-    const dayClinics = weeklyClinicRows.filter(row => row.workingDays.includes(dayName));
-    return {
-      dayName,
-      isToday: dayName === todayDayName,
-      clinics: dayClinics
-    };
-  });
-
   // ============================================================================
-  // الرسم الاحتياطي عالي الدقة بالكانفاس (للأجهزة التي تمنع SVG foreignObject)
+  // الرسم الاحتياطي عالي الدقة بالكانفاس (مطابق 100% للبوستر الكحلي الملكي)
   // ============================================================================
-  const exportDailyViaCanvas = async (fileName: string) => {
-    const width = 1280;
-    const padding = 52;
-    const rowHeight = 84;
-    const headerHeight = 220;
+  const renderRoyalNavyPosterCanvas = async (
+    mode: ScheduleExportMode,
+    fileName: string
+  ) => {
+    const rows = mode === 'daily' ? openDailyRows : weeklyClinicRows;
+    const width = mode === 'daily' ? 960 : 1120;
+    const tableMarginX = 48;
+    const tableWidth = width - tableMarginX * 2;
+    const headerTopHeight = 230;
     const tableHeaderHeight = 58;
-    const footerHeight = 96;
-    const rowsCount = Math.max(1, openDailyRows.length);
-    const totalHeight = headerHeight + tableHeaderHeight + (rowsCount * rowHeight) + footerHeight + 40;
+    const rowHeight = 56;
+    const rowsCount = Math.max(1, rows.length);
+    const tableHeight = tableHeaderHeight + rowsCount * rowHeight;
+    const footerHeight = 92;
+    const bottomSpaceBeforeFooter = 38;
+    const totalHeight = headerTopHeight + tableHeight + bottomSpaceBeforeFooter + footerHeight;
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -185,206 +224,206 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
     const ctx = canvas.getContext('2d');
     if (!ctx) throw new Error('تعذر إنشاء الكانفاس');
 
-    // خلفية عامة
-    ctx.fillStyle = '#f8fafc';
+    // 1. الخلفية العامة الفاتحة
+    ctx.fillStyle = '#f2f6fb';
     ctx.fillRect(0, 0, width, totalHeight);
 
-    // ترويسة زمردية ملكية
-    const grad = ctx.createLinearGradient(0, 0, width, headerHeight);
-    grad.addColorStop(0, '#022c22');
-    grad.addColorStop(0.5, '#064e3b');
-    grad.addColorStop(1, '#065f46');
-    ctx.fillStyle = grad;
-    ctx.fillRect(padding, 36, width - padding * 2, 160);
+    // 2. الهيدر الكحلي الملكي المنحني
+    const navyGrad = ctx.createLinearGradient(0, 0, width, headerTopHeight + 90);
+    navyGrad.addColorStop(0, '#04162e');
+    navyGrad.addColorStop(0.5, '#072448');
+    navyGrad.addColorStop(1, '#0b3262');
+    ctx.fillStyle = navyGrad;
 
-    // شريط ذهبي علوي
-    ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(padding, 36, width - padding * 2, 6);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(width, 0);
+    ctx.lineTo(width, headerTopHeight + 35);
+    ctx.quadraticCurveTo(width / 2, headerTopHeight + 115, 0, headerTopHeight + 35);
+    ctx.closePath();
+    ctx.fill();
 
-    ctx.direction = 'rtl';
-    ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-    ctx.fillText('مجمع عيادات الجمعية الشرعية التخصصية', width - padding - 32, 82);
+    // 3. شعار المعين الطبي على اليمين + الخط الفاصل الرأسي
+    const logoCenterX = width - 125;
+    const logoCenterY = 95;
 
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 32px system-ui, -apple-system, sans-serif';
-    ctx.fillText(`جدول العيادات المفتوحة اليوم (${todayDayName})`, width - padding - 32, 126);
+    ctx.save();
+    ctx.translate(logoCenterX, logoCenterY);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+    ctx.fillRect(-44, -44, 88, 88);
+    ctx.strokeStyle = '#38bdf8';
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(-36, -36, 72, 72);
+    ctx.restore();
 
-    ctx.fillStyle = '#a7f3d0';
-    ctx.font = 'bold 19px system-ui, -apple-system, sans-serif';
-    ctx.fillText(`التاريخ الفعلي: ${todayFullArabic} (${actualTodayStr}) • العيادات العاملة اليوم فقط (${openDailyRows.length})`, width - padding - 32, 166);
-
-    // رأس الجدول
-    const tableTop = 216;
-    const tableWidth = width - padding * 2;
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(padding, tableTop, tableWidth, tableHeaderHeight);
-
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
-    const colNumX = width - padding - 24;
-    const colClinicX = width - padding - 85;
-    const colDocX = width - padding - Math.round(tableWidth * 0.42);
-    const colTimeX = width - padding - Math.round(tableWidth * 0.72);
-    const colFeeX = padding + 110;
-
-    ctx.fillText('م', colNumX, tableTop + 36);
-    ctx.fillText('العيادة التخصصية', colClinicX, tableTop + 36);
-    ctx.fillText('الطبيب المعالج', colDocX, tableTop + 36);
-    ctx.fillText('مواعيد العمل اليوم', colTimeX, tableTop + 36);
-    ctx.fillText('الكشف', colFeeX, tableTop + 36);
-
-    let currentY = tableTop + tableHeaderHeight;
-    openDailyRows.forEach((row, idx) => {
-      ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#f0fdf4';
-      ctx.fillRect(padding, currentY, tableWidth, rowHeight);
-
-      ctx.strokeStyle = '#e2e8f0';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(padding, currentY, tableWidth, rowHeight);
-
-      ctx.fillStyle = '#065f46';
-      ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
-      ctx.fillText(String(idx + 1).padStart(2, '0'), colNumX, currentY + 48);
-
-      ctx.fillStyle = '#0f172a';
-      ctx.font = 'bold 21px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.clinicName, colClinicX, currentY + 36);
-      ctx.fillStyle = '#64748b';
-      ctx.font = '15px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.location, colClinicX, currentY + 64);
-
-      ctx.fillStyle = '#1e293b';
-      ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.doctorName, colDocX, currentY + 36);
-      ctx.fillStyle = '#047857';
-      ctx.font = '15px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.doctorTitle, colDocX, currentY + 64);
-
-      ctx.fillStyle = '#065f46';
-      ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.timing, colTimeX, currentY + 48);
-
-      ctx.fillStyle = '#b45309';
-      ctx.font = 'bold 19px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.fee, colFeeX, currentY + 48);
-
-      currentY += rowHeight;
-    });
-
-    ctx.fillStyle = '#475569';
-    ctx.font = 'bold 16px system-ui, -apple-system, sans-serif';
-    ctx.fillText(`مواعيد المركز: ${officialWorkingHours} • الحجز والكشف بأولوية الحضور في نفس يوم العيادة`, width - padding - 20, currentY + 52);
-
-    const dataUrl = canvas.toDataURL('image/png');
-    const link = document.createElement('a');
-    link.download = fileName;
-    link.href = dataUrl;
-    link.click();
-  };
-
-  const exportWeeklyViaCanvas = async (fileName: string) => {
-    const width = 1400;
-    const padding = 48;
-    const rowHeight = 90;
-    const headerHeight = 220;
-    const tableHeaderHeight = 58;
-    const footerHeight = 96;
-    const rowsCount = Math.max(1, weeklyClinicRows.length);
-    const totalHeight = headerHeight + tableHeaderHeight + (rowsCount * rowHeight) + footerHeight + 40;
-
-    const canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = totalHeight;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('تعذر إنشاء الكانفاس');
-
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillRect(0, 0, width, totalHeight);
-
-    const grad = ctx.createLinearGradient(0, 0, width, headerHeight);
-    grad.addColorStop(0, '#022c22');
-    grad.addColorStop(0.5, '#064e3b');
-    grad.addColorStop(1, '#065f46');
-    ctx.fillStyle = grad;
-    ctx.fillRect(padding, 36, width - padding * 2, 160);
-
-    ctx.fillStyle = '#f59e0b';
-    ctx.fillRect(padding, 36, width - padding * 2, 6);
+    ctx.beginPath();
+    ctx.arc(logoCenterX, logoCenterY, 28, 0, Math.PI * 2);
+    ctx.fillStyle = '#072448';
+    ctx.fill();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
 
     ctx.direction = 'rtl';
-    ctx.fillStyle = '#fbbf24';
-    ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-    ctx.fillText('مجمع عيادات الجمعية الشرعية التخصصية', width - padding - 32, 82);
-
+    ctx.textAlign = 'center';
     ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 32px system-ui, -apple-system, sans-serif';
-    ctx.fillText('الجدول الأسبوعي الشامل لعمل العيادات والأطباء (السبت — الجمعة)', width - padding - 32, 126);
+    ctx.font = 'bold 15px Tahoma, Arial, sans-serif';
+    ctx.fillText('عيادات الجمعية الشرعية', logoCenterX, 165);
+    ctx.fillStyle = '#93c5fd';
+    ctx.font = 'bold 12px Tahoma, Arial, sans-serif';
+    ctx.fillText('بأوسيم', logoCenterX, 184);
 
-    ctx.fillStyle = '#a7f3d0';
-    ctx.font = 'bold 19px system-ui, -apple-system, sans-serif';
-    ctx.fillText(`جميع أيام الأسبوع • تحديث معتمد بتاريخ ${actualTodayStr}`, width - padding - 32, 166);
+    // الخط الرأسي الفاصل
+    const dividerX = width - 235;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(dividerX, 45);
+    ctx.lineTo(dividerX, 188);
+    ctx.stroke();
 
-    const tableTop = 216;
-    const tableWidth = width - padding * 2;
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(padding, tableTop, tableWidth, tableHeaderHeight);
+    // العنوان الرئيسي على يسار الخط الفاصل
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 40px Tahoma, Arial, sans-serif';
+    ctx.fillText('عيادات الجمعية الشرعية -', dividerX - 24, 102);
 
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 19px system-ui, -apple-system, sans-serif';
-    const colClinicX = width - padding - 28;
-    const colDocX = width - padding - Math.round(tableWidth * 0.28);
-    const colDaysX = width - padding - Math.round(tableWidth * 0.52);
-    const colTimeX = width - padding - Math.round(tableWidth * 0.78);
-    const colFeeX = padding + 95;
+    ctx.fillStyle = '#dbeafe';
+    ctx.font = 'bold 31px Tahoma, Arial, sans-serif';
+    const subHeaderTitle =
+      mode === 'daily'
+        ? `جدول مواعيد الأطباء [يوم ${todayDayName}]`
+        : 'جدول مواعيد الأطباء [الأسبوعي الشامل]';
+    ctx.fillText(subHeaderTitle, dividerX - 24, 154);
 
-    ctx.fillText('العيادة التخصصية', colClinicX, tableTop + 36);
-    ctx.fillText('الطبيب المعالج', colDocX, tableTop + 36);
-    ctx.fillText('أيام العمل الأسبوعية', colDaysX, tableTop + 36);
-    ctx.fillText('مواعيد المناوبة', colTimeX, tableTop + 36);
-    ctx.fillText('الكشف', colFeeX, tableTop + 36);
+    // 4. الجدول المسطر الكلاسيكي
+    const tableTop = 212;
+    ctx.fillStyle = '#06203f';
+    ctx.fillRect(tableMarginX, tableTop, tableWidth, tableHeaderHeight);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(tableMarginX, tableTop, tableWidth, tableHeaderHeight);
 
-    let currentY = tableTop + tableHeaderHeight;
-    weeklyClinicRows.forEach((row, idx) => {
-      ctx.fillStyle = idx % 2 === 0 ? '#ffffff' : '#f0fdf4';
-      ctx.fillRect(padding, currentY, tableWidth, rowHeight);
+    // تقسيم الأعمدة من اليمين إلى اليسار
+    const colRatios =
+      mode === 'daily'
+        ? [0.28, 0.34, 0.24, 0.14] // التخصص | اسم الطبيب | الموعد | الكشف
+        : [0.22, 0.26, 0.24, 0.17, 0.11]; // التخصص | اسم الطبيب | أيام العمل | الموعد | الكشف
+    const colHeaders =
+      mode === 'daily'
+        ? ['التخصص', 'اسم الطبيب', 'الموعد', 'الكشف']
+        : ['التخصص', 'اسم الطبيب', 'أيام العمل', 'الموعد', 'الكشف'];
 
-      ctx.strokeStyle = '#e2e8f0';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(padding, currentY, tableWidth, rowHeight);
+    const colBounds: { right: number; left: number; center: number }[] = [];
+    let currentRight = width - tableMarginX;
+    for (const ratio of colRatios) {
+      const colW = Math.round(tableWidth * ratio);
+      const left = currentRight - colW;
+      colBounds.push({
+        right: currentRight,
+        left,
+        center: left + colW / 2
+      });
+      currentRight = left;
+    }
+    if (colBounds.length > 0) {
+      colBounds[colBounds.length - 1].left = tableMarginX;
+      colBounds[colBounds.length - 1].center =
+        (colBounds[colBounds.length - 1].right + tableMarginX) / 2;
+    }
 
-      ctx.fillStyle = '#0f172a';
-      ctx.font = 'bold 20px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.clinicName, colClinicX, currentY + 38);
-      ctx.fillStyle = '#64748b';
-      ctx.font = '15px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.location, colClinicX, currentY + 66);
-
-      ctx.fillStyle = '#1e293b';
-      ctx.font = 'bold 19px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.doctorName, colDocX, currentY + 38);
-      ctx.fillStyle = '#047857';
-      ctx.font = '15px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.doctorTitle, colDocX, currentY + 66);
-
-      ctx.fillStyle = '#065f46';
-      ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.workingDays.join(' • '), colDaysX, currentY + 52);
-
-      ctx.fillStyle = '#0f766e';
-      ctx.font = 'bold 17px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.timing, colTimeX, currentY + 52);
-
-      ctx.fillStyle = '#b45309';
-      ctx.font = 'bold 18px system-ui, -apple-system, sans-serif';
-      ctx.fillText(row.fee, colFeeX, currentY + 52);
-
-      currentY += rowHeight;
+    // عناوين الأعمدة والخطوط الفاصلة البيضاء
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 22px Tahoma, Arial, sans-serif';
+    colHeaders.forEach((h, i) => {
+      const b = colBounds[i];
+      ctx.fillText(h, b.center, tableTop + 37);
+      if (i < colHeaders.length - 1) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(b.left, tableTop);
+        ctx.lineTo(b.left, tableTop + tableHeaderHeight);
+        ctx.stroke();
+      }
     });
 
-    ctx.fillStyle = '#475569';
-    ctx.font = 'bold 16px system-ui, -apple-system, sans-serif';
-    ctx.fillText(`مواعيد المركز الرسمية: ${officialWorkingHours} • يفتح باب الحجز إلكترونياً وحضورياً في صباح نفس يوم العيادة`, width - padding - 20, currentY + 52);
+    // صفوف البيانات
+    let curY = tableTop + tableHeaderHeight;
+    rows.forEach((row: any, idx: number) => {
+      ctx.fillStyle = idx % 2 === 0 ? '#e3eef9' : '#f1f7fd';
+      ctx.fillRect(tableMarginX, curY, tableWidth, rowHeight);
+
+      ctx.strokeStyle = '#7fa3c7';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(tableMarginX, curY, tableWidth, rowHeight);
+
+      const cellValues =
+        mode === 'daily'
+          ? [row.clinicName, row.doctorName, row.timing, row.fee]
+          : [row.clinicName, row.doctorName, row.workingDaysText, row.timing, row.fee];
+
+      cellValues.forEach((val: string, colIdx: number) => {
+        const b = colBounds[colIdx];
+        ctx.fillStyle = '#071c35';
+        ctx.font = colIdx === 0 || colIdx === 1 ? 'bold 20px Tahoma, Arial, sans-serif' : 'bold 18px Tahoma, Arial, sans-serif';
+        ctx.fillText(val, b.center, curY + 35);
+
+        if (colIdx < cellValues.length - 1) {
+          ctx.strokeStyle = '#7fa3c7';
+          ctx.lineWidth = 1.2;
+          ctx.beginPath();
+          ctx.moveTo(b.left, curY);
+          ctx.lineTo(b.left, curY + rowHeight);
+          ctx.stroke();
+        }
+      });
+
+      curY += rowHeight;
+    });
+
+    // إطار خارجي للجدول بالكامل
+    ctx.strokeStyle = '#06203f';
+    ctx.lineWidth = 2.5;
+    ctx.strokeRect(tableMarginX, tableTop, tableWidth, tableHeight);
+
+    // 5. الشريط السفلي الكحلي الملكي (الفوتر)
+    const footerTop = totalHeight - footerHeight;
+    ctx.fillStyle = '#06203f';
+    ctx.fillRect(0, footerTop, width, footerHeight);
+
+    // يمين الفوتر: موقعنا
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#93c5fd';
+    ctx.font = 'bold 17px Tahoma, Arial, sans-serif';
+    ctx.fillText('موقعنا :', width - 48, footerTop + 36);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 20px Tahoma, Arial, sans-serif';
+    ctx.fillText('عيادات الجمعية الشرعية بأوسيم', width - 48, footerTop + 66);
+
+    // منتصف الفوتر: شارة الوسط
+    const badgeW = 230;
+    const badgeH = 44;
+    const badgeX = width / 2 - badgeW / 2;
+    const badgeY = footerTop + (footerHeight - badgeH) / 2;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(badgeX, badgeY, badgeW, badgeH);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 17px Tahoma, Arial, sans-serif';
+    ctx.fillText(actualTodayStr, width / 2, badgeY + 28);
+
+    // يسار الفوتر: للتواصل والاستعلام
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#93c5fd';
+    ctx.font = 'bold 17px Tahoma, Arial, sans-serif';
+    ctx.fillText('للتواصل والاستعلام :', 48, footerTop + 36);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 19px Tahoma, Arial, sans-serif';
+    ctx.fillText(contactDisplayLine, 48, footerTop + 66);
 
     const dataUrl = canvas.toDataURL('image/png');
     const link = document.createElement('a');
@@ -405,7 +444,6 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
     try {
       setIsExportingDaily(true);
       setExportMode('daily');
-      // إتاحة لحظة للتأكد من رسم حاوية اليوم الفعلي
       await new Promise(r => setTimeout(r, 80));
 
       const fileName = `جدول_العيادات_المفتوحة_${todayDayName}_${actualTodayStr}.png`;
@@ -414,7 +452,7 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
         try {
           const dataUrl = await toPng(dailyPosterRef.current, {
             cacheBust: true,
-            backgroundColor: '#ffffff',
+            backgroundColor: '#f2f6fb',
             pixelRatio: 3
           });
           const link = document.createElement('a');
@@ -422,15 +460,15 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
           link.href = dataUrl;
           link.click();
 
-          onSuccess(`تم تنزيل صورة جدول العيادات المفتوحة لليوم الفعلي (${todayDayName}) بنجاح.`);
+          onSuccess(`تم تنزيل بوستر جدول مواعيد الأطباء [يوم ${todayDayName}] بنجاح.`);
           return;
         } catch (err) {
           console.warn('التبديل للرسم بالكانفاس لجدول اليوم:', err);
         }
       }
 
-      await exportDailyViaCanvas(fileName);
-      onSuccess(`تم تنزيل صورة جدول العيادات المفتوحة لليوم الفعلي (${todayDayName}) بنجاح.`);
+      await renderRoyalNavyPosterCanvas('daily', fileName);
+      onSuccess(`تم تنزيل بوستر جدول مواعيد الأطباء [يوم ${todayDayName}] بنجاح.`);
     } catch (err) {
       console.error(err);
       onError('حدث خطأ أثناء إنشاء صورة جدول اليوم.');
@@ -456,7 +494,7 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
         try {
           const dataUrl = await toPng(weeklyPosterRef.current, {
             cacheBust: true,
-            backgroundColor: '#ffffff',
+            backgroundColor: '#f2f6fb',
             pixelRatio: 3
           });
           const link = document.createElement('a');
@@ -464,15 +502,15 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
           link.href = dataUrl;
           link.click();
 
-          onSuccess('تم تنزيل صورة الجدول الأسبوعي الكامل لجميع أيام الأسبوع بنجاح.');
+          onSuccess('تم تنزيل بوستر الجدول الأسبوعي الشامل للعيادات بنجاح.');
           return;
         } catch (err) {
           console.warn('التبديل للرسم بالكانفاس للجدول الأسبوعي:', err);
         }
       }
 
-      await exportWeeklyViaCanvas(fileName);
-      onSuccess('تم تنزيل صورة الجدول الأسبوعي الكامل لجميع أيام الأسبوع بنجاح.');
+      await renderRoyalNavyPosterCanvas('weekly', fileName);
+      onSuccess('تم تنزيل بوستر الجدول الأسبوعي الشامل للعيادات بنجاح.');
     } catch (err) {
       console.error(err);
       onError('حدث خطأ أثناء إنشاء صورة الجدول الأسبوعي.');
@@ -480,6 +518,107 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
       setIsExportingWeekly(false);
     }
   };
+
+  /**
+   * مكون الهيدر الكحلي الملكي الموحد (مطابق للصورة المرجعية تماماً)
+   */
+  const renderPosterHeader = (subtitleBracketText: string) => (
+    <div className="relative bg-gradient-to-b from-[#04152b] via-[#072448] to-[#0b3160] text-white pt-7 pb-16 px-7 overflow-hidden">
+      {/* زخرفة هندسية طبية خفيفة في الخلفية */}
+      <div className="absolute -left-10 -top-10 w-44 h-44 rotate-45 border-[16px] border-sky-400/5 pointer-events-none" />
+      <div className="absolute left-12 top-16 w-28 h-28 rotate-45 bg-sky-400/5 pointer-events-none" />
+
+      <div className="relative z-10 flex items-center justify-between gap-5">
+        {/* يمين الهيدر: الشعار الهندسي المعين + اسم الجمعية */}
+        <div className="flex items-center gap-5 shrink-0">
+          <div className="flex flex-col items-center text-center">
+            <div className="relative w-20 h-20 flex items-center justify-center">
+              {/* المربعات المائلة (المعين الطبي) */}
+              <div className="absolute inset-1.5 rotate-45 rounded-lg bg-sky-400/20 border-2 border-sky-300/70 shadow-md" />
+              <div className="absolute inset-3 rotate-12 rounded-lg bg-blue-500/20 border border-white/30" />
+              {/* الدائرة الطبية الوسطى */}
+              <div className="relative z-10 w-12 h-12 rounded-full bg-[#06203f] border-2 border-white flex items-center justify-center shadow-inner">
+                <Stethoscope className="w-6 h-6 text-sky-300" />
+              </div>
+            </div>
+            <span className="text-[12px] font-extrabold text-white tracking-tight mt-1 leading-tight">
+              عيادات الجمعية الشرعية
+            </span>
+            <span className="text-[10px] font-bold text-sky-300 leading-tight">
+              بأوسيم
+            </span>
+          </div>
+
+          {/* الخط الرأسي الأبيض الفاصل */}
+          <div className="w-[2.5px] h-24 bg-white/80 rounded-full" />
+        </div>
+
+        {/* يسار الخط الفاصل: العنوان الرئيسي والفرعي */}
+        <div className="flex-1 text-right space-y-2 pr-1">
+          <h2 className="text-3xl sm:text-[34px] font-black text-white leading-tight tracking-tight drop-shadow-xs">
+            عيادات الجمعية الشرعية -
+          </h2>
+          <div className="text-xl sm:text-[26px] font-extrabold text-sky-100 leading-snug">
+            {subtitleBracketText}
+          </div>
+          <div className="text-xs font-bold text-sky-300/90 pt-0.5">
+            التاريخ: {todayFullArabic} ({actualTodayStr})
+          </div>
+        </div>
+      </div>
+
+      {/* القوس المنحني السفلي للهيدر الكحلي */}
+      <div
+        className="absolute -bottom-8 left-0 right-0 h-16 bg-[#f2f6fb]"
+        style={{
+          borderTopLeftRadius: '50% 100%',
+          borderTopRightRadius: '50% 100%'
+        }}
+      />
+    </div>
+  );
+
+  /**
+   * مكون الشريط السفلي الكحلي الملكي الموحد (الفوتر)
+   */
+  const renderPosterFooter = () => (
+    <div className="bg-[#06203f] text-white px-6 py-4 border-t-2 border-[#0b3160] flex items-center justify-between gap-4">
+      {/* اليمين: موقعنا */}
+      <div className="flex items-center gap-2.5 text-right">
+        <div className="w-9 h-9 rounded-full bg-white/10 border border-sky-300/40 flex items-center justify-center shrink-0">
+          <MapPin className="w-5 h-5 text-sky-300" />
+        </div>
+        <div>
+          <div className="text-xs font-extrabold text-sky-300 leading-tight">
+            موقعنا :
+          </div>
+          <div className="text-sm sm:text-[15px] font-black text-white mt-0.5">
+            عيادات الجمعية الشرعية بأوسيم
+          </div>
+        </div>
+      </div>
+
+      {/* المنتصف: شارة الحجز الرسمية */}
+      <div className="px-5 py-1.5 rounded-full border-2 border-white/90 bg-[#072448] text-white font-black text-xs sm:text-sm tracking-wide shadow-sm shrink-0 text-center">
+        عيادات الجمعية الشرعية بأوسيم
+      </div>
+
+      {/* اليسار: للتواصل والاستعلام */}
+      <div className="flex items-center gap-2.5 text-left" dir="ltr">
+        <div className="w-9 h-9 rounded-full bg-white/10 border border-sky-300/40 flex items-center justify-center shrink-0">
+          <PhoneCall className="w-4 h-4 text-sky-300" />
+        </div>
+        <div dir="rtl" className="text-left">
+          <div className="text-xs font-extrabold text-sky-300 leading-tight">
+            للتواصل والاستعلام :
+          </div>
+          <div className="text-sm sm:text-[15px] font-black text-white font-mono mt-0.5" dir="ltr">
+            {contactDisplayLine}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <AnimatePresence>
@@ -494,15 +633,15 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
           {/* رأس النافذة */}
           <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50/80 dark:bg-slate-950/60 shrink-0">
             <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-emerald-800 to-emerald-950 text-amber-300 flex items-center justify-center shadow-md border border-emerald-700">
+              <div className="w-11 h-11 rounded-2xl bg-[#072448] text-sky-300 flex items-center justify-center shadow-md border border-sky-400/30">
                 <Download className="w-5 h-5" />
               </div>
               <div>
                 <h3 className="font-extrabold text-base sm:text-lg text-slate-900 dark:text-white">
-                  مركز تصدير وتنزيل جداول العيادات كـ صورة (PNG عالية الدقة)
+                  تنزيل بوستر جدول مواعيد الأطباء (صورة PNG عالية الدقة)
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  اختر تنزيل جدول العيادات المفتوحة في اليوم الفعلي فقط أو الجدول الشامل لأيام الأسبوع كاملة
+                  تصميم البوستر الكحلي الملكي المعتمد — جاهز للنشر المباشر أو الطباعة
                 </p>
               </div>
             </div>
@@ -522,31 +661,31 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
             {/* بطاقتا التحميل المباشر: 1) جدول اليوم الفعلي 2) جدول أيام الأسبوع كاملة */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               
-              {/* البطاقة الأولى: جدول العيادات المفتوحة في اليوم الفعلي فقط */}
+              {/* البطاقة الأولى: جدول مواعيد الأطباء لليوم الفعلي */}
               <div
                 onClick={() => setExportMode('daily')}
-                className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between gap-4 ${
+                className={`p-4 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between gap-3.5 ${
                   exportMode === 'daily'
-                    ? 'border-emerald-600 bg-emerald-50/60 dark:bg-emerald-950/35 shadow-md ring-2 ring-emerald-500/20'
-                    : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 hover:border-emerald-400'
+                    ? 'border-[#072448] bg-sky-50/70 dark:bg-slate-800 shadow-md'
+                    : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 hover:border-sky-400'
                 }`}
               >
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-emerald-800 text-amber-300">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-[#072448] text-sky-200">
                       <Calendar className="w-3.5 h-3.5" />
-                      <span>اليوم الفعلي: {todayDayName}</span>
+                      <span>جدول مواعيد [يوم {todayDayName}]</span>
                     </span>
-                    <span className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400">
-                      {openDailyRows.length} عيادة مفتوحة اليوم
+                    <span className="text-xs font-extrabold text-[#072448] dark:text-sky-300">
+                      {openDailyRows.length} طبيب / عيادة
                     </span>
                   </div>
 
                   <h4 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">
-                    1. تنزيل جدول العيادات المفتوحة اليوم كـ صورة
+                    1. تنزيل جدول مواعيد اليوم كـ صورة
                   </h4>
                   <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                    يعرض <strong className="text-emerald-800 dark:text-emerald-300">فقط العيادات المفتوحة والعاملة في اليوم الفعلي ({todayDayName})</strong> ويستبعد تلقائياً أي عيادة مغلقة أو غير مجدولة اليوم.
+                    بوستر كحلي ملكي يعرض العيادات والأطباء العاملين اليوم ({todayDayName}) مع الموعد وسعر الكشف.
                   </p>
                 </div>
 
@@ -557,47 +696,47 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
                     handleDownloadDailyImage();
                   }}
                   disabled={isExportingDaily || openDailyRows.length === 0}
-                  className="w-full py-3 px-4 bg-emerald-800 hover:bg-emerald-900 disabled:opacity-50 text-white text-xs font-extrabold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-2.5 px-4 bg-[#072448] hover:bg-[#0b3160] disabled:opacity-50 text-white text-xs font-extrabold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {isExportingDaily ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
+                      <Loader2 className="w-4 h-4 animate-spin text-sky-300" />
                       <span>جاري تجهيز صورة جدول اليوم...</span>
                     </>
                   ) : (
                     <>
-                      <Download className="w-4 h-4 text-amber-300" />
-                      <span>تنزيل صورة جدول عيادات اليوم ({openDailyRows.length})</span>
+                      <Download className="w-4 h-4 text-sky-300" />
+                      <span>تنزيل بوستر جدول اليوم ({openDailyRows.length})</span>
                     </>
                   )}
                 </button>
               </div>
 
-              {/* البطاقة الثانية: جدول أيام الأسبوع كاملة (السبت — الجمعة) */}
+              {/* البطاقة الثانية: جدول مواعيد الأسبوع كاملاً */}
               <div
                 onClick={() => setExportMode('weekly')}
-                className={`p-5 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between gap-4 ${
+                className={`p-4 rounded-2xl border-2 transition-all cursor-pointer flex flex-col justify-between gap-3.5 ${
                   exportMode === 'weekly'
-                    ? 'border-amber-500 bg-amber-50/50 dark:bg-amber-950/25 shadow-md ring-2 ring-amber-500/20'
-                    : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 hover:border-amber-400'
+                    ? 'border-[#072448] bg-sky-50/70 dark:bg-slate-800 shadow-md'
+                    : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850 hover:border-sky-400'
                 }`}
               >
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-amber-500/20 text-amber-900 dark:text-amber-300 border border-amber-400/40">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-extrabold bg-[#0b3160] text-amber-300">
                       <CalendarDays className="w-3.5 h-3.5" />
-                      <span>السبت — الجمعة (7 أيام)</span>
+                      <span>الجدول الأسبوعي الشامل</span>
                     </span>
-                    <span className="text-xs font-extrabold text-amber-700 dark:text-amber-400">
-                      شامل جميع العيادات
+                    <span className="text-xs font-extrabold text-[#072448] dark:text-sky-300">
+                      {weeklyClinicRows.length} طبيب / عيادة
                     </span>
                   </div>
 
                   <h4 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">
-                    2. تنزيل جدول أيام الأسبوع كاملة كـ صورة
+                    2. تنزيل جدول الأسبوع كاملاً كـ صورة
                   </h4>
                   <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-                    بوستر شامل عالي الدقة يعرض <strong className="text-amber-800 dark:text-amber-300">مواعيد وأيام حضور جميع العيادات والأطباء طوال الأسبوع</strong> مع خريطة توزيع الأيام.
+                    نفس البوستر الكحلي الملكي في جدول واحد ملموم يضم التخصص، الطبيب، أيام العمل، الموعد، والكشف.
                   </p>
                 </div>
 
@@ -608,17 +747,17 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
                     handleDownloadWeeklyImage();
                   }}
                   disabled={isExportingWeekly || weeklyClinicRows.length === 0}
-                  className="w-full py-3 px-4 bg-gradient-to-l from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 disabled:opacity-50 text-slate-950 text-xs font-extrabold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+                  className="w-full py-2.5 px-4 bg-[#0b3160] hover:bg-[#072448] disabled:opacity-50 text-white text-xs font-extrabold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {isExportingWeekly ? (
                     <>
-                      <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-300" />
                       <span>جاري تجهيز صورة الجدول الأسبوعي...</span>
                     </>
                   ) : (
                     <>
-                      <CalendarDays className="w-4 h-4 text-slate-950" />
-                      <span>تنزيل صورة جدول الأسبوع كاملاً (PNG)</span>
+                      <CalendarDays className="w-4 h-4 text-amber-300" />
+                      <span>تنزيل بوستر جدول الأسبوع كاملاً (PNG)</span>
                     </>
                   )}
                 </button>
@@ -626,14 +765,14 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
 
             </div>
 
-            {/* شريط التبديل بين معاينة البوستر اليومي والبوستر الأسبوعي */}
+            {/* شريط التبديل بين المعاينة */}
             <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-200 dark:border-slate-800">
               <div className="flex items-center gap-2 text-xs font-extrabold text-slate-800 dark:text-slate-200">
-                <Eye className="w-4 h-4 text-emerald-600" />
+                <Eye className="w-4 h-4 text-[#072448] dark:text-sky-400" />
                 <span>
                   {exportMode === 'daily'
-                    ? `معاينة بوستر العيادات المفتوحة في اليوم الفعلي (${todayDayName} — ${openDailyRows.length} عيادات):`
-                    : `معاينة بوستر جدول أيام الأسبوع كاملة (السبت إلى الجمعة):`}
+                    ? `معاينة بوستر جدول مواعيد الأطباء [يوم ${todayDayName}]:`
+                    : `معاينة بوستر جدول مواعيد الأطباء [الأسبوعي الشامل]:`}
                 </span>
               </div>
 
@@ -643,144 +782,88 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
                   onClick={() => setExportMode('daily')}
                   className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                     exportMode === 'daily'
-                      ? 'bg-emerald-800 text-white shadow-2xs'
+                      ? 'bg-[#072448] text-white shadow-2xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
-                  معاينة جدول اليوم الفعلي
+                  معاينة جدول اليوم
                 </button>
                 <button
                   type="button"
                   onClick={() => setExportMode('weekly')}
                   className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
                     exportMode === 'weekly'
-                      ? 'bg-amber-500 text-slate-950 shadow-2xs'
+                      ? 'bg-[#072448] text-white shadow-2xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
                   }`}
                 >
-                  معاينة جدول الأسبوع كاملاً
+                  معاينة جدول الأسبوع
                 </button>
               </div>
             </div>
 
             {/* ===================================================================== */}
-            {/* المعاينة 1: بوستر جدول العيادات المفتوحة في اليوم الفعلي فقط (Daily Poster) */}
+            {/* المعاينة 1: البوستر اليومي الكحلي الملكي (Daily Royal Navy Poster) */}
             {/* ===================================================================== */}
             {exportMode === 'daily' && (
-              <div className="overflow-x-auto pb-2">
+              <div className="overflow-x-auto pb-2 flex justify-center">
                 <div
                   ref={dailyPosterRef}
                   dir="rtl"
-                  className="min-w-[680px] bg-gradient-to-b from-[#F7FAF8] via-white to-[#F2F7F4] text-slate-900 rounded-3xl border-2 border-emerald-900/15 shadow-lg overflow-hidden"
+                  className="w-[740px] shrink-0 bg-[#f2f6fb] text-slate-900 shadow-xl overflow-hidden border border-[#06203f]/25"
                 >
-                  {/* الشريط الذهبي العلوي */}
-                  <div className="h-2.5 bg-gradient-to-l from-amber-400 via-amber-300 to-emerald-700" />
+                  {/* الهيدر الكحلي المنحني */}
+                  {renderPosterHeader(`جدول مواعيد الأطباء [يوم ${todayDayName}]`)}
 
-                  {/* ترويسة البوستر الفخمة */}
-                  <div className="bg-gradient-to-l from-[#03251C] via-[#064E3B] to-[#04392A] text-white p-6 sm:p-7 flex items-center justify-between gap-6 relative overflow-hidden">
-                    <div className="flex items-center gap-4 z-10">
-                      <div className="w-16 h-16 rounded-2xl bg-white/10 border-2 border-amber-400/60 flex items-center justify-center shadow-lg shrink-0">
-                        <Stethoscope className="w-8 h-8 text-amber-300" />
-                      </div>
-                      <div className="space-y-1">
-                        <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/40 text-amber-300 text-[11px] font-extrabold">
-                          <Sparkles className="w-3 h-3" />
-                          <span>مجمع عيادات الجمعية الشرعية التخصصية</span>
-                        </div>
-                        <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                          جدول العيادات المفتوحة والعاملة اليوم
-                        </h2>
-                        <p className="text-xs text-emerald-200 font-medium">
-                          بيان رسمي بالعيادات المتاحة لاستقبال المرضى في اليوم الفعلي فقط
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* بطاقة التاريخ الفعلي */}
-                    <div className="z-10 bg-white/10 backdrop-blur-md border border-amber-400/40 rounded-2xl px-4 py-3 text-center shrink-0 min-w-[175px]">
-                      <div className="text-[11px] font-bold text-amber-300">
-                        اليوم الفعلي للتشغيل
-                      </div>
-                      <div className="text-base font-black text-white mt-0.5">
-                        {todayFullArabic}
-                      </div>
-                      <div className="mt-1.5 pt-1.5 border-t border-white/15 flex items-center justify-between text-[11px] text-emerald-200 font-mono">
-                        <span>{actualTodayStr}</span>
-                        <span className="bg-emerald-500/30 text-emerald-100 px-2 py-0.5 rounded-full font-sans font-bold">
-                          {openDailyRows.length} عيادة عاملة
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* جسم جدول اليوم الفعلي */}
-                  <div className="p-6 space-y-5">
+                  {/* الجدول المسطر المتداخل مع الهيدر مثل الصورة المرجعية */}
+                  <div className="px-7 -mt-6 pb-7 relative z-20">
                     {openDailyRows.length === 0 ? (
-                      <div className="p-10 text-center rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 space-y-1">
-                        <p className="font-extrabold text-sm">
-                          لا توجد عيادات مفتوحة ومجدولة للعمل في هذا اليوم الفعلي ({todayDayName})
+                      <div className="p-10 text-center bg-white border-2 border-[#06203f] text-[#06203f] space-y-1 shadow-md">
+                        <p className="font-extrabold text-base">
+                          لا توجد عيادات مفتوحة ومجدولة للعمل في هذا اليوم ({todayDayName})
                         </p>
-                        <p className="text-xs text-amber-700">
-                          يمكنك فتح العيادات أو تعديل جدول أيام حضور الأطباء، أو تنزيل «جدول أيام الأسبوع كاملة».
+                        <p className="text-xs text-slate-600">
+                          يمكنك تفعيل العيادات من جدول تشغيل اليوم أو تحميل «جدول الأسبوع كاملاً».
                         </p>
                       </div>
                     ) : (
-                      <div className="rounded-2xl border border-emerald-900/15 overflow-hidden shadow-xs bg-white">
-                        <table className="w-full text-right border-collapse">
+                      <div className="border-2 border-[#06203f] shadow-md bg-white overflow-hidden">
+                        <table className="w-full text-center border-collapse">
                           <thead>
-                            <tr className="bg-[#073B2C] text-white text-xs font-extrabold">
-                              <th className="py-3.5 px-3 text-center w-12 text-amber-300">م</th>
-                              <th className="py-3.5 px-4">العيادة التخصصية</th>
-                              <th className="py-3.5 px-4">الطبيب المسؤول</th>
-                              <th className="py-3.5 px-4">مواعيد العمل اليوم</th>
-                              <th className="py-3.5 px-4 text-center">قيمة الكشف</th>
+                            <tr className="bg-[#06203f] text-white text-base font-black">
+                              <th className="py-3 px-3 border-l-2 border-white/75 w-[29%]">
+                                التخصص
+                              </th>
+                              <th className="py-3 px-3 border-l-2 border-white/75 w-[34%]">
+                                اسم الطبيب
+                              </th>
+                              <th className="py-3 px-3 border-l-2 border-white/75 w-[24%]">
+                                الموعد
+                              </th>
+                              <th className="py-3 px-2 w-[13%]">
+                                الكشف
+                              </th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-slate-200/80 text-xs">
+                          <tbody>
                             {openDailyRows.map((row, idx) => (
                               <tr
-                                key={row.clinicId}
-                                className={idx % 2 === 0 ? 'bg-white' : 'bg-[#F4F9F6]'}
+                                key={row.rowKey}
+                                className={`${
+                                  idx % 2 === 0 ? 'bg-[#e1eef8]' : 'bg-[#f1f7fc]'
+                                } border-t border-[#7fa3c7] text-[#071c35]`}
                               >
-                                <td className="py-4 px-3 text-center">
-                                  <span className="inline-flex items-center justify-center w-7 h-7 rounded-lg bg-emerald-900 text-amber-300 font-mono font-extrabold text-xs shadow-2xs">
-                                    {String(idx + 1).padStart(2, '0')}
-                                  </span>
+                                <td className="py-2.5 px-3 border-l border-[#7fa3c7] font-black text-[16px]">
+                                  {row.clinicName}
                                 </td>
-
-                                <td className="py-4 px-4">
-                                  <div className="font-extrabold text-sm text-slate-900">
-                                    {row.clinicName}
-                                  </div>
-                                  <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-1 font-medium">
-                                    <MapPin className="w-3 h-3 text-emerald-700 shrink-0" />
-                                    <span>{row.location}</span>
-                                    <span className="mx-1 text-slate-300">•</span>
-                                    <span className="text-emerald-700 font-bold">مفتوحة اليوم ✓</span>
-                                  </div>
+                                <td className="py-2.5 px-3 border-l border-[#7fa3c7] font-extrabold text-[16px]">
+                                  {row.doctorName}
                                 </td>
-
-                                <td className="py-4 px-4">
-                                  <div className="font-extrabold text-sm text-emerald-950 flex items-center gap-1.5">
-                                    <Stethoscope className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                                    <span>{row.doctorName}</span>
-                                  </div>
-                                  <div className="text-[11px] text-slate-500 mt-1 font-medium">
-                                    {row.doctorTitle}
-                                  </div>
+                                <td className="py-2.5 px-3 border-l border-[#7fa3c7] font-extrabold text-[15px]">
+                                  {row.timing}
                                 </td>
-
-                                <td className="py-4 px-4">
-                                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-extrabold text-xs">
-                                    <Clock className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                                    <span>{row.timing}</span>
-                                  </span>
-                                </td>
-
-                                <td className="py-4 px-4 text-center">
-                                  <span className="inline-flex items-center justify-center px-3 py-1 rounded-xl bg-amber-50 border border-amber-300/80 text-amber-900 font-mono font-extrabold text-xs">
-                                    {row.fee}
-                                  </span>
+                                <td className="py-2.5 px-2 font-black text-[15px] text-[#06203f]">
+                                  {row.fee}
                                 </td>
                               </tr>
                             ))}
@@ -788,226 +871,82 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
                         </table>
                       </div>
                     )}
-
-                    {/* تذييل البوستر اليومي */}
-                    <div className="bg-emerald-950/5 border border-emerald-900/10 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-                      <div className="flex items-center gap-2 text-slate-700 font-bold">
-                        <ShieldCheck className="w-4 h-4 text-emerald-800 shrink-0" />
-                        <span>مواعيد العمل الرسمية للمركز: {officialWorkingHours}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-[11px] text-slate-600 font-bold">
-                        <span>• الدخول بأولوية الحجز وتأكيد الخزينة</span>
-                        <span className="px-2.5 py-1 rounded-lg bg-emerald-900 text-amber-300 font-extrabold">
-                          معتمد • إدارة عيادات الجمعية الشرعية
-                        </span>
-                      </div>
-                    </div>
                   </div>
+
+                  {/* الفوتر الكحلي السفلي */}
+                  {renderPosterFooter()}
                 </div>
               </div>
             )}
 
             {/* ===================================================================== */}
-            {/* المعاينة 2: بوستر الجدول الأسبوعي الكامل لجميع أيام الأسبوع (Weekly Poster) */}
+            {/* المعاينة 2: البوستر الأسبوعي الكحلي الملكي (Weekly Royal Navy Poster) */}
             {/* ===================================================================== */}
             {exportMode === 'weekly' && (
-              <div className="overflow-x-auto pb-2">
+              <div className="overflow-x-auto pb-2 flex justify-center">
                 <div
                   ref={weeklyPosterRef}
                   dir="rtl"
-                  className="min-w-[760px] bg-gradient-to-b from-[#F7FAF8] via-white to-[#F2F7F4] text-slate-900 rounded-3xl border-2 border-emerald-900/15 shadow-lg overflow-hidden"
+                  className="w-[820px] shrink-0 bg-[#f2f6fb] text-slate-900 shadow-xl overflow-hidden border border-[#06203f]/25"
                 >
-                  {/* الشريط الذهبي العلوي */}
-                  <div className="h-2.5 bg-gradient-to-l from-amber-500 via-amber-300 to-emerald-800" />
+                  {/* الهيدر الكحلي المنحني */}
+                  {renderPosterHeader('جدول مواعيد الأطباء [الأسبوعي الشامل]')}
 
-                  {/* ترويسة البوستر الأسبوعي */}
-                  <div className="bg-gradient-to-l from-[#03251C] via-[#064E3B] to-[#04392A] text-white p-6 sm:p-7 flex items-center justify-between gap-6">
-                    <div className="flex items-center gap-4">
-                      <div className="w-16 h-16 rounded-2xl bg-amber-400/15 border-2 border-amber-400/70 flex items-center justify-center shadow-lg shrink-0">
-                        <CalendarDays className="w-8 h-8 text-amber-300" />
-                      </div>
-                      <div className="space-y-1">
-                        <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-amber-400/20 border border-amber-300/40 text-amber-300 text-[11px] font-extrabold">
-                          <Sparkles className="w-3 h-3" />
-                          <span>مجمع عيادات الجمعية الشرعية التخصصية</span>
-                        </div>
-                        <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                          الجدول الأسبوعي الشامل لعمل العيادات والأطباء
-                        </h2>
-                        <p className="text-xs text-emerald-200 font-medium">
-                          دليل مواعيد وأيام حضور الأطباء الاستشاريين والأخصائيين طوال أيام الأسبوع (السبت — الجمعة)
-                        </p>
-                      </div>
-                    </div>
-
-                    <div className="bg-white/10 backdrop-blur-md border border-amber-400/40 rounded-2xl px-4 py-3 text-center shrink-0 min-w-[175px]">
-                      <div className="text-[11px] font-bold text-amber-300">
-                        نطاق الجدول المعتمد
-                      </div>
-                      <div className="text-base font-black text-white mt-0.5">
-                        أيام الأسبوع كاملة
-                      </div>
-                      <div className="mt-1.5 pt-1.5 border-t border-white/15 flex items-center justify-between text-[11px] text-emerald-200">
-                        <span>7 أيام</span>
-                        <span className="bg-amber-400/25 text-amber-200 px-2 py-0.5 rounded-full font-bold">
-                          {weeklyClinicRows.length} عيادة تخصصية
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* القسم الأول: جدول العيادات ومصفوفة أيام الأسبوع السبعة */}
-                  <div className="p-6 space-y-6">
-                    <div className="rounded-2xl border border-emerald-900/15 overflow-hidden shadow-xs bg-white">
-                      <table className="w-full text-right border-collapse">
+                  {/* الجدول الأسبوعي الموحد بنفس التصميم المسطر الأنيق بدون الكروت الضخمة */}
+                  <div className="px-7 -mt-6 pb-7 relative z-20">
+                    <div className="border-2 border-[#06203f] shadow-md bg-white overflow-hidden">
+                      <table className="w-full text-center border-collapse">
                         <thead>
-                          <tr className="bg-[#073B2C] text-white text-xs font-extrabold">
-                            <th className="py-3.5 px-3.5">العيادة التخصصية</th>
-                            <th className="py-3.5 px-3.5">الطبيب المعالج</th>
-                            <th className="py-3.5 px-3.5 text-center">أيام الحضور الأسبوعية (السبت — الجمعة)</th>
-                            <th className="py-3.5 px-3.5">مواعيد المناوبة</th>
-                            <th className="py-3.5 px-3 text-center">الكشف</th>
+                          <tr className="bg-[#06203f] text-white text-[15px] font-black">
+                            <th className="py-3 px-3 border-l-2 border-white/75 w-[23%]">
+                              التخصص
+                            </th>
+                            <th className="py-3 px-3 border-l-2 border-white/75 w-[26%]">
+                              اسم الطبيب
+                            </th>
+                            <th className="py-3 px-2.5 border-l-2 border-white/75 w-[23%]">
+                              أيام العمل
+                            </th>
+                            <th className="py-3 px-2.5 border-l-2 border-white/75 w-[17%]">
+                              الموعد
+                            </th>
+                            <th className="py-3 px-2 w-[11%]">
+                              الكشف
+                            </th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-200/80 text-xs">
+                        <tbody>
                           {weeklyClinicRows.map((row, idx) => (
                             <tr
-                              key={`${row.clinicId}-${idx}`}
-                              className={idx % 2 === 0 ? 'bg-white' : 'bg-[#F4F9F6]'}
+                              key={row.rowKey}
+                              className={`${
+                                idx % 2 === 0 ? 'bg-[#e1eef8]' : 'bg-[#f1f7fc]'
+                              } border-t border-[#7fa3c7] text-[#071c35]`}
                             >
-                              <td className="py-4 px-3.5">
-                                <div className="font-extrabold text-sm text-slate-900">
-                                  {row.clinicName}
-                                </div>
-                                <div className="text-[11px] text-slate-500 flex items-center gap-1 mt-1 font-medium">
-                                  <MapPin className="w-3 h-3 text-emerald-700 shrink-0" />
-                                  <span>{row.location}</span>
-                                </div>
+                              <td className="py-2.5 px-3 border-l border-[#7fa3c7] font-black text-[15px]">
+                                {row.clinicName}
                               </td>
-
-                              <td className="py-4 px-3.5">
-                                <div className="font-extrabold text-sm text-emerald-950 flex items-center gap-1.5">
-                                  <Stethoscope className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                                  <span>{row.doctorName}</span>
-                                </div>
-                                <div className="text-[11px] text-slate-500 mt-1 font-medium">
-                                  {row.doctorTitle}
-                                </div>
+                              <td className="py-2.5 px-3 border-l border-[#7fa3c7] font-extrabold text-[15px]">
+                                {row.doctorName}
                               </td>
-
-                              {/* شريط أيام الأسبوع السبعة البصري */}
-                              <td className="py-4 px-3.5">
-                                <div className="flex items-center justify-center gap-1 flex-wrap">
-                                  {ARABIC_DAYS.map(day => {
-                                    const isWorking = row.workingDays.includes(day);
-                                    return (
-                                      <span
-                                        key={day}
-                                        className={`px-2 py-1 rounded-lg text-[11px] font-extrabold flex items-center gap-0.5 border ${
-                                          isWorking
-                                            ? 'bg-emerald-800 text-white border-emerald-900 shadow-2xs'
-                                            : 'bg-slate-100 text-slate-400 border-slate-200/80 opacity-65'
-                                        }`}
-                                      >
-                                        {isWorking && <Check className="w-3 h-3 text-amber-300 stroke-[3]" />}
-                                        <span>{day}</span>
-                                      </span>
-                                    );
-                                  })}
-                                </div>
+                              <td className="py-2.5 px-2.5 border-l border-[#7fa3c7] font-bold text-[13px] text-[#0b3160]">
+                                {row.workingDaysText}
                               </td>
-
-                              <td className="py-4 px-3.5">
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-extrabold text-[11px]">
-                                  <Clock className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
-                                  <span>{row.timing}</span>
-                                </span>
+                              <td className="py-2.5 px-2.5 border-l border-[#7fa3c7] font-extrabold text-[14px]">
+                                {row.timing}
                               </td>
-
-                              <td className="py-4 px-3 text-center">
-                                <span className="inline-flex items-center justify-center px-2.5 py-1 rounded-xl bg-amber-50 border border-amber-300/80 text-amber-900 font-mono font-extrabold text-xs">
-                                  {row.fee}
-                                </span>
+                              <td className="py-2.5 px-2 font-black text-[14px] text-[#06203f]">
+                                {row.fee}
                               </td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-
-                    {/* القسم الثاني: خريطة العيادات العاملة موزعة حسب كل يوم من أيام الأسبوع */}
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <h4 className="font-extrabold text-xs text-emerald-950 flex items-center gap-1.5">
-                          <Calendar className="w-4 h-4 text-emerald-700" />
-                          <span>توزيع العيادات العاملة حسب أيام الأسبوع:</span>
-                        </h4>
-                        <span className="text-[11px] text-slate-500 font-medium">
-                          يُفتح باب الحجز إلكترونياً وحضورياً في صباح نفس يوم العيادة
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2.5">
-                        {weeklyByDay.map(dayGroup => (
-                          <div
-                            key={dayGroup.dayName}
-                            className={`rounded-2xl border p-3 flex flex-col justify-between space-y-2 ${
-                              dayGroup.clinics.length > 0
-                                ? 'bg-white border-emerald-200 shadow-2xs'
-                                : 'bg-slate-50 border-slate-200 opacity-75'
-                            }`}
-                          >
-                            <div className="space-y-2">
-                              <div className="flex items-center justify-between pb-1.5 border-b border-slate-100">
-                                <span className="font-black text-xs text-emerald-950">
-                                  {dayGroup.dayName}
-                                </span>
-                                <span className="text-[10px] font-extrabold px-1.5 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
-                                  {dayGroup.clinics.length} عيادة
-                                </span>
-                              </div>
-
-                              {dayGroup.clinics.length === 0 ? (
-                                <div className="text-[11px] text-slate-400 py-3 text-center font-medium">
-                                  إجازة أسبوعية
-                                </div>
-                              ) : (
-                                <div className="space-y-1.5">
-                                  {dayGroup.clinics.map((c, i) => (
-                                    <div
-                                      key={i}
-                                      className="p-1.5 rounded-xl bg-[#F4F9F6] border border-emerald-100 text-[10px] space-y-0.5"
-                                    >
-                                      <div className="font-extrabold text-slate-900 leading-snug">
-                                        {c.clinicName.replace('عيادة ', '')}
-                                      </div>
-                                      <div className="text-emerald-800 font-bold truncate">
-                                        {c.doctorName}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* تذييل البوستر الأسبوعي */}
-                    <div className="bg-emerald-950/5 border border-emerald-900/10 rounded-2xl p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-                      <div className="flex items-center gap-2 text-slate-700 font-bold">
-                        <ShieldCheck className="w-4 h-4 text-emerald-800 shrink-0" />
-                        <span>مواعيد العمل الرسمية للمركز: {officialWorkingHours}</span>
-                      </div>
-                      <div className="flex items-center gap-3 text-[11px] text-slate-600 font-bold">
-                        <span>• الحجز متاح في صباح يوم تواجد العيادة</span>
-                        <span className="px-2.5 py-1 rounded-lg bg-emerald-900 text-amber-300 font-extrabold">
-                          الجدول الأسبوعي المعتمد • عيادات الجمعية الشرعية
-                        </span>
-                      </div>
-                    </div>
                   </div>
+
+                  {/* الفوتر الكحلي السفلي */}
+                  {renderPosterFooter()}
                 </div>
               </div>
             )}
@@ -1017,7 +956,7 @@ export const DailyScheduleExportModal: React.FC<DailyScheduleExportModalProps> =
           {/* تذييل النافذة */}
           <div className="p-4 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
             <span className="text-[11px] text-slate-500 dark:text-slate-400">
-              يتم تصدير الصور بجودة فائقة الوضوح (3x Ultra HD PNG) جاهزة للطباعة أو النشر على واتساب وفيسبوك
+              يتم تصدير البوستر بدقة (3x Ultra HD PNG) جاهز للنشر المباشر على فيسبوك وواتساب أو الطباعة
             </span>
             <button
               type="button"
