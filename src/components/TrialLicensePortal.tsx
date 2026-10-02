@@ -39,6 +39,13 @@ import {
   HardDriveUpload,
   FolderDown,
   FolderUp,
+  Maximize2,
+  Minimize2,
+  Key,
+  Zap,
+  Activity,
+  CheckCheck,
+  RotateCcw,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -46,6 +53,7 @@ import {
   BlockedSecurityEntity,
   SecurityIntrusionAttempt,
   DeveloperBroadcastMessage,
+  GeneratedLicenseKey,
 } from '../types';
 import {
   verifySecretDeveloperCredentials,
@@ -53,6 +61,8 @@ import {
   fetchVisitorNetworkIdentity,
   checkClockRollbackTamper,
   DMCA_OWNERSHIP_CERTIFICATE_ID,
+  generateSignedLicenseKey,
+  verifySignedLicenseKey,
   saveBookings,
   saveClinics,
   saveDoctors,
@@ -68,7 +78,7 @@ import {
   saveFinanceLedgerToDb,
   saveInsuranceContractsToDb,
 } from '../services/supabaseService';
-import { isSupabaseConfigured } from '../services/supabaseClient';
+import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
 
 // حفظ المراجع الأصلية لدوال الكونسول قبل تعطيلها لإمكانية استعادتها عند رغبة المطور
 const ORIGINAL_CONSOLE = {
@@ -447,8 +457,76 @@ export const TrialLicensePortal: React.FC = () => {
   );
 
   const [activePortalTab, setActivePortalTab] = useState<
-    'license' | 'archive' | 'demo' | 'shields' | 'devices' | 'purge'
+    'license' | 'keys' | 'archive' | 'demo' | 'shields' | 'devices' | 'purge'
   >('license');
+
+  // وضع الشاشة الكاملة وسرعة الاتصال اللحظية بالسيرفر
+  const [isFullScreen, setIsFullScreen] = useState(false);
+  const [serverPingMs, setServerPingMs] = useState<number | null>(null);
+
+  // حالات مولد مفاتيح التراخيص المشفرة
+  const [keyGenType, setKeyGenType] = useState<'trial_extension' | 'permanent' | 'emergency'>('trial_extension');
+  const [keyGenDays, setKeyGenDays] = useState<number>(30);
+  const [keyGenLabel, setKeyGenLabel] = useState<string>('تجديد ترخيص عيادات الجمعية الشرعية بأوسيم');
+  const [keyGenDomain, setKeyGenDomain] = useState<string>('');
+  const [recentlyGeneratedKey, setRecentlyGeneratedKey] = useState<GeneratedLicenseKey | null>(null);
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
+
+  // حالات تفعيل الترخيص عبر الكود (Redeem License Key Modal)
+  const [redeemModalOpen, setRedeemModalOpen] = useState(false);
+  const [redeemKeyInput, setRedeemKeyInput] = useState('');
+  const [redeemLoading, setRedeemLoading] = useState(false);
+  const [redeemError, setRedeemError] = useState('');
+  const [redeemSuccessMsg, setRedeemSuccessMsg] = useState('');
+
+  // استماع لحدث الشاشة الكاملة
+  useEffect(() => {
+    const handleFsChange = () => {
+      setIsFullScreen(Boolean(document.fullscreenElement));
+    };
+    document.addEventListener('fullscreenchange', handleFsChange);
+    return () => document.removeEventListener('fullscreenchange', handleFsChange);
+  }, []);
+
+  const toggleFullScreen = async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        setIsFullScreen(true);
+      } else {
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+          setIsFullScreen(false);
+        }
+      }
+    } catch {}
+  };
+
+  // قياس سرعة الاتصال بالسيرفر السحابي كل 18 ثانية
+  useEffect(() => {
+    let isMounted = true;
+    const checkPing = async () => {
+      const t0 = performance.now();
+      try {
+        if (isSupabaseConfigured) {
+          await supabase.from('clinics').select('id').limit(1);
+        } else {
+          await fetch('/manifest.webmanifest', { cache: 'no-store' });
+        }
+        const diff = Math.round(performance.now() - t0);
+        if (isMounted) setServerPingMs(diff);
+      } catch {
+        if (isMounted) setServerPingMs(null);
+      }
+    };
+    checkPing();
+    const interval = window.setInterval(checkPing, 18000);
+    return () => {
+      isMounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
   const [keepRecentDaysInput, setKeepRecentDaysInput] = useState<string>(
     String(trialLicenseConfig.keepRecentDaysDefault || 10)
   );
@@ -739,6 +817,145 @@ export const TrialLicensePortal: React.FC = () => {
     };
     setDraftConfig(nextConfig);
     await handleSaveConfig(nextConfig);
+  };
+
+  // توليد مفتاح ترخيص جديد مشفر
+  const handleGenerateKeySubmit = async () => {
+    try {
+      const newKey = generateSignedLicenseKey(
+        keyGenType,
+        keyGenDays,
+        keyGenLabel,
+        keyGenDomain
+      );
+      const existingKeys = Array.isArray(draftConfig.generatedLicenseKeys)
+        ? draftConfig.generatedLicenseKeys
+        : [];
+      const updatedKeys = [newKey, ...existingKeys].slice(0, 80);
+      const nextConfig: SystemTrialLicenseConfig = {
+        ...draftConfig,
+        generatedLicenseKeys: updatedKeys,
+      };
+      setDraftConfig(nextConfig);
+      await handleSaveConfig(nextConfig);
+      setRecentlyGeneratedKey(newKey);
+      addToast({
+        type: 'success',
+        title: 'تم توليد كود الترخيص المشفر بنجاح 🔑',
+        message: `الكود: ${newKey.keyCode} جاهز للإرسال للعميل.`,
+      });
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'فشل التوليد',
+        message: 'حدث خطأ أثناء توليد مفتاح الترخيص المشفر.',
+      });
+    }
+  };
+
+  const handleCopyKey = (code: string, id: string) => {
+    try {
+      navigator.clipboard.writeText(code);
+      setCopiedKeyId(id);
+      setTimeout(() => setCopiedKeyId(null), 3000);
+      addToast({
+        type: 'info',
+        title: 'تم نسخ الكود للحافظة',
+        message: code,
+      });
+    } catch {}
+  };
+
+  // معالجة تفعيل كود الترخيص (من شاشة القفل أو البانر أو البوابة)
+  const handleRedeemKeySubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setRedeemError('');
+    setRedeemSuccessMsg('');
+
+    const code = redeemKeyInput.trim().toUpperCase();
+    if (!code) {
+      setRedeemError('يرجى كتابة أو لصق كود الترخيص');
+      return;
+    }
+
+    setRedeemLoading(true);
+    try {
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+      const usedKeys = Array.isArray(trialLicenseConfig.usedLicenseKeyCodes)
+        ? trialLicenseConfig.usedLicenseKeyCodes
+        : [];
+      const verification = verifySignedLicenseKey(code, usedKeys, currentHost);
+
+      if (!verification.valid || !verification.type) {
+        setRedeemError(verification.error || 'كود الترخيص غير صالح أو غير معتمد');
+        setRedeemLoading(false);
+        return;
+      }
+
+      // حساب التمديد أو التفعيل الدائم
+      let nextMode: 'trial' | 'permanent' | 'locked' = trialLicenseConfig.mode;
+      let nextExpiresAt = trialLicenseConfig.expiresAt;
+      const durationDays = verification.durationDays || 30;
+
+      if (verification.type === 'permanent') {
+        nextMode = 'permanent';
+        const farFuture = new Date(Date.now() + 3650 * 24 * 60 * 60 * 1000);
+        nextExpiresAt = farFuture.toISOString();
+      } else {
+        nextMode = 'trial';
+        const currentExpMs = new Date(trialLicenseConfig.expiresAt).getTime();
+        const baseMs = Math.max(Date.now(), Number.isFinite(currentExpMs) ? currentExpMs : Date.now());
+        const extendedDate = new Date(baseMs + durationDays * 24 * 60 * 60 * 1000);
+        nextExpiresAt = extendedDate.toISOString();
+      }
+
+      // حرق الكود سحابياً لمنع استخدامه مرة أخرى
+      const updatedUsedCodes = [code, ...usedKeys];
+      const updatedKeysList = (trialLicenseConfig.generatedLicenseKeys || []).map((k) =>
+        k.keyCode === code
+          ? {
+              ...k,
+              isRedeemed: true,
+              redeemedAt: new Date().toISOString(),
+              redeemedBy: currentUser ? `${currentUser.displayName} (${currentUser.username})` : 'مستخدم عبر شاشة التفعيل',
+            }
+          : k
+      );
+
+      const nextConfig: SystemTrialLicenseConfig = {
+        ...trialLicenseConfig,
+        mode: nextMode,
+        expiresAt: nextExpiresAt,
+        usedLicenseKeyCodes: updatedUsedCodes,
+        generatedLicenseKeys: updatedKeysList,
+        updatedAt: new Date().toISOString(),
+      };
+
+      const ok = await updateTrialLicenseConfig(nextConfig);
+      if (ok) {
+        setRedeemSuccessMsg(
+          verification.type === 'permanent'
+            ? 'مبروك! تم اعتماد وتفعيل الترخيص الدائم غير المحدود مدى الحياة بنجاح 👑'
+            : `مبروك! تم تفعيل كود الترخيص وتمديد عمل المنظومة بنجاح لمدة ${durationDays} يوم إضافية ✨`
+        );
+        addToast({
+          type: 'success',
+          title: 'تم تفعيل كود الترخيص بنجاح',
+          message: verification.label || 'تم تحديث ترخيص المنظومة بنجاح.',
+        });
+        setTimeout(() => {
+          setRedeemModalOpen(false);
+          setRedeemKeyInput('');
+          setRedeemSuccessMsg('');
+        }, 2200);
+      } else {
+        setRedeemError('تعذر حفظ التفعيل السحابي، يرجى التحقق من اتصال الإنترنت');
+      }
+    } catch (err: any) {
+      setRedeemError('حدث خطأ غير متوقع أثناء معالجة كود الترخيص');
+    } finally {
+      setRedeemLoading(false);
+    }
   };
 
   const handleQuickPurgeTrialData = async () => {
@@ -1037,9 +1254,31 @@ export const TrialLicensePortal: React.FC = () => {
   const cutoffDateStr = new Date(cutoffTimeMs).toISOString().slice(0, 10);
   const eligibleForArchiveCount = bookings.filter((b) => b.date < cutoffDateStr).length;
   const preservedRecentBookingsCount = bookings.filter((b) => b.date >= cutoffDateStr).length;
-  const estimatedDbSizeKb = Math.round(
-    bookings.length * 1.2 + clinics.length * 0.8 + doctors.length * 0.9 + 50
+
+  // تفصيل وحسابات استهلاك قاعدة بيانات Supabase الحية بالمللي بايت
+  const estimatedBookingsKb = Math.round(bookings.length * 1.8);
+  const estimatedHandoversKb = Math.round((shiftHandovers?.length || 0) * 1.4);
+  const estimatedExpensesKb = Math.round((financeLedger?.expenses?.length || 0) * 1.2);
+  const estimatedLogsKb = Math.round((draftConfig.intrusionLogs?.length || 0) * 2.2);
+  const estimatedConfigKb = 55;
+  const totalEstimatedDbKb =
+    estimatedBookingsKb + estimatedHandoversKb + estimatedExpensesKb + estimatedLogsKb + estimatedConfigKb;
+  const totalEstimatedDbMb = (totalEstimatedDbKb / 1024).toFixed(2);
+  const maxQuotaMb = 500;
+  const quotaPercentage = Math.min(
+    100,
+    Math.max(0.1, Number(((Number(totalEstimatedDbMb) / maxQuotaMb) * 100).toFixed(2)))
   );
+
+  const recentBookingsIn7Days = bookings.filter((b) => {
+    const t = new Date(b.createdAt || b.date).getTime();
+    return !isNaN(t) && Date.now() - t < 7 * 24 * 60 * 60 * 1000;
+  }).length;
+  const dailyRate = Math.max(1, Math.round(recentBookingsIn7Days / 7) || 12);
+  const kbRemaining = maxQuotaMb * 1024 - totalEstimatedDbKb;
+  const estimatedDaysUntilFull = Math.max(1, Math.round(kbRemaining / (dailyRate * 1.8)));
+  const estimatedYearsUntilFull = (estimatedDaysUntilFull / 365).toFixed(1);
+  const estimatedDbSizeKb = totalEstimatedDbKb;
 
   return (
     <>
@@ -1408,6 +1647,20 @@ export const TrialLicensePortal: React.FC = () => {
                 })}
                 )
               </span>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setRedeemKeyInput('');
+                  setRedeemError('');
+                  setRedeemSuccessMsg('');
+                  setRedeemModalOpen(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-200 border border-emerald-400/50 text-[11px] font-black transition-all shrink-0 shadow-xs"
+              >
+                <Key className="w-3.5 h-3.5 text-emerald-300" />
+                <span>تفعيل كود ترخيص 🔑</span>
+              </button>
             </div>
           </div>
         </div>
@@ -1459,7 +1712,21 @@ export const TrialLicensePortal: React.FC = () => {
                 </div>
               )}
 
-              <div className="pt-4 border-t border-white/10 flex items-center justify-center">
+              <div className="pt-4 border-t border-white/10 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRedeemKeyInput('');
+                    setRedeemError('');
+                    setRedeemSuccessMsg('');
+                    setRedeemModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-lg transition-all scale-105"
+                >
+                  <Key className="w-4 h-4 text-emerald-200" />
+                  <span>إدخال كود التفعيل والترخيص 🔑</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => {
@@ -1468,13 +1735,125 @@ export const TrialLicensePortal: React.FC = () => {
                     setUnlockError('');
                     setUnlockModalOpen(true);
                   }}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-bold transition-all"
+                  className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white border border-white/10 text-xs font-bold transition-all"
                 >
                   <KeyRound className="w-3.5 h-3.5 text-amber-400" />
-                  <span>بوابة التفعيل واعتماد الترخيص</span>
+                  <span>بوابة المطور 🔑</span>
                 </button>
               </div>
             </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 2-ب. نافذة إدخال وتفعيل كود الترخيص المشفر للعميل أو الإدارة */}
+      <AnimatePresence>
+        {redeemModalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9999] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 no-print"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0, y: 10 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 10 }}
+              className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-lg w-full p-6 sm:p-7 shadow-2xl space-y-5 text-right"
+            >
+              <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-emerald-500/20 to-teal-500/20 border border-emerald-500/30 text-emerald-400 flex items-center justify-center shrink-0">
+                    <Key className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="font-black text-slate-900 dark:text-white text-base">
+                      تفعيل كود وترخيص المنظومة 🔑
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      أدخل كود الترخيص الرقمي المعتمد من مسؤول تطوير النظام
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setRedeemModalOpen(false)}
+                  className="p-2 rounded-xl text-slate-400 hover:text-slate-600 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {redeemError && (
+                <div className="p-3.5 rounded-xl bg-rose-50 dark:bg-rose-900/30 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0" />
+                  <span>{redeemError}</span>
+                </div>
+              )}
+
+              {redeemSuccessMsg ? (
+                <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-300 dark:border-emerald-700 text-center space-y-2">
+                  <div className="w-12 h-12 rounded-full bg-emerald-500 text-white flex items-center justify-center mx-auto shadow-lg">
+                    <CheckCheck className="w-7 h-7" />
+                  </div>
+                  <h4 className="font-black text-emerald-800 dark:text-emerald-200 text-sm">
+                    {redeemSuccessMsg}
+                  </h4>
+                  <p className="text-xs text-emerald-700 dark:text-emerald-300">
+                    جاري تحديث المنظومة والمزامنة السحابية تلقائياً...
+                  </p>
+                </div>
+              ) : (
+                <form onSubmit={handleRedeemKeySubmit} className="space-y-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-extrabold text-slate-700 dark:text-slate-300">
+                      كود الترخيص الرقمي (License Key):
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={redeemKeyInput}
+                        onChange={(e) => setRedeemKeyInput(e.target.value.toUpperCase())}
+                        placeholder="SHR-EXT-030D-XXXX-YYYY"
+                        dir="ltr"
+                        autoFocus
+                        className="w-full px-4 py-3 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-sm font-mono font-bold tracking-wider focus:outline-none focus:ring-2 focus:ring-emerald-500 uppercase text-center"
+                      />
+                    </div>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                      * الكود مكون من 5 مقاطع يبدأ بـ SHR ويتم التحقق من ختمه الرقمي سحابياً.
+                    </p>
+                  </div>
+
+                  <div className="pt-2 flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setRedeemModalOpen(false)}
+                      className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={redeemLoading || !redeemKeyInput.trim()}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white text-xs font-black shadow-md transition-all flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {redeemLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>جاري التحقق والتفعيل...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4 text-amber-300" />
+                          <span>تفعيل الترخيص فوراً</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -1621,14 +2000,34 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => setIsDeveloperPortalOpen(false)}
-                  className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-colors shrink-0"
-                  title="إغلاق البوابة السرية"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+                <div className="flex items-center gap-2">
+                  <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/25 border border-white/10 text-[11px] font-bold text-slate-200">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span>{serverPingMs ? `${serverPingMs}ms` : 'متصل'}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={toggleFullScreen}
+                    className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-colors shrink-0"
+                    title={isFullScreen ? 'الخروج من الشاشة الكاملة (Esc)' : 'وضع الشاشة الكاملة (HUD)'}
+                  >
+                    {isFullScreen ? (
+                      <Minimize2 className="w-4 h-4 text-amber-300" />
+                    ) : (
+                      <Maximize2 className="w-4 h-4 text-slate-200" />
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsDeveloperPortalOpen(false)}
+                    className="p-2 rounded-xl bg-white/10 hover:bg-white/20 text-white transition-colors shrink-0"
+                    title="إغلاق البوابة السرية"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
               </div>
 
               {/* شريط التبويبات فائق السرعة والمصمم لسرعة التبديل والتنقل الفوري 0ms */}
@@ -1649,6 +2048,15 @@ export const TrialLicensePortal: React.FC = () => {
                         : isSystemLocked
                         ? 'bg-rose-600 text-white'
                         : 'bg-amber-600 text-white',
+                  },
+                  {
+                    id: 'keys',
+                    label: '🔑 مولد التراخيص',
+                    badge:
+                      (draftConfig.generatedLicenseKeys || []).length > 0
+                        ? `${(draftConfig.generatedLicenseKeys || []).length}`
+                        : undefined,
+                    badgeColor: 'bg-violet-600 text-white',
                   },
                   {
                     id: 'archive',
@@ -1756,6 +2164,96 @@ export const TrialLicensePortal: React.FC = () => {
                     <div className="text-[11px] text-slate-400">
                       جهازك الحالي كمطور: <code className="font-bold">{myDeviceHw.fingerprintId}</code> • IP:{' '}
                       <code className="font-bold">{myNetworkInfo.ip}</code> (مستثنى دائماً)
+                    </div>
+                  </div>
+                </div>
+
+                {/* كارت مراقبة مساحة قاعدة البيانات اللحظية واستهلاك سوبابيز (Supabase Live Storage Meter) */}
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-gradient-to-r from-slate-900 via-slate-950 to-slate-900 text-white p-4 sm:p-5 shadow-sm space-y-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                        <Database className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <div className="text-xs font-black text-white flex items-center gap-2">
+                          <span>مساحة تخزين Supabase المستهلكة (Live Database Meter)</span>
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            {quotaPercentage}% مستهلك
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          باقة مجانية 500 MB دائمة • متبقي {estimatedYearsUntilFull} سنة بالمعدل الحالي
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setActivePortalTab('archive')}
+                        className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-bold transition-all border border-white/10"
+                      >
+                        إدارة الأرشيف والتفريغ 💾
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* شريط الاستهلاك التفاعلي */}
+                  <div className="space-y-1.5">
+                    <div className="h-3 w-full bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700">
+                      <div
+                        className={`h-full rounded-full transition-all duration-500 ${
+                          quotaPercentage > 85
+                            ? 'bg-rose-500 shadow-rose-500/50'
+                            : quotaPercentage > 70
+                            ? 'bg-amber-500 shadow-amber-500/50'
+                            : 'bg-gradient-to-r from-emerald-500 to-teal-400 shadow-emerald-500/50'
+                        }`}
+                        style={{ width: `${Math.max(1, quotaPercentage)}%` }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-400 flex-wrap gap-2">
+                      <div className="flex items-center gap-3">
+                        <span>
+                          المستهلك: <strong className="text-white">{totalEstimatedDbMb} MB</strong> ({totalEstimatedDbKb.toLocaleString()} KB)
+                        </span>
+                        <span className="text-slate-600 dark:text-slate-500">•</span>
+                        <span>
+                          السعة المجانية: <strong className="text-white">{maxQuotaMb} MB</strong>
+                        </span>
+                      </div>
+                      <div className="text-emerald-400 font-bold">
+                        🟢 مساحة فارغة آمنة: {(maxQuotaMb - Number(totalEstimatedDbMb)).toFixed(1)} MB
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* تفاصيل استهلاك الجداول */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-800/80 text-[11px]">
+                    <div className="bg-white/5 rounded-xl p-2">
+                      <div className="text-slate-400">سجلات الحجوزات:</div>
+                      <div className="font-extrabold text-white">
+                        {bookings.length} حجز (~{estimatedBookingsKb} KB)
+                      </div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-2">
+                      <div className="text-slate-400">شيفتات الاستقبال:</div>
+                      <div className="font-extrabold text-white">
+                        {shiftHandovers?.length || 0} شفت (~{estimatedHandoversKb} KB)
+                      </div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-2">
+                      <div className="text-slate-400">سجلات الخزينة:</div>
+                      <div className="font-extrabold text-white">
+                        {financeLedger?.expenses?.length || 0} مصروف (~{estimatedExpensesKb} KB)
+                      </div>
+                    </div>
+                    <div className="bg-white/5 rounded-xl p-2">
+                      <div className="text-slate-400">رادار الأمان والمحاولات:</div>
+                      <div className="font-extrabold text-white">
+                        {draftConfig.intrusionLogs?.length || 0} محاولة (~{estimatedLogsKb} KB)
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1988,6 +2486,35 @@ export const TrialLicensePortal: React.FC = () => {
                             </button>
                             <button
                               type="button"
+                              onClick={() => shiftCurrentExpiry(720)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 text-[11px] font-extrabold"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>+30 يوم (شهر)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => shiftCurrentExpiry(2160)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-100 hover:bg-emerald-200 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-700 text-[11px] font-extrabold"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>+90 يوم (3 شهور)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  mode: 'permanent',
+                                }));
+                              }}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/60 text-amber-900 dark:text-amber-200 border border-amber-300 dark:border-amber-700 text-[11px] font-black"
+                            >
+                              <Sparkles className="w-3 h-3 text-amber-500" />
+                              <span>تحويل لترخيص دائم 👑</span>
+                            </button>
+                            <button
+                              type="button"
                               onClick={() => shiftCurrentExpiry(-24)}
                               className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[11px] font-bold"
                             >
@@ -1997,6 +2524,294 @@ export const TrialLicensePortal: React.FC = () => {
                           </div>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 1-ب. تبويب مولد ومخزن مفاتيح وتراخيص التفعيل المشفرة */}
+                {activePortalTab === 'keys' && (
+                  <div className="space-y-6">
+                    {/* بانر القسم */}
+                    <div className="rounded-2xl border-2 border-violet-500/40 bg-gradient-to-br from-[#12082b] via-[#1a0f3c] to-[#0a051d] text-white p-5 sm:p-6 space-y-3 shadow-lg">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-violet-500/20 border border-violet-400/40 text-violet-300 flex items-center justify-center shrink-0 shadow-inner">
+                          <Key className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="text-base sm:text-lg font-black text-white">
+                              مركز توليد وإدارة مفاتيح التراخيص المشفرة (Cryptographic Key Vault)
+                            </h3>
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-violet-500/20 text-violet-300 border border-violet-400/40">
+                              SHA-256 HMAC Signed Keys
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                            توليد أكواد ترخيص مشفرة وموقعة رقمياً بختم مطور النظام. ترسلها للمركز أو العميل لتفعيل المنظومة عن بُعد فور استلام الرسوم دون إعطائهم أي بيانات سرية.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* كارت توليد كود ترخيص جديد */}
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 sm:p-6 space-y-5 shadow-sm">
+                      <h4 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                        <Zap className="w-4 h-4 text-violet-500" />
+                        <span>1. إعداد وتوليد كود ترخيص جديد</span>
+                      </h4>
+
+                      <div className="space-y-4">
+                        {/* نوع الترخيص */}
+                        <div>
+                          <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300 mb-2">
+                            نوع الترخيص المستهدف:
+                          </label>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                            {[
+                              {
+                                type: 'trial_extension',
+                                title: '⏳ تمديد فترة تجريبية',
+                                desc: 'إضافة عدد محدد من الأيام للترخيص',
+                              },
+                              {
+                                type: 'permanent',
+                                title: '👑 ترخيص دائم مدى الحياة',
+                                desc: 'إلغاء جميع القيود الزمنية نهائياً',
+                              },
+                              {
+                                type: 'emergency',
+                                title: '⚡ ترخيص طوارئ استثنائي',
+                                desc: 'تمديد مؤقت لمدة سريعة لحل مشكلة',
+                              },
+                            ].map((item) => (
+                              <button
+                                key={item.type}
+                                type="button"
+                                onClick={() => setKeyGenType(item.type as any)}
+                                className={`p-3 rounded-xl border-2 text-right transition-all flex flex-col gap-1 ${
+                                  keyGenType === item.type
+                                    ? 'border-violet-500 bg-violet-50/70 dark:bg-violet-950/40 shadow-xs'
+                                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                                }`}
+                              >
+                                <div className="font-extrabold text-xs text-slate-900 dark:text-white">
+                                  {item.title}
+                                </div>
+                                <div className="text-[10px] text-slate-500 dark:text-slate-400">
+                                  {item.desc}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* المدة إذا كان تمديداً */}
+                        {keyGenType !== 'permanent' && (
+                          <div className="space-y-2">
+                            <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300">
+                              مدة الترخيص (بالأيام):
+                            </label>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {[
+                                { label: '30 يوم (شهر)', days: 30 },
+                                { label: '60 يوم (شهرين)', days: 60 },
+                                { label: '90 يوم (3 شهور)', days: 90 },
+                                { label: '180 يوم (6 شهور)', days: 180 },
+                                { label: '365 يوم (سنة)', days: 365 },
+                              ].map((preset) => (
+                                <button
+                                  key={preset.days}
+                                  type="button"
+                                  onClick={() => setKeyGenDays(preset.days)}
+                                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                                    keyGenDays === preset.days
+                                      ? 'bg-violet-600 text-white shadow-xs'
+                                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200'
+                                  }`}
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
+
+                              <div className="flex items-center gap-1.5 ms-auto">
+                                <span className="text-xs text-slate-500">أيام مخصصة:</span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={3650}
+                                  value={keyGenDays}
+                                  onChange={(e) => setKeyGenDays(Math.max(1, Number(e.target.value) || 1))}
+                                  className="w-20 px-2 py-1 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-bold text-center"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* اسم العميل / سبب الصدور */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300 mb-1">
+                              اسم المستفيد / جهة الترخيص:
+                            </label>
+                            <input
+                              type="text"
+                              value={keyGenLabel}
+                              onChange={(e) => setKeyGenLabel(e.target.value)}
+                              placeholder="مثال: عيادات الجمعية الشرعية بأوسيم — اشتراك الربع الأول"
+                              className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-medium"
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300 mb-1">
+                              حصر الكود على دومين محدد (اختياري):
+                            </label>
+                            <input
+                              type="text"
+                              value={keyGenDomain}
+                              onChange={(e) => setKeyGenDomain(e.target.value.toLowerCase())}
+                              placeholder="اتركه فارغاً لأي دومين، أو اكتب (sharaya-clinics.com)"
+                              dir="ltr"
+                              className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-mono font-medium"
+                            />
+                          </div>
+                        </div>
+
+                        {/* زر التوليد الفوري */}
+                        <div className="pt-2 flex items-center justify-between flex-wrap gap-3">
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            * المفتاح مشفر برمجياً وموقع برقم أمان سري، ولا يمكن استخدامه سوى مرة واحدة.
+                          </p>
+
+                          <button
+                            type="button"
+                            onClick={handleGenerateKeySubmit}
+                            className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white text-xs font-black shadow-md transition-all flex items-center gap-2"
+                          >
+                            <Zap className="w-4 h-4 text-amber-300" />
+                            <span>توليد كود التفعيل المشفر الآن ⚡</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* كارت الكود المولد حديثاً */}
+                    {recentlyGeneratedKey && (
+                      <div className="rounded-2xl border-2 border-emerald-500/50 bg-gradient-to-br from-emerald-950/40 via-slate-900 to-slate-950 p-5 sm:p-6 space-y-4 shadow-xl">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center gap-2 text-emerald-400 font-extrabold text-sm">
+                            <CheckCheck className="w-5 h-5" />
+                            <span>تم توليد كود ترخيص جديد بنجاح! جاهز للإرسال للعميل:</span>
+                          </div>
+                          <span className="text-xs text-slate-400">
+                            النوع: {recentlyGeneratedKey.type === 'permanent' ? 'دائم 👑' : `${recentlyGeneratedKey.durationDays} يوم`}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-3 p-4 rounded-xl bg-black/40 border border-emerald-500/30 flex-wrap">
+                          <div className="font-mono font-black text-emerald-300 text-base sm:text-lg tracking-wider select-all" dir="ltr">
+                            {recentlyGeneratedKey.keyCode}
+                          </div>
+
+                          <button
+                            type="button"
+                            onClick={() => handleCopyKey(recentlyGeneratedKey.keyCode, recentlyGeneratedKey.id)}
+                            className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black flex items-center gap-2 shadow-sm transition-all"
+                          >
+                            {copiedKeyId === recentlyGeneratedKey.id ? (
+                              <>
+                                <CheckCheck className="w-4 h-4" />
+                                <span>تم النسخ!</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="w-4 h-4" />
+                                <span>نسخ الكود</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+
+                        <div className="p-3.5 rounded-xl bg-white/5 border border-white/10 text-xs text-slate-300 space-y-1">
+                          <div className="font-bold text-amber-300 text-[11px]">رسالة مقترحة لإرسالها للعميل على الواتساب:</div>
+                          <p className="text-[11px] text-slate-200 leading-relaxed font-mono">
+                            "مرحباً بحضرتك، مرفق كود تفعيل منظومة العيادات التخصصية المعتمد: [{recentlyGeneratedKey.keyCode}]، مدة الترخيص: ({recentlyGeneratedKey.durationDays > 0 ? `${recentlyGeneratedKey.durationDays} يوم` : 'دائم'}). يرجى الضغط على زر (تفعيل كود ترخيص 🔑) في الشاشة ولصق الكود."
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* مخزن وتاريخ الأكواد السابقة (Keys Vault) */}
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h4 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                          <KeyRound className="w-4 h-4 text-violet-500" />
+                          <span>2. مخزن وسجل مفاتيح التراخيص المولدة ({((draftConfig.generatedLicenseKeys || []).length)})</span>
+                        </h4>
+                        <span className="text-[11px] text-slate-500">
+                          محفوظة سحابياً ومشفرة
+                        </span>
+                      </div>
+
+                      {(!draftConfig.generatedLicenseKeys || draftConfig.generatedLicenseKeys.length === 0) ? (
+                        <div className="p-8 text-center text-xs text-slate-400 bg-slate-50 dark:bg-slate-800/40 rounded-xl">
+                          لم يتم توليد أي مفاتيح ترخيص حتى الآن. استخدم النموذج أعلاه لتوليد أول كود.
+                        </div>
+                      ) : (
+                        <div className="space-y-2.5 max-h-72 overflow-y-auto">
+                          {draftConfig.generatedLicenseKeys.map((k) => (
+                            <div
+                              key={k.id}
+                              className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
+                            >
+                              <div className="space-y-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <code className="font-mono font-black text-slate-900 dark:text-white text-xs select-all" dir="ltr">
+                                    {k.keyCode}
+                                  </code>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                                      k.isRedeemed
+                                        ? 'bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300'
+                                        : 'bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300'
+                                    }`}
+                                  >
+                                    {k.isRedeemed ? 'تم التفعيل والاستخدام ✅' : 'جاهز للاستخدام 🟢'}
+                                  </span>
+                                  {k.type === 'permanent' && (
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 dark:bg-amber-950 dark:text-amber-200">
+                                      دائم 👑
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                                  {k.label} • {new Date(k.createdAt).toLocaleDateString('ar-EG')}
+                                  {k.redeemedAt && ` • تم التفعيل في: ${new Date(k.redeemedAt).toLocaleDateString('ar-EG')}`}
+                                </div>
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => handleCopyKey(k.keyCode, k.id)}
+                                className="px-3 py-1.5 rounded-lg bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 hover:bg-slate-100 text-slate-700 dark:text-slate-200 text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 self-start sm:self-auto"
+                              >
+                                {copiedKeyId === k.id ? (
+                                  <>
+                                    <CheckCheck className="w-3.5 h-3.5 text-emerald-500" />
+                                    <span>تم النسخ</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="w-3.5 h-3.5 text-slate-400" />
+                                    <span>نسخ الكود</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   </div>
                 )}

@@ -23,7 +23,8 @@ import {
   SystemTrialLicenseConfig,
   SecurityAttemptType,
   SecurityIntrusionAttempt,
-  BlockedSecurityEntity
+  BlockedSecurityEntity,
+  GeneratedLicenseKey
 } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
@@ -2130,6 +2131,113 @@ export async function verifySecretDeveloperPasswordOnly(password: string): Promi
   return capHash === SECRET_DEV_PASS_SHA256;
 }
 
+// ==================== مولد ومحقق مفاتيح التراخيص المشفرة (Cryptographic License Keys) ====================
+
+/**
+ * توليد مفتاح ترخيص رقمي مشفر وموقع رياضياً (Cryptographic License Key)
+ * تركيبة المفتاح: SHR-{TYPE}-{DAYS}D-{RAND}-{HASH_SIG}
+ */
+export function generateSignedLicenseKey(
+  type: 'trial_extension' | 'permanent' | 'emergency',
+  durationDays: number,
+  label: string,
+  targetDomain?: string
+): GeneratedLicenseKey {
+  const cleanDays = type === 'permanent' ? 0 : Math.max(1, Math.round(durationDays || 30));
+  const typeTag = type === 'permanent' ? 'LIFE' : type === 'emergency' ? 'EMRG' : 'EXT';
+  const randBlock = Math.random().toString(36).substring(2, 6).toUpperCase();
+  const rawPayload = `${typeTag}:${cleanDays}:${randBlock}:${(targetDomain || '').trim().toLowerCase()}`;
+  const seal = computeSyncSecuritySeal(rawPayload).replace('SEAL-', '').slice(0, 6).toUpperCase();
+  const daysBlock = String(cleanDays).padStart(3, '0') + 'D';
+  const keyCode = `SHR-${typeTag}-${daysBlock}-${randBlock}-${seal}`;
+
+  return {
+    id: `key-${Date.now()}-${randBlock}`,
+    keyCode,
+    type,
+    durationDays: cleanDays,
+    label: label.trim() || (type === 'permanent' ? 'ترخيص دائم ذهبي مدى الحياة' : `تمديد ترخيص لمدة ${cleanDays} يوم`),
+    createdAt: new Date().toISOString(),
+    createdBy: 'Amrr (المطور والمالك)',
+    isRedeemed: false,
+    targetDomain: targetDomain?.trim() || undefined,
+  };
+}
+
+/**
+ * التحقق الرياضي الصارم من صحة مفتاح الترخيص المشفر ومنع استخدامه مرتين
+ */
+export function verifySignedLicenseKey(
+  keyCodeInput: string,
+  usedKeys: string[] = [],
+  currentHost: string = ''
+): {
+  valid: boolean;
+  type?: 'trial_extension' | 'permanent' | 'emergency';
+  durationDays?: number;
+  label?: string;
+  error?: string;
+} {
+  const cleanCode = (keyCodeInput || '').trim().toUpperCase();
+  if (!cleanCode) {
+    return { valid: false, error: 'يرجى إدخال كود الترخيص' };
+  }
+
+  // فحص هل تم استخدام الكود مسبقاً
+  if (usedKeys.includes(cleanCode)) {
+    return { valid: false, error: 'تم استخدام هذا الكود مسبقاً ولا يمكن تفعيله مرة أخرى (Single-Use Key)' };
+  }
+
+  // نمط الكود: SHR-{TYPE}-{DAYS}D-{RAND}-{SEAL}
+  const parts = cleanCode.split('-');
+  if (parts.length !== 5 || parts[0] !== 'SHR') {
+    return { valid: false, error: 'صيغة كود الترخيص غير صحيحة، يرجى التأكد من نسخه بدقة (مثال: SHR-EXT-030D-XXXX-YYYY)' };
+  }
+
+  const [_, typeTag, daysPart, randBlock, signature] = parts;
+  const daysNum = parseInt(daysPart.replace('D', ''), 10);
+  if (isNaN(daysNum)) {
+    return { valid: false, error: 'بيانات مدة الترخيص داخل الكود غير صالحة' };
+  }
+
+  const allowedTypes: Record<string, 'trial_extension' | 'permanent' | 'emergency'> = {
+    EXT: 'trial_extension',
+    LIFE: 'permanent',
+    EMRG: 'emergency',
+  };
+  const keyType = allowedTypes[typeTag];
+  if (!keyType) {
+    return { valid: false, error: 'نوع الترخيص في الكود غير معتمد' };
+  }
+
+  // فحص التوقيع الرقمي المشفر (مع أو بدون فحص الدومين)
+  const rawPayloadGeneral = `${typeTag}:${daysNum}:${randBlock}:`;
+  const expectedSealGeneral = computeSyncSecuritySeal(rawPayloadGeneral).replace('SEAL-', '').slice(0, 6).toUpperCase();
+
+  const hostNormalized = currentHost.trim().toLowerCase();
+  const rawPayloadWithHost = `${typeTag}:${daysNum}:${randBlock}:${hostNormalized}`;
+  const expectedSealWithHost = computeSyncSecuritySeal(rawPayloadWithHost).replace('SEAL-', '').slice(0, 6).toUpperCase();
+
+  const isSignatureValid = signature === expectedSealGeneral || signature === expectedSealWithHost;
+  if (!isSignatureValid) {
+    return { valid: false, error: 'كود الترخيص غير صالح أو تم التلاعب ببياناته (توقيع رقمي غير مطابق)' };
+  }
+
+  const label =
+    keyType === 'permanent'
+      ? 'ترخيص دائم ذهبي معتمد مدى الحياة 👑'
+      : keyType === 'emergency'
+      ? `ترخيص طوارئ استثنائي لمدة ${daysNum} يوم ⚡`
+      : `تمديد ترخيص معتمد لمدة ${daysNum} يوم 🛡️`;
+
+  return {
+    valid: true,
+    type: keyType,
+    durationDays: daysNum,
+    label,
+  };
+}
+
 export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   mode: 'trial',
   trialDays: 7,
@@ -2151,6 +2259,9 @@ export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   activeBroadcastMessage: null,
   blockedEntities: [],
   intrusionLogs: [],
+  generatedLicenseKeys: [],
+  usedLicenseKeyCodes: [],
+  maintenanceMode: false,
   lockMessage:
     'انتهت الفترة التجريبية المخصصة لمعاينة ومراجعة المنظومة بنجاح. جميع البيانات والإعدادات محفوظة بالكامل — لتفعيل النسخة الدائمة المعتمدة يرجى التواصل مع مسؤول تطوير المنظومة.',
   updatedAt: '2026-10-02T00:00:00.000Z',
@@ -2209,6 +2320,9 @@ export function getStoredTrialLicenseConfig(): SystemTrialLicenseConfig {
       ...parsed,
       blockedEntities: Array.isArray(parsed.blockedEntities) ? parsed.blockedEntities : [],
       intrusionLogs: Array.isArray(parsed.intrusionLogs) ? parsed.intrusionLogs : [],
+      generatedLicenseKeys: Array.isArray(parsed.generatedLicenseKeys) ? parsed.generatedLicenseKeys : [],
+      usedLicenseKeyCodes: Array.isArray(parsed.usedLicenseKeyCodes) ? parsed.usedLicenseKeyCodes : [],
+      maintenanceMode: Boolean(parsed.maintenanceMode),
     };
   } catch {
     return DEFAULT_TRIAL_LICENSE_CONFIG;
@@ -2226,6 +2340,13 @@ export function saveTrialLicenseConfig(config: SystemTrialLicenseConfig): void {
       intrusionLogs: Array.isArray(config.intrusionLogs)
         ? config.intrusionLogs.slice(0, 80)
         : [],
+      generatedLicenseKeys: Array.isArray(config.generatedLicenseKeys)
+        ? config.generatedLicenseKeys.slice(0, 100)
+        : [],
+      usedLicenseKeyCodes: Array.isArray(config.usedLicenseKeyCodes)
+        ? config.usedLicenseKeyCodes.slice(0, 200)
+        : [],
+      maintenanceMode: Boolean(config.maintenanceMode),
     };
     const json = JSON.stringify(cleanConfig);
     localStorage.setItem(STORAGE_KEYS.TRIAL_LICENSE, json);

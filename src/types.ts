@@ -378,6 +378,20 @@ export interface LiveConnectedDevice {
   lastSeenAt: string;
 }
 
+export interface GeneratedLicenseKey {
+  id: string;
+  keyCode: string;
+  type: 'trial_extension' | 'permanent' | 'emergency';
+  durationDays: number;
+  label: string;
+  createdAt: string;
+  createdBy: string;
+  isRedeemed: boolean;
+  redeemedAt?: string;
+  redeemedBy?: string;
+  targetDomain?: string;
+}
+
 export interface SystemTrialLicenseConfig {
   mode: SystemLicenseMode;
   trialDays: number;
@@ -404,6 +418,10 @@ export interface SystemTrialLicenseConfig {
   lastKnownServerTimeMs?: number;
   blockedEntities?: BlockedSecurityEntity[];
   intrusionLogs?: SecurityIntrusionAttempt[];
+  generatedLicenseKeys?: GeneratedLicenseKey[];
+  usedLicenseKeyCodes?: string[];
+  maintenanceMode?: boolean;
+  maintenanceMessage?: string;
   lockMessage: string;
   developerPhone?: string;
   updatedAt: string;
