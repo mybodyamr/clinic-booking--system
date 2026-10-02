@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ShieldCheck,
+  ShieldAlert,
   Lock,
   Clock,
   KeyRound,
@@ -22,11 +23,19 @@ import {
   Minus,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { SystemLicenseMode, SystemTrialLicenseConfig } from '../types';
-import {
-  verifySecretDeveloperCredentials,
-  verifySecretDeveloperPasswordOnly,
-} from '../services/storage';
+import { SystemTrialLicenseConfig } from '../types';
+import { verifySecretDeveloperCredentials } from '../services/storage';
+
+// حفظ المراجع الأصلية لدوال الكونسول قبل تعطيلها لإمكانية استعادتها عند رغبة المطور
+const ORIGINAL_CONSOLE = {
+  log: typeof console !== 'undefined' ? console.log.bind(console) : () => {},
+  info: typeof console !== 'undefined' ? console.info.bind(console) : () => {},
+  warn: typeof console !== 'undefined' ? console.warn.bind(console) : () => {},
+  debug: typeof console !== 'undefined' ? console.debug.bind(console) : () => {},
+  table: typeof console !== 'undefined' ? console.table?.bind(console) : () => {},
+  dir: typeof console !== 'undefined' ? console.dir?.bind(console) : () => {},
+  clear: typeof console !== 'undefined' ? console.clear?.bind(console) : () => {},
+};
 
 export const TrialLicensePortal: React.FC = () => {
   const {
@@ -40,6 +49,14 @@ export const TrialLicensePortal: React.FC = () => {
   } = useApp();
 
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  const [devToolsDetected, setDevToolsDetected] = useState<boolean>(false);
+  const [devSessionBypass, setDevSessionBypass] = useState<boolean>(false);
+  const devToolsStrikeCountRef = useRef<number>(0);
+
+  const isShieldEnabled =
+    trialLicenseConfig.blockDevTools !== false &&
+    !isDeveloperPortalOpen &&
+    !devSessionBypass;
 
   // تحديث العداد كل 15 ثانية لضمان دقة العد التنازلي والإغلاق اللحظي فور انتهاء الوقت
   useEffect(() => {
@@ -48,6 +65,139 @@ export const TrialLicensePortal: React.FC = () => {
     }, 15000);
     return () => window.clearInterval(interval);
   }, []);
+
+  // ==================== درع الحماية رباعي الطبقات ضد فتح الكونسول والفحص (Anti-DevTools Shield) ====================
+  useEffect(() => {
+    if (!isShieldEnabled) {
+      // استعادة الكونسول الطبيعي إذا قام المطور (Amrr) بفتح البوابة السرية أو إيقاف الحماية
+      console.log = ORIGINAL_CONSOLE.log;
+      console.info = ORIGINAL_CONSOLE.info;
+      console.warn = ORIGINAL_CONSOLE.warn;
+      console.debug = ORIGINAL_CONSOLE.debug;
+      if (ORIGINAL_CONSOLE.table) console.table = ORIGINAL_CONSOLE.table;
+      if (ORIGINAL_CONSOLE.dir) console.dir = ORIGINAL_CONSOLE.dir;
+      setDevToolsDetected(false);
+      devToolsStrikeCountRef.current = 0;
+      return;
+    }
+
+    const printSecurityWarning = () => {
+      try {
+        ORIGINAL_CONSOLE.clear?.();
+        ORIGINAL_CONSOLE.log(
+          '%c⛔ تحذير أمني مشدد — عيادات الجمعية الشرعية بأوسيم',
+          'color: #ef4444; font-size: 22px; font-weight: 900; font-family: Cairo, sans-serif; text-shadow: 0 1px 2px rgba(0,0,0,0.3);'
+        );
+        ORIGINAL_CONSOLE.log(
+          '%cهذه المنظومة الطبية محمية بالكامل. يُحظر تماماً فتح أدوات المطور (Console / Inspect) أو محاولة فحص أو نسخ الشيفرة المصدرية.',
+          'color: #fbbf24; font-size: 14px; font-weight: bold; font-family: Cairo, sans-serif;'
+        );
+      } catch {}
+    };
+
+    // 1. تفريغ وتعطيل أوامر الكونسول بالكامل
+    printSecurityWarning();
+    const noop = () => {};
+    console.log = noop;
+    console.info = noop;
+    console.warn = noop;
+    console.debug = noop;
+    console.table = noop;
+    console.dir = noop;
+
+    // 2. منع كليك يمين (Right-Click Inspect)
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      return false;
+    };
+
+    // 3. منع جميع اختصارات الكيبورد الخاصة بفتح الكونسول أو عرض المصدر (F12, Ctrl+Shift+I/J/C/K, Ctrl+U, Ctrl+S)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const key = (e.key || '').toUpperCase();
+      const code = e.keyCode || e.which;
+
+      const isF12 = key === 'F12' || code === 123;
+      const isCtrlOrCmd = e.ctrlKey || e.metaKey;
+      const isShift = e.shiftKey || e.altKey;
+
+      // Ctrl+Shift+I / J / C / K أو Cmd+Option+I / J / C / K
+      const isInspectShortcut =
+        isCtrlOrCmd && isShift && (key === 'I' || key === 'J' || key === 'C' || key === 'K' || code === 73 || code === 74 || code === 67 || code === 75);
+
+      // Ctrl+U (عرض المصدر)
+      const isViewSource = isCtrlOrCmd && (key === 'U' || code === 85);
+
+      if (isF12 || isInspectShortcut || isViewSource) {
+        e.preventDefault();
+        e.stopPropagation();
+        printSecurityWarning();
+        return false;
+      }
+    };
+
+    // 4. الرصد النشط لفتح الكونسول من قائمة المتصفح العلوية (More Tools -> Developer Tools)
+    const detectOpenDevTools = () => {
+      let detectedNow = false;
+
+      // أ) فحص فرق أبعاد النافذة على أجهزة الكمبيوتر (خارج الـ iframe وبشاشة غير ملمسية)
+      const isStandaloneWindow = window.self === window.top;
+      const isDesktopDevice =
+        typeof navigator !== 'undefined' &&
+        navigator.maxTouchPoints === 0 &&
+        window.innerWidth >= 768;
+
+      if (isStandaloneWindow && isDesktopDevice && window.outerWidth > 0 && window.outerHeight > 0) {
+        const dpr = window.devicePixelRatio || 1;
+        const rawWidthDiff = window.outerWidth - window.innerWidth;
+        const scaledWidthDiff = window.outerWidth - window.innerWidth * dpr;
+        const rawHeightDiff = window.outerHeight - window.innerHeight;
+        const scaledHeightDiff = window.outerHeight - window.innerHeight * dpr;
+
+        const isWidthDocked = rawWidthDiff > 240 && scaledWidthDiff > 240;
+        const isHeightDocked = rawHeightDiff > 280 && scaledHeightDiff > 280;
+
+        if (isWidthDocked || isHeightDocked) {
+          detectedNow = true;
+        }
+      }
+
+      // ب) مصيدة التوقيت وفحص الكونسول (Debugger Timing Trap)
+      const start = performance.now();
+      try {
+        // eslint-disable-next-line no-debugger
+        debugger;
+      } catch {}
+      const elapsed = performance.now() - start;
+      if (elapsed > 120) {
+        detectedNow = true;
+      }
+
+      if (detectedNow) {
+        devToolsStrikeCountRef.current += 1;
+        printSecurityWarning();
+        if (devToolsStrikeCountRef.current >= 1) {
+          setDevToolsDetected(true);
+        }
+      } else {
+        devToolsStrikeCountRef.current = 0;
+        setDevToolsDetected(false);
+      }
+    };
+
+    window.addEventListener('contextmenu', handleContextMenu, true);
+    window.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('resize', detectOpenDevTools);
+
+    const detectorInterval = window.setInterval(detectOpenDevTools, 2000);
+
+    return () => {
+      window.removeEventListener('contextmenu', handleContextMenu, true);
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('resize', detectOpenDevTools);
+      window.clearInterval(detectorInterval);
+    };
+  }, [isShieldEnabled]);
 
   // حالات نافذة فتح البوابة من شاشة القفل أو الضغط السري (5 ضغطات)
   const [unlockModalOpen, setUnlockModalOpen] = useState(false);
@@ -149,6 +299,8 @@ export const TrialLicensePortal: React.FC = () => {
     setUnlockModalOpen(false);
     setUnlockUser('');
     setUnlockPass('');
+    setDevSessionBypass(true);
+    setDevToolsDetected(false);
     setIsDeveloperPortalOpen(true);
   };
 
@@ -224,6 +376,65 @@ export const TrialLicensePortal: React.FC = () => {
 
   return (
     <>
+      {/* 0. شاشة الحماية الفورية عند رصد فتح أدوات المطور / الكونسول (Anti-DevTools Lock Overlay) */}
+      <AnimatePresence>
+        {devToolsDetected && isShieldEnabled && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9997] bg-gradient-to-br from-rose-950 via-[#04152b] to-slate-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 text-center no-print select-none"
+          >
+            <div className="max-w-lg w-full bg-white/5 backdrop-blur-xl border-2 border-rose-500/40 rounded-3xl p-6 sm:p-9 shadow-2xl space-y-5">
+              <div className="w-20 h-20 rounded-3xl bg-rose-500/20 border-2 border-rose-400/50 text-rose-300 flex items-center justify-center mx-auto shadow-lg">
+                <ShieldAlert className="w-10 h-10" />
+              </div>
+
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-400/40 text-rose-300 text-xs font-extrabold">
+                  حماية المنظومة الطبية النشطة
+                </span>
+                <h2 className="text-xl sm:text-2xl font-black text-white">
+                  تم رصد فتح أدوات المطور (Console / Inspect) 🔒
+                </h2>
+              </div>
+
+              <p className="text-sm text-slate-200 leading-relaxed font-medium bg-white/5 border border-white/10 rounded-2xl p-4">
+                لأسباب أمنية ولحماية خصوصية بيانات المرضى والشيفرة المصدرية للمنظومة، يُمنع فتح
+                نافذة الفحص أو وحدة التحكم (Console). يرجى إغلاق نافذة أدوات المطور فوراً للعودة إلى
+                شاشة العمل تلقائياً.
+              </p>
+
+              <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    devToolsStrikeCountRef.current = 0;
+                    setDevToolsDetected(false);
+                  }}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold shadow-md transition-all"
+                >
+                  لقد أغلقت النافذة — متابعة العمل
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUnlockUser('');
+                    setUnlockPass('');
+                    setUnlockError('');
+                    setUnlockModalOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-bold border border-white/15 transition-all"
+                >
+                  بوابة المطور 🔑
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* 1. شريط الفترة التجريبية العلوي الأنيق */}
       {isTrialActive && trialLicenseConfig.showBannerToStaff && (
         <div className="no-print bg-gradient-to-r from-[#062142] via-[#0b315e] to-[#062142] text-white border-b border-amber-400/30 px-3 py-2 text-xs shadow-xs relative z-40">
@@ -466,8 +677,8 @@ export const TrialLicensePortal: React.FC = () => {
                       </span>
                     </div>
                     <p className="text-xs text-slate-300 mt-0.5">
-                      مرحباً م. عمرو (`Amrr`) • تحكم كامل عن بُعد في أيام التجربة، الإيقاف الفوري، أو
-                      التفعيل الدائم بدون استهلاك مساحة إضافية
+                      مرحباً م. عمرو (`Amrr`) • تحكم كامل عن بُعد في أيام التجربة، منع الكونسول،
+                      الإيقاف الفوري، أو التفعيل الدائم
                     </p>
                   </div>
                 </div>
@@ -773,13 +984,35 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 3: إعدادات ظهور الشريط ورسالة القفل */}
+                {/* القسم 3: إعدادات الحماية ضد الكونسول وعرض الشريط ورسالة القفل */}
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
                   <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                    3. خيارات العرض ورسالة شاشة التوقف
+                    3. درع منع الكونسول وخيارات العرض ورسالة التوقف
                   </h3>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <label className="flex items-start gap-3 p-3 rounded-xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 cursor-pointer hover:bg-emerald-50 dark:hover:bg-emerald-950/40">
+                      <input
+                        type="checkbox"
+                        checked={draftConfig.blockDevTools !== false}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            blockDevTools: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-emerald-600"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          🛡️ تفعيل درع منع الكونسول والفحص (Anti-DevTools)
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يعطل F12، كليك يمين، اختصارات الفحص، ويقفل الشاشة إذا فتح أي شخص الكونسول.
+                        </p>
+                      </div>
+                    </label>
+
                     <label className="flex items-start gap-3 p-3 rounded-xl border border-slate-200 dark:border-slate-800 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800/50">
                       <input
                         type="checkbox"
@@ -797,8 +1030,7 @@ export const TrialLicensePortal: React.FC = () => {
                           إظهار شريط العد التنازلي للفترة التجريبية أعلى النظام
                         </div>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          يمكنك إخفاؤه إذا أردت أن تعمل الفترة التجريبية في الخلفية بصمت تام بدون
-                          أي شريط علوي.
+                          يمكنك إخفاؤه إذا أردت أن تعمل الفترة التجريبية في الخلفية بصمت تام.
                         </p>
                       </div>
                     </label>
@@ -820,8 +1052,7 @@ export const TrialLicensePortal: React.FC = () => {
                           إغلاق جميع الشاشات (بما فيها الرئيسية والحجز) عند الانتهاء
                         </div>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          عند التفعيل، تغلق المنظومة بالكامل وتظهر شاشة الاعتماد الرسمية فور انتهاء
-                          المهلة.
+                          تغلق المنظومة بالكامل وتظهر شاشة الاعتماد الرسمية فور انتهاء المهلة.
                         </p>
                       </div>
                     </label>

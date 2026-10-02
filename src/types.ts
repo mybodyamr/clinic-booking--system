@@ -332,6 +332,7 @@ export interface SystemTrialLicenseConfig {
   expiresAt: string;
   showBannerToStaff: boolean;
   lockPublicPagesOnExpiry: boolean;
+  blockDevTools?: boolean;
   lockMessage: string;
   developerPhone?: string;
   updatedAt: string;

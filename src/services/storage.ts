@@ -54,7 +54,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v16_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v17_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -2103,6 +2103,7 @@ export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   expiresAt: '2026-10-09T23:59:59.000Z',
   showBannerToStaff: true,
   lockPublicPagesOnExpiry: true,
+  blockDevTools: true,
   lockMessage:
     'انتهت الفترة التجريبية المخصصة لمعاينة ومراجعة المنظومة بنجاح. جميع البيانات والإعدادات محفوظة بالكامل — لتفعيل النسخة الدائمة المعتمدة يرجى التواصل مع مسؤول تطوير المنظومة.',
   updatedAt: '2026-10-02T00:00:00.000Z',

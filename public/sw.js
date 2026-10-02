@@ -1,5 +1,5 @@
-// Progressive Web App Service Worker for Sharaya Clinics (v26 - Network-First & Auto-Update)
-const CACHE_NAME = 'sharaya-clinics-v26';
+// Progressive Web App Service Worker for Sharaya Clinics (v27 - Network-First & Auto-Update)
+const CACHE_NAME = 'sharaya-clinics-v27';
 
 // Static icons and manifest to cache for offline fallback only
 const STATIC_ASSETS = [
