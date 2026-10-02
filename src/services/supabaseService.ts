@@ -2017,6 +2017,10 @@ export async function saveFinanceLedgerToDb(
   const clean: FinanceLedgerState = {
     expenses: Array.isArray(ledger?.expenses) ? ledger.expenses.slice(0, 400) : [],
     settlements: Array.isArray(ledger?.settlements) ? ledger.settlements.slice(0, 300) : [],
+    doctorCommissionRules:
+      ledger?.doctorCommissionRules && typeof ledger.doctorCommissionRules === 'object'
+        ? ledger.doctorCommissionRules
+        : {},
   };
   const jsonStr = JSON.stringify(clean);
   return upsertSystemSettingRowInClinics(

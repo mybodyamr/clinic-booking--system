@@ -18,10 +18,12 @@ import {
   ShiftHandoverRecord,
   FinanceLedgerState,
   FinanceExpenseRecord,
-  InsuranceClaimSettlementRecord
+  InsuranceClaimSettlementRecord,
+  DoctorCommissionRule
 } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
+import XLSXStyle from 'xlsx-js-style';
 
 const STORAGE_KEYS = {
   CLINICS: 'sharaya_clinics_v2',
@@ -50,7 +52,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v10_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v11_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -901,8 +903,8 @@ export function checkBookingRateLimit(
 }
 
 /**
- * دالة احترافية لبناء ورقة عمل إكسل (Worksheet) منسقة بالكامل باللغة العربية (من اليمين لليسار RTL)
- * مع ترويسة التقرير، وضبط تلقائي لعرض الأعمدة (Auto-fit) وارتفاع الصفوف، وصف الإجمالي، وتفعيل الفلتر التلقائي
+ * دالة احترافية لبناء ورقة عمل إكسل (Worksheet) منسقة وملونة ومسطرة بالكامل باللغة العربية (من اليمين لليسار RTL)
+ * مع تلوين الترويسة، وتسطير كافة الخلايا بحدود واضحة، وتوسيط النصوص والأرقام، وتظليل صفوف الإجمالي والصافي
  */
 export function buildFormattedRtlWorksheet(
   rowsOrOptions:
@@ -913,12 +915,16 @@ export function buildFormattedRtlWorksheet(
         rows: Record<string, any>[];
         totalsRow?: Record<string, any>;
         emptyMessage?: string;
+        enableAutoFilter?: boolean;
+        headerBgColor?: string;
       },
   maybeOptions?: {
     reportTitle?: string;
     reportSubtitle?: string;
     totalsRow?: Record<string, any>;
     emptyMessage?: string;
+    enableAutoFilter?: boolean;
+    headerBgColor?: string;
   }
 ): XLSX.WorkSheet {
   const isArrayArg = Array.isArray(rowsOrOptions);
@@ -931,6 +937,11 @@ export function buildFormattedRtlWorksheet(
     : rowsOrOptions.reportSubtitle;
   const totalsRow = isArrayArg ? maybeOptions?.totalsRow : rowsOrOptions.totalsRow;
   const emptyMessage = isArrayArg ? maybeOptions?.emptyMessage : rowsOrOptions.emptyMessage;
+  const enableAutoFilter = isArrayArg
+    ? Boolean(maybeOptions?.enableAutoFilter)
+    : Boolean(rowsOrOptions.enableAutoFilter);
+  const headerBgColor =
+    (isArrayArg ? maybeOptions?.headerBgColor : rowsOrOptions.headerBgColor) || '0F766E';
 
   const effectiveRows =
     rows.length > 0
@@ -943,25 +954,30 @@ export function buildFormattedRtlWorksheet(
   // بناء المصفوفة الثنائية (Array of Arrays) لضمان ترتيب الترويسة والجدول بدقة
   const aoa: (string | number)[][] = [];
 
-  // الصف 1: عنوان التقرير الرئيسي
+  // الصف 1 (r=0): عنوان التقرير الرئيسي
   const titleRow: (string | number)[] = new Array(numCols).fill('');
   titleRow[0] = sanitizeSpreadsheetCell(reportTitle);
   aoa.push(titleRow);
 
-  // الصف 2: العنوان الفرعي وتفاصيل الفترة وتاريخ الاستخراج
+  // الصف 2 (r=1): العنوان الفرعي وتفاصيل الفترة وتاريخ الاستخراج
   const subRow: (string | number)[] = new Array(numCols).fill('');
   subRow[0] = sanitizeSpreadsheetCell(reportSubtitle);
   aoa.push(subRow);
 
-  // الصف 3: صف فارغ للفصل البصري المريح
+  // الصف 3 (r=2): صف فارغ للفصل البصري المريح
   aoa.push(new Array(numCols).fill(''));
 
-  // الصف 4: رؤوس الأعمدة
+  // الصف 4 (r=3): رؤوس الأعمدة
   aoa.push(headers.map((h) => sanitizeSpreadsheetCell(h)));
 
-  // الصفوف 5..N: صفوف البيانات الفعلية
+  // الصفوف 5..N (r=4..): صفوف البيانات الفعلية
   for (const r of effectiveRows) {
-    aoa.push(headers.map((h) => sanitizeSpreadsheetCell(r[h] ?? '—')));
+    const isAllBlank = headers.every((h) => r[h] === '' || r[h] === undefined || r[h] === null);
+    if (isAllBlank) {
+      aoa.push(new Array(numCols).fill(''));
+    } else {
+      aoa.push(headers.map((h) => sanitizeSpreadsheetCell(r[h] ?? '—')));
+    }
   }
 
   // صف الإجمالي العام في نهاية الجدول (إن وجد وكان هناك بيانات)
@@ -969,7 +985,7 @@ export function buildFormattedRtlWorksheet(
     aoa.push(headers.map((h) => sanitizeSpreadsheetCell(totalsRow[h] ?? '')));
   }
 
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa) as XLSX.WorkSheet;
 
   // 1. تفعيل اتجاه الورقة من اليمين لليسار (RTL)
   ws['!views'] = [{ rightToLeft: true }];
@@ -982,11 +998,11 @@ export function buildFormattedRtlWorksheet(
     ];
   }
 
-  // 3. حساب عرض كل عمود تلقائياً (Auto-fit) بناءً على أطول نص في العمود + هامش مريح للخط العربي
+  // 3. حساب عرض كل عمود تلقائياً (Auto-fit) مع هامش إضافي للخط العربي العريض
   const colWidths = headers.map((headerText, colIdx) => {
     const cleanHeader = String(headerText || '').trim();
     if (cleanHeader === 'م' || cleanHeader === '#') {
-      return { wch: 8 };
+      return { wch: 10 };
     }
 
     let maxLen = cleanHeader.length;
@@ -1003,31 +1019,175 @@ export function buildFormattedRtlWorksheet(
       }
     }
 
-    // إضافة هامش مريح للخطوط العربية والأرقام لضمان عدم اختفاء أو قطع أي كلمة
-    const paddedWidth = Math.min(58, Math.max(18, Math.ceil(maxLen * 1.25) + 8));
+    const extraFilterPadding = enableAutoFilter ? 6 : 0;
+    const paddedWidth = Math.min(
+      56,
+      Math.max(18, Math.ceil(maxLen * 1.3) + 7 + extraFilterPadding)
+    );
     return { wch: paddedWidth };
   });
   ws['!cols'] = colWidths;
 
-  // 4. ضبط ارتفاع الصفوف لتكون مريحة وواضحة في القراءة والطباعة
+  // 4. ضبط ارتفاع الصفوف لتكون مريحة وواضحة في القراءة على الموبايل والكمبيوتر
   const rowHeights: { hpt: number }[] = [
-    { hpt: 30 }, // صف العنوان الرئيسي
-    { hpt: 22 }, // صف العنوان الفرعي
-    { hpt: 12 }, // صف الفاصل
-    { hpt: 28 }, // صف رؤوس الأعمدة
+    { hpt: 34 }, // صف العنوان الرئيسي
+    { hpt: 24 }, // صف العنوان الفرعي
+    { hpt: 10 }, // صف الفاصل
+    { hpt: 30 }, // صف رؤوس الأعمدة
   ];
   for (let i = 0; i < effectiveRows.length; i++) {
-    rowHeights.push({ hpt: 23 });
+    const rObj = effectiveRows[i];
+    const firstVal = String(rObj?.[headers[0]] ?? '');
+    const isSpecialSummary =
+      firstVal === 'الإجمالي' ||
+      firstVal === 'إجمالي' ||
+      firstVal === '—' ||
+      firstVal === '★' ||
+      firstVal === '■';
+    rowHeights.push({ hpt: isSpecialSummary ? 27 : 24 });
   }
   if (totalsRow && rows.length > 0) {
     rowHeights.push({ hpt: 28 }); // صف الإجمالي العام
   }
   ws['!rows'] = rowHeights;
 
-  // 5. تفعيل الفلتر التلقائي (AutoFilter) على صف رؤوس الأعمدة لتسهيل التصفية والترتيب داخل برنامج Excel
-  if (rows.length > 0 && numCols > 1) {
+  // 5. تطبيق التنسيقات اللونية والحدود والمحاذاة على كل خلية في الجدول (xlsx-js-style)
+  const thinBorder = {
+    top: { style: 'thin', color: { rgb: '94A3B8' } },
+    bottom: { style: 'thin', color: { rgb: '94A3B8' } },
+    left: { style: 'thin', color: { rgb: '94A3B8' } },
+    right: { style: 'thin', color: { rgb: '94A3B8' } },
+  };
+
+  const strongBorder = {
+    top: { style: 'medium', color: { rgb: '0F172A' } },
+    bottom: { style: 'medium', color: { rgb: '0F172A' } },
+    left: { style: 'thin', color: { rgb: '64748B' } },
+    right: { style: 'thin', color: { rgb: '64748B' } },
+  };
+
+  for (let r = 0; r < aoa.length; r++) {
+    const rowArr = aoa[r] || [];
+    const firstColStr = String(rowArr[0] ?? '').trim();
+    const rowJoinedText = rowArr.map((x) => String(x ?? '')).join(' ');
+    const isAllEmptyRow = rowArr.every((x) => x === '' || x === undefined || x === null);
+
+    for (let c = 0; c < numCols; c++) {
+      const cellRef = XLSXStyle.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) {
+        ws[cellRef] = { t: 's', v: '' };
+      }
+      const cell = ws[cellRef] as any;
+
+      if (r === 0) {
+        // صف العنوان الرئيسي: أخضر ملكي داكن وخط أبيض عريض في المنتصف
+        cell.s = {
+          fill: { patternType: 'solid', fgColor: { rgb: '064E3B' } },
+          font: { name: 'Cairo', sz: 13, bold: true, color: { rgb: 'FFFFFF' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+          border: strongBorder,
+        };
+      } else if (r === 1) {
+        // صف العنوان الفرعي: خلفية خضراء فاتحة هادئة وخط أخضر داكن عريض
+        cell.s = {
+          fill: { patternType: 'solid', fgColor: { rgb: 'ECFDF5' } },
+          font: { name: 'Cairo', sz: 10, bold: true, color: { rgb: '065F46' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+          border: thinBorder,
+        };
+      } else if (r === 2) {
+        // صف الفاصل الفارغ
+        cell.s = {
+          alignment: { horizontal: 'center', vertical: 'center', readingOrder: 2 },
+        };
+      } else if (r === 3) {
+        // صف رؤوس الأعمدة: خلفية تيل/كحلي رسمية وخط أبيض عريض في المنتصف
+        cell.s = {
+          fill: { patternType: 'solid', fgColor: { rgb: headerBgColor } },
+          font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+          border: strongBorder,
+        };
+      } else {
+        // صفوف البيانات والإجماليات
+        if (isAllEmptyRow) {
+          cell.s = {
+            alignment: { horizontal: 'center', vertical: 'center', readingOrder: 2 },
+          };
+          continue;
+        }
+
+        const isSectionHeader = firstColStr === '■';
+        const isNetCashRow =
+          firstColStr === '★' || rowJoinedText.includes('صافي النقدية الفعلي');
+        const isExpenseDeductionRow =
+          (firstColStr === '—' || firstColStr === '-') &&
+          (rowJoinedText.includes('المصروفات') || rowJoinedText.includes('خصم'));
+        const isTotalsRow =
+          (totalsRow && r === aoa.length - 1) ||
+          firstColStr === 'الإجمالي' ||
+          firstColStr === 'إجمالي' ||
+          firstColStr === '—';
+
+        const isNumericCell = typeof cell.v === 'number';
+        if (isNumericCell) {
+          cell.t = 'n';
+          cell.z = '#,##0';
+        }
+
+        if (isSectionHeader) {
+          cell.s = {
+            fill: { patternType: 'solid', fgColor: { rgb: '1E3A8A' } },
+            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+            alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+            border: strongBorder,
+          };
+        } else if (isNetCashRow) {
+          cell.s = {
+            fill: { patternType: 'solid', fgColor: { rgb: 'D1FAE5' } },
+            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '065F46' } },
+            alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+            border: strongBorder,
+          };
+        } else if (isExpenseDeductionRow) {
+          cell.s = {
+            fill: { patternType: 'solid', fgColor: { rgb: 'FFE4E6' } },
+            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '9F1239' } },
+            alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+            border: strongBorder,
+          };
+        } else if (isTotalsRow) {
+          cell.s = {
+            fill: { patternType: 'solid', fgColor: { rgb: 'FEF3C7' } },
+            font: { name: 'Cairo', sz: 11, bold: true, color: { rgb: '78350F' } },
+            alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+            border: strongBorder,
+          };
+        } else {
+          // صف بيانات عادي مع تظليل تبادلي (Zebra Striping) لراحة العين
+          const dataRowIdx = r - 4;
+          const zebraBg = dataRowIdx % 2 === 0 ? 'FFFFFF' : 'F1F5F9';
+          const isBoldCol = c <= 2 || isNumericCell;
+          cell.s = {
+            fill: { patternType: 'solid', fgColor: { rgb: zebraBg } },
+            font: {
+              name: 'Cairo',
+              sz: 10,
+              bold: isBoldCol,
+              color: { rgb: '0F172A' },
+            },
+            alignment: { horizontal: 'center', vertical: 'center', wrapText: true, readingOrder: 2 },
+            border: thinBorder,
+          };
+        }
+      }
+    }
+  }
+
+  // 6. الفلتر التلقائي (AutoFilter) معطل افتراضياً لمنع سهم الفلتر (▼) من أكل أول الحروف العربية على الموبايل، ويتفعل فقط عند الطلب
+  if (enableAutoFilter && rows.length > 0 && numCols > 1) {
     ws['!autofilter'] = {
-      ref: XLSX.utils.encode_range({
+      ref: XLSXStyle.utils.encode_range({
         s: { r: 3, c: 0 },
         e: { r: 3 + rows.length, c: numCols - 1 },
       }),
@@ -1048,9 +1208,47 @@ export function setWorkbookRtlView(wb: XLSX.WorkBook): void {
 }
 
 export function configureRtlWorkbook(): XLSX.WorkBook {
-  const wb = XLSX.utils.book_new();
+  const wb = XLSXStyle.utils.book_new() as XLSX.WorkBook;
   setWorkbookRtlView(wb);
   return wb;
+}
+
+/**
+ * حفظ وتنزيل مصنف الإكسل مع الاحتفاظ الكامل بالألوان والتسطير والخطوط العريضة عبر xlsx-js-style
+ */
+export function writeStyledWorkbookFile(wb: XLSX.WorkBook, fileName: string): void {
+  setWorkbookRtlView(wb);
+  XLSXStyle.writeFile(wb as any, fileName);
+}
+
+/**
+ * تصدير جدول واحد مخصص في شيت إكسل ملون ومسطر مستقل (.xlsx)
+ */
+export function exportSingleStyledSheetToExcel(options: {
+  sheetName: string;
+  fileName: string;
+  reportTitle: string;
+  reportSubtitle: string;
+  rows: Record<string, any>[];
+  totalsRow?: Record<string, any>;
+  emptyMessage?: string;
+  enableAutoFilter?: boolean;
+  headerBgColor?: string;
+}): void {
+  const wb = configureRtlWorkbook();
+  const ws = buildFormattedRtlWorksheet({
+    reportTitle: options.reportTitle,
+    reportSubtitle: options.reportSubtitle,
+    rows: options.rows,
+    totalsRow: options.totalsRow,
+    emptyMessage: options.emptyMessage,
+    enableAutoFilter: options.enableAutoFilter,
+    headerBgColor: options.headerBgColor,
+  });
+  const safeSheetName =
+    options.sheetName.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || 'تقرير مالي';
+  XLSXStyle.utils.book_append_sheet(wb as any, ws as any, safeSheetName);
+  writeStyledWorkbookFile(wb, options.fileName);
 }
 
 /**
@@ -1099,10 +1297,10 @@ export function exportBookingsToExcel(bookings: Booking[], fileName = 'سجل_ح
   });
 
   const workbook = configureRtlWorkbook();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'سجل الحجوزات');
+  XLSXStyle.utils.book_append_sheet(workbook as any, worksheet as any, 'سجل الحجوزات');
 
-  // حفظ وتنزيل الملف
-  XLSX.writeFile(workbook, fileName);
+  // حفظ وتنزيل الملف مع الألوان والتنسيق الكامل
+  writeStyledWorkbookFile(workbook, fileName);
 }
 
 // ==================== إدارة جدول عيادات اليوم ====================
@@ -1763,15 +1961,19 @@ export function getStoredFinanceLedger(): FinanceLedgerState {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.FINANCE_LEDGER);
     if (!raw) {
-      return { expenses: [], settlements: [] };
+      return { expenses: [], settlements: [], doctorCommissionRules: {} };
     }
     const parsed = JSON.parse(raw);
     return {
       expenses: Array.isArray(parsed?.expenses) ? parsed.expenses : [],
       settlements: Array.isArray(parsed?.settlements) ? parsed.settlements : [],
+      doctorCommissionRules:
+        parsed?.doctorCommissionRules && typeof parsed.doctorCommissionRules === 'object'
+          ? parsed.doctorCommissionRules
+          : {},
     };
   } catch {
-    return { expenses: [], settlements: [] };
+    return { expenses: [], settlements: [], doctorCommissionRules: {} };
   }
 }
 
@@ -1780,6 +1982,10 @@ export function saveFinanceLedger(ledger: FinanceLedgerState): void {
     const clean: FinanceLedgerState = {
       expenses: Array.isArray(ledger?.expenses) ? ledger.expenses.slice(0, 400) : [],
       settlements: Array.isArray(ledger?.settlements) ? ledger.settlements.slice(0, 300) : [],
+      doctorCommissionRules:
+        ledger?.doctorCommissionRules && typeof ledger.doctorCommissionRules === 'object'
+          ? ledger.doctorCommissionRules
+          : {},
     };
     localStorage.setItem(STORAGE_KEYS.FINANCE_LEDGER, JSON.stringify(clean));
   } catch (e) {

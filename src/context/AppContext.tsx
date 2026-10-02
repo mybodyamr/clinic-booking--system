@@ -25,7 +25,8 @@ import {
   SelectivePurgeOptions,
   FinanceLedgerState,
   FinanceExpenseRecord,
-  InsuranceClaimSettlementRecord
+  InsuranceClaimSettlementRecord,
+  DoctorCommissionRule
 } from '../types';
 import { 
   getStoredClinics, 
@@ -293,6 +294,9 @@ interface AppContextType {
     input: Omit<InsuranceClaimSettlementRecord, 'id' | 'createdAt' | 'recordedBy'>
   ) => Promise<boolean>;
   deleteInsuranceSettlement: (settlementId: string) => Promise<boolean>;
+  saveDoctorCommissionRule: (
+    rule: Omit<DoctorCommissionRule, 'updatedAt' | 'updatedBy'>
+  ) => Promise<boolean>;
   selectivePurgeRecords: (
     options: SelectivePurgeOptions
   ) => Promise<{ success: boolean; summary: string }>;
@@ -599,6 +603,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const normalizedLedger: FinanceLedgerState = {
                 expenses: Array.isArray(parsedLedger.expenses) ? parsedLedger.expenses : [],
                 settlements: Array.isArray(parsedLedger.settlements) ? parsedLedger.settlements : [],
+                doctorCommissionRules:
+                  parsedLedger.doctorCommissionRules &&
+                  typeof parsedLedger.doctorCommissionRules === 'object'
+                    ? parsedLedger.doctorCommissionRules
+                    : {},
               };
               setFinanceLedger(normalizedLedger);
               saveFinanceLedger(normalizedLedger);
@@ -844,6 +853,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const normalizedLedger: FinanceLedgerState = {
                 expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
                 settlements: Array.isArray(parsed.settlements) ? parsed.settlements : [],
+                doctorCommissionRules:
+                  parsed.doctorCommissionRules && typeof parsed.doctorCommissionRules === 'object'
+                    ? parsed.doctorCommissionRules
+                    : {},
               };
               setFinanceLedger(normalizedLedger);
               saveFinanceLedger(normalizedLedger);
@@ -1216,6 +1229,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 if (JSON.stringify(prev) !== JSON.stringify(parsedHandovers)) {
                   saveShiftHandovers(parsedHandovers);
                   return parsedHandovers;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
+
+        if (
+          freshSettings?.['finance_ledger_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 5000
+        ) {
+          try {
+            const parsedLedger = JSON.parse(freshSettings['finance_ledger_json']);
+            if (parsedLedger && typeof parsedLedger === 'object') {
+              const normalizedLedger: FinanceLedgerState = {
+                expenses: Array.isArray(parsedLedger.expenses) ? parsedLedger.expenses : [],
+                settlements: Array.isArray(parsedLedger.settlements) ? parsedLedger.settlements : [],
+                doctorCommissionRules:
+                  parsedLedger.doctorCommissionRules &&
+                  typeof parsedLedger.doctorCommissionRules === 'object'
+                    ? parsedLedger.doctorCommissionRules
+                    : {},
+              };
+              setFinanceLedger(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(normalizedLedger)) {
+                  saveFinanceLedger(normalizedLedger);
+                  return normalizedLedger;
                 }
                 return prev;
               });
@@ -4674,6 +4715,86 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
+  // حفظ وتحديث شريحة ونسب الطبيب المخصصة من مدير المالية
+  const saveDoctorCommissionRule = async (
+    ruleInput: Omit<DoctorCommissionRule, 'updatedAt' | 'updatedBy'>
+  ): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'تحديد نسب وشرائح الأطباء مخصص لمدير المالية أو مدير النظام فقط.'
+      });
+      return false;
+    }
+
+    const cleanDoctorId = String(ruleInput.doctorId || '').trim();
+    if (!cleanDoctorId) return false;
+
+    const cleanFee = Math.max(0, Number(ruleInput.consultationFee) || 0);
+    const cleanTargetCases = Math.max(1, Math.round(Number(ruleInput.targetCasesCount) || 1));
+    const cleanTargetPct = Math.min(100, Math.max(0, Number(ruleInput.targetPercentage) || 0));
+    const cleanBelowCases = Math.max(0, Math.round(Number(ruleInput.belowCasesCount) || 0));
+    const cleanBelowPct = Math.min(100, Math.max(0, Number(ruleInput.belowPercentage) || 0));
+    const cleanAboveCases = Math.max(
+      cleanTargetCases + 1,
+      Math.round(Number(ruleInput.aboveCasesCount) || cleanTargetCases + 1)
+    );
+    const cleanAbovePct = Math.min(100, Math.max(0, Number(ruleInput.abovePercentage) || 0));
+
+    const newRule: DoctorCommissionRule = {
+      doctorId: cleanDoctorId,
+      doctorName: sanitizeText(ruleInput.doctorName),
+      clinicId: String(ruleInput.clinicId || '').trim(),
+      clinicName: sanitizeText(ruleInput.clinicName),
+      consultationFee: cleanFee,
+      targetCasesCount: cleanTargetCases,
+      targetPercentage: cleanTargetPct,
+      belowCasesCount: cleanBelowCases,
+      belowPercentage: cleanBelowPct,
+      aboveCasesCount: cleanAboveCases,
+      abovePercentage: cleanAbovePct,
+      notes: ruleInput.notes ? sanitizeText(ruleInput.notes) : undefined,
+      updatedAt: new Date().toISOString(),
+      updatedBy: currentUser.displayName,
+    };
+
+    const nextRules: Record<string, DoctorCommissionRule> = {
+      ...(financeLedger.doctorCommissionRules || {}),
+      [cleanDoctorId]: newRule,
+    };
+
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      doctorCommissionRules: nextRules,
+    };
+
+    lastSettingsSaveAtRef.current = Date.now();
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    // إذا قام مدير المالية بتحديث سعر كشف الدكتور، نزامن سعر كشف العيادة أيضاً إن أمكن
+    const matchedClinic = clinics.find((c) => c.id === newRule.clinicId);
+    if (matchedClinic && cleanFee > 0 && matchedClinic.fee !== cleanFee) {
+      updateClinic(matchedClinic.id, { fee: cleanFee });
+    }
+
+    if (isSupabaseConfigured) {
+      await saveFinanceLedgerToDb(nextLedger);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم حفظ إعدادات ونسب الطبيب بنجاح',
+      message: `تم حفظ شرائح ونسب (${newRule.doctorName}) ومزامنتها تلقائياً مع قاعدة بيانات Supabase.`
+    });
+    return true;
+  };
+
   // ==========================================
   // نافذة المسح والتفريغ الانتقائي للسجلات (لمدير المالية والأدمن)
   // ==========================================
@@ -4911,6 +5032,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteFinanceExpense,
         addInsuranceSettlement,
         deleteInsuranceSettlement,
+        saveDoctorCommissionRule,
         selectivePurgeRecords
       }}
     >

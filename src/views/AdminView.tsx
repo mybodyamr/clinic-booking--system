@@ -36,7 +36,7 @@ import {
   Cloud
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { AVAILABLE_PERMISSIONS, sanitizeSpreadsheetCell, buildFormattedRtlWorksheet, setWorkbookRtlView } from '../services/storage';
+import { AVAILABLE_PERMISSIONS, sanitizeSpreadsheetCell, buildFormattedRtlWorksheet, setWorkbookRtlView, writeStyledWorkbookFile } from '../services/storage';
 import { getLocalDateStr, isDoctorScheduledOnDate, getArabicDayName } from '../services/scheduleService';
 import { DailyClinicScheduleItem, SystemPermission, UserRole, StaffAccount, Doctor, Clinic, SystemErrorSource } from '../types';
 import { DailyScheduleExportModal, ScheduleExportMode } from '../components/DailyScheduleExportModal';
@@ -450,7 +450,7 @@ export const AdminView: React.FC = () => {
       XLSX.utils.book_append_sheet(workbook, worksheet, 'تقرير حجوزات العيادات');
 
       const fileName = `تقرير_عيادات_الجمعية_الشرعية_${new Date().toISOString().split('T')[0]}.xlsx`;
-      XLSX.writeFile(workbook, fileName);
+      writeStyledWorkbookFile(workbook, fileName);
 
       addToast({
         type: 'success',

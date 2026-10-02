@@ -119,9 +119,27 @@ export interface InsuranceClaimSettlementRecord {
   createdAt: string;
 }
 
+export interface DoctorCommissionRule {
+  doctorId: string;
+  doctorName: string;
+  clinicId: string;
+  clinicName: string;
+  consultationFee: number;
+  targetCasesCount: number;
+  targetPercentage: number;
+  belowCasesCount: number;
+  belowPercentage: number;
+  aboveCasesCount: number;
+  abovePercentage: number;
+  notes?: string;
+  updatedAt: string;
+  updatedBy?: string;
+}
+
 export interface FinanceLedgerState {
   expenses: FinanceExpenseRecord[];
   settlements: InsuranceClaimSettlementRecord[];
+  doctorCommissionRules?: Record<string, DoctorCommissionRule>;
 }
 
 export interface SelectivePurgeOptions {

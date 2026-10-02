@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import * as XLSX from 'xlsx';
+import XLSXStyle from 'xlsx-js-style';
 import {
   DollarSign,
   Shield,
@@ -27,12 +27,25 @@ import {
   RotateCcw,
   Receipt,
   Printer,
-  BadgeCheck
+  BadgeCheck,
+  Sliders,
+  Calculator
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getLocalDateStr } from '../services/scheduleService';
-import { buildFormattedRtlWorksheet, setWorkbookRtlView } from '../services/storage';
-import { InsuranceCompanyContract, SelectivePurgeOptions, FinanceExpenseRecord } from '../types';
+import {
+  buildFormattedRtlWorksheet,
+  configureRtlWorkbook,
+  writeStyledWorkbookFile,
+  exportSingleStyledSheetToExcel
+} from '../services/storage';
+import {
+  InsuranceCompanyContract,
+  SelectivePurgeOptions,
+  FinanceExpenseRecord,
+  DoctorCommissionRule,
+  Doctor
+} from '../types';
 
 const PRESET_CARD_CATEGORIES = [
   'فضي (Silver)',
@@ -71,6 +84,7 @@ export const FinanceManagerView: React.FC = () => {
     deleteFinanceExpense,
     addInsuranceSettlement,
     deleteInsuranceSettlement,
+    saveDoctorCommissionRule,
     consultationRegistry,
     errorLogs,
     selectivePurgeRecords,
@@ -80,8 +94,13 @@ export const FinanceManagerView: React.FC = () => {
 
   const todayStr = getLocalDateStr(new Date());
 
-  // التبويب النشط
-  const [activeTab, setActiveTab] = useState<'reports' | 'expenses' | 'insurance' | 'handovers'>('reports');
+  // التبويب النشط (شامل تبويب نسب ومستحقات الأطباء الجديد)
+  const [activeTab, setActiveTab] = useState<
+    'reports' | 'commissions' | 'expenses' | 'insurance' | 'handovers'
+  >('reports');
+
+  // خيار إظهار سهم الفلتر (▼) في ملفات الإكسل (معطل افتراضياً لعدم أكل أول الحروف العربية على الموبايل)
+  const [enableExcelAutoFilter, setEnableExcelAutoFilter] = useState<boolean>(false);
 
   // فلاتر التقارير وشيت الإكسل
   const [dateFilterMode, setDateFilterMode] = useState<'today' | 'custom_range' | 'all'>('today');
@@ -97,6 +116,19 @@ export const FinanceManagerView: React.FC = () => {
   // فلتر سجل تسليم الشفتات
   const [handoverFilter, setHandoverFilter] = useState<'all' | 'cashier' | 'reception' | 'discrepancy'>('all');
   const [approvingHandoverId, setApprovingHandoverId] = useState<string | null>(null);
+
+  // نافذة إعداد وتعديل شرائح ونسب الطبيب (تحت تحكم مدير المالية بالكامل)
+  const [isCommissionModalOpen, setIsCommissionModalOpen] = useState<boolean>(false);
+  const [editingRuleDoctor, setEditingRuleDoctor] = useState<Doctor | null>(null);
+  const [ruleConsultationFee, setRuleConsultationFee] = useState<string>('75');
+  const [ruleTargetCases, setRuleTargetCases] = useState<string>('10');
+  const [ruleTargetPct, setRuleTargetPct] = useState<string>('50');
+  const [ruleBelowCases, setRuleBelowCases] = useState<string>('9');
+  const [ruleBelowPct, setRuleBelowPct] = useState<string>('40');
+  const [ruleAboveCases, setRuleAboveCases] = useState<string>('15');
+  const [ruleAbovePct, setRuleAbovePct] = useState<string>('60');
+  const [ruleNotes, setRuleNotes] = useState<string>('');
+  const [isSavingCommissionRule, setIsSavingCommissionRule] = useState<boolean>(false);
 
   // نافذة إضافة مصروف أو سحب نقدي من الخزينة
   const [isExpenseModalOpen, setIsExpenseModalOpen] = useState<boolean>(false);
@@ -372,6 +404,193 @@ export const FinanceManagerView: React.FC = () => {
     return Array.from(map.values()).sort((a, b) => b.grossRevenue - a.grossRevenue);
   }, [filteredBookings]);
 
+  // ============================================================================
+  // الحساب التلقائي الذكي لشرائح ونسب ومستحقات الأطباء (حسب إعدادات مدير المالية)
+  // ============================================================================
+  const doctorCommissionRows = useMemo(() => {
+    const savedRules = financeLedger?.doctorCommissionRules || {};
+    const doctorsToEvaluate =
+      selectedClinicId === 'all'
+        ? doctors
+        : doctors.filter(d => d.clinicId === selectedClinicId);
+
+    const rows = doctorsToEvaluate
+      .filter(d => selectedDoctorId === 'all' || d.id === selectedDoctorId)
+      .map(doc => {
+        const matchedClinic = clinics.find(c => c.id === doc.clinicId);
+        const existingRule: DoctorCommissionRule | undefined = savedRules[doc.id];
+
+        const consultationFee = Math.max(
+          0,
+          Number(existingRule?.consultationFee ?? matchedClinic?.fee ?? 75)
+        );
+        const targetCasesCount = Math.max(1, Number(existingRule?.targetCasesCount ?? 10));
+        const targetPercentage = Math.min(100, Math.max(0, Number(existingRule?.targetPercentage ?? 50)));
+        const belowCasesCount = Math.max(
+          0,
+          Number(existingRule?.belowCasesCount ?? Math.max(1, targetCasesCount - 1))
+        );
+        const belowPercentage = Math.min(100, Math.max(0, Number(existingRule?.belowPercentage ?? 40)));
+        const aboveCasesCount = Math.max(
+          targetCasesCount + 1,
+          Number(existingRule?.aboveCasesCount ?? targetCasesCount + 5)
+        );
+        const abovePercentage = Math.min(100, Math.max(0, Number(existingRule?.abovePercentage ?? 60)));
+
+        // حساب الحالات الفعلية للطبيب في الفترة الزمنية المختارة
+        const docBookings = filteredBookings.filter(b => b.doctorId === doc.id);
+        let paidExamCases = 0;
+        let cashCases = 0;
+        let insuranceCases = 0;
+        let consultationCases = 0;
+        let exemptCases = 0;
+
+        for (const b of docBookings) {
+          if (b.paymentMethod === 'consultation') {
+            consultationCases += 1;
+          } else if (b.paymentStatus === 'exempt' || b.paymentMethod === 'charity_exempt') {
+            exemptCases += 1;
+          } else if (b.paymentStatus === 'paid') {
+            paidExamCases += 1;
+            if (b.paymentMethod === 'insurance') {
+              insuranceCases += 1;
+            } else {
+              cashCases += 1;
+            }
+          }
+        }
+
+        // تحديد الشريحة المطبقة والنسبة المئوية تلقائياً بناءً على عدد حالات الكشف الفعلية
+        let appliedTierKey: 'none' | 'below' | 'target' | 'above' = 'none';
+        let appliedTierLabel = 'لا توجد حالات مسددة';
+        let appliedPercentage = 0;
+
+        if (paidExamCases === 0) {
+          appliedTierKey = 'none';
+          appliedTierLabel = `لا توجد كشوفات (شريحة الناقص ${belowPercentage}%)`;
+          appliedPercentage = belowPercentage;
+        } else if (paidExamCases >= aboveCasesCount) {
+          appliedTierKey = 'above';
+          appliedTierLabel = `شريحة الزيادة (${aboveCasesCount} حالة فأكثر)`;
+          appliedPercentage = abovePercentage;
+        } else if (paidExamCases < targetCasesCount || paidExamCases <= belowCasesCount) {
+          appliedTierKey = 'below';
+          appliedTierLabel = `شريحة الناقص (${belowCasesCount} حالات فأقل)`;
+          appliedPercentage = belowPercentage;
+        } else {
+          appliedTierKey = 'target';
+          appliedTierLabel = `شريحة المطلوب (${targetCasesCount} إلى ${aboveCasesCount - 1} حالة)`;
+          appliedPercentage = targetPercentage;
+        }
+
+        // يسري الحساب على سعر كشف الدكتور المعتمد × عدد حالات الكشف الفعلية
+        const totalExamValueByDoctorFee = paidExamCases * consultationFee;
+        const doctorCommissionAmount = Math.round(
+          (totalExamValueByDoctorFee * appliedPercentage) / 100
+        );
+        const clinicNetShareAmount = Math.max(
+          0,
+          totalExamValueByDoctorFee - doctorCommissionAmount
+        );
+
+        return {
+          doctor: doc,
+          doctorId: doc.id,
+          doctorName: doc.name,
+          clinicId: doc.clinicId,
+          clinicName: matchedClinic?.name || doc.clinicName || 'عيادة عامة',
+          isCustomConfigured: Boolean(existingRule),
+          consultationFee,
+          targetCasesCount,
+          targetPercentage,
+          belowCasesCount,
+          belowPercentage,
+          aboveCasesCount,
+          abovePercentage,
+          notes: existingRule?.notes || '',
+          updatedAt: existingRule?.updatedAt,
+          updatedBy: existingRule?.updatedBy,
+          totalBookingsCount: docBookings.length,
+          paidExamCases,
+          cashCases,
+          insuranceCases,
+          consultationCases,
+          exemptCases,
+          appliedTierKey,
+          appliedTierLabel,
+          appliedPercentage,
+          totalExamValueByDoctorFee,
+          doctorCommissionAmount,
+          clinicNetShareAmount
+        };
+      });
+
+    return rows.sort((a, b) => b.totalExamValueByDoctorFee - a.totalExamValueByDoctorFee);
+  }, [doctors, clinics, financeLedger?.doctorCommissionRules, filteredBookings, selectedClinicId, selectedDoctorId]);
+
+  const doctorCommissionTotals = useMemo(() => {
+    return doctorCommissionRows.reduce(
+      (acc, r) => {
+        acc.totalPaidCases += r.paidExamCases;
+        acc.totalConsultationCases += r.consultationCases;
+        acc.totalExamValue += r.totalExamValueByDoctorFee;
+        acc.totalDoctorShare += r.doctorCommissionAmount;
+        acc.totalClinicShare += r.clinicNetShareAmount;
+        return acc;
+      },
+      {
+        totalPaidCases: 0,
+        totalConsultationCases: 0,
+        totalExamValue: 0,
+        totalDoctorShare: 0,
+        totalClinicShare: 0
+      }
+    );
+  }, [doctorCommissionRows]);
+
+  // فتح نافذة تحديد نسب وشرائح الطبيب
+  const openDoctorCommissionModal = (row: (typeof doctorCommissionRows)[number]) => {
+    setEditingRuleDoctor(row.doctor);
+    setRuleConsultationFee(String(row.consultationFee));
+    setRuleTargetCases(String(row.targetCasesCount));
+    setRuleTargetPct(String(row.targetPercentage));
+    setRuleBelowCases(String(row.belowCasesCount));
+    setRuleBelowPct(String(row.belowPercentage));
+    setRuleAboveCases(String(row.aboveCasesCount));
+    setRuleAbovePct(String(row.abovePercentage));
+    setRuleNotes(row.notes || '');
+    setIsCommissionModalOpen(true);
+  };
+
+  const handleSaveDoctorCommissionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRuleDoctor) return;
+    setIsSavingCommissionRule(true);
+    try {
+      const matchedClinic = clinics.find(c => c.id === editingRuleDoctor.clinicId);
+      const ok = await saveDoctorCommissionRule({
+        doctorId: editingRuleDoctor.id,
+        doctorName: editingRuleDoctor.name,
+        clinicId: editingRuleDoctor.clinicId,
+        clinicName: matchedClinic?.name || editingRuleDoctor.clinicName,
+        consultationFee: Number(ruleConsultationFee) || 0,
+        targetCasesCount: Number(ruleTargetCases) || 10,
+        targetPercentage: Number(ruleTargetPct) || 50,
+        belowCasesCount: Number(ruleBelowCases) || 9,
+        belowPercentage: Number(ruleBelowPct) || 40,
+        aboveCasesCount: Number(ruleAboveCases) || 15,
+        abovePercentage: Number(ruleAbovePct) || 60,
+        notes: ruleNotes
+      });
+      if (ok) {
+        setIsCommissionModalOpen(false);
+        setEditingRuleDoctor(null);
+      }
+    } finally {
+      setIsSavingCommissionRule(false);
+    }
+  };
+
   // تجميع مطالبات شركات التأمين شاملة التسديدات والمديونية المتبقية
   const insuranceClaimsSummary = useMemo(() => {
     const map = new Map<
@@ -451,257 +670,476 @@ export const FinanceManagerView: React.FC = () => {
     return 'سجل شامل لكافة الفترات الزمنية';
   }, [dateFilterMode, todayStr, startDate, endDate]);
 
-  // تصدير شيت الإكسل الشامل بتنسيق احترافي من اليمين لليسار وعرض أعمدة تلقائي كامل
-  const handleExportComprehensiveExcel = () => {
-    try {
-      const wb = XLSX.utils.book_new();
-      setWorkbookRtlView(wb);
+  const filePeriodSuffix = useMemo(() => {
+    if (dateFilterMode === 'today') return todayStr;
+    if (dateFilterMode === 'custom_range') return `${startDate}_to_${endDate}`;
+    return 'all_dates';
+  }, [dateFilterMode, todayStr, startDate, endDate]);
 
-      // 1. شيت ملخص العيادات والأطباء وصافي الخزينة
-      const summaryRows = clinicDoctorBreakdown.map((r, idx) => ({
+  // ============================================================================
+  // دوال تجهيز البيانات المنسقة والملونة للإكسل (المحدد محدد والشامل شامل)
+  // ============================================================================
+
+  // 1. بناء صفوف شيت ملخص العيادات والخزينة (مدمج وأنيق بدون تكرار أرقام الحالات)
+  const buildClinicSummarySheetRows = () => {
+    const rows: Record<string, any>[] = clinicDoctorBreakdown.map((r, idx) => {
+      const breakdownParts: string[] = [];
+      if (r.cashCount > 0) breakdownParts.push(`${r.cashCount} نقدي`);
+      if (r.insuranceCount > 0) breakdownParts.push(`${r.insuranceCount} تأمين`);
+      if (r.consultationCount > 0) breakdownParts.push(`${r.consultationCount} استشارة`);
+      if (r.exemptCount > 0) breakdownParts.push(`${r.exemptCount} إعفاء`);
+
+      return {
         'م': idx + 1,
-        'اسم العيادة': r.clinicName,
+        'العيادة التخصصية': r.clinicName,
         'الطبيب المعالج': r.doctorName,
         'إجمالي الحالات': r.totalPatients,
-        'كشوفات نقدي': r.cashCount,
-        'كشوفات تأمين': r.insuranceCount,
-        'استشارات مجانية': r.consultationCount,
-        'إعفاء خيري': r.exemptCount,
+        'تفصيل الحالات': breakdownParts.join(' · ') || '—',
         'المحصل نقداً بالخزينة (ج.م)': r.cashInSafe,
-        'مطالبات شركات التأمين (ج.م)': r.insuranceClaim,
+        'مطالبة شركة التأمين (ج.م)': r.insuranceClaim,
         'إجمالي إيراد العيادة (ج.م)': r.grossRevenue
-      }));
-
-      summaryRows.push({
-        'م': '—' as any,
-        'اسم العيادة': 'الإجمالي العام لإيرادات الكشوفات',
-        'الطبيب المعالج': `${clinicDoctorBreakdown.length} عيادة / طبيب`,
-        'إجمالي الحالات': financialMetrics.totalCases,
-        'كشوفات نقدي': financialMetrics.cashBookingsCount,
-        'كشوفات تأمين': financialMetrics.insuranceBookingsCount,
-        'استشارات مجانية': financialMetrics.consultationCount,
-        'إعفاء خيري': financialMetrics.charityExemptCount,
-        'المحصل نقداً بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
-        'مطالبات شركات التأمين (ج.م)': financialMetrics.insuranceReceivables,
-        'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue
-      });
-
-      if (financialMetrics.totalExpenses > 0) {
-        summaryRows.push({
-          'م': '—' as any,
-          'اسم العيادة': 'إجمالي المصروفات النثرية والسحب من الخزينة (-)',
-          'الطبيب المعالج': `${filteredExpenses.length} حركة صرف`,
-          'إجمالي الحالات': 0,
-          'كشوفات نقدي': 0,
-          'كشوفات تأمين': 0,
-          'استشارات مجانية': 0,
-          'إعفاء خيري': 0,
-          'المحصل نقداً بالخزينة (ج.م)': -financialMetrics.totalExpenses,
-          'مطالبات شركات التأمين (ج.م)': 0,
-          'إجمالي إيراد العيادة (ج.م)': -financialMetrics.totalExpenses
-        });
-      }
-
-      summaryRows.push({
-        'م': '★' as any,
-        'اسم العيادة': 'صافي النقدية الفعلي المتبقي بالخزينة',
-        'الطبيب المعالج': 'بعد خصم المصروفات النثرية',
-        'إجمالي الحالات': financialMetrics.totalCases,
-        'كشوفات نقدي': financialMetrics.cashBookingsCount,
-        'كشوفات تأمين': financialMetrics.insuranceBookingsCount,
-        'استشارات مجانية': financialMetrics.consultationCount,
-        'إعفاء خيري': financialMetrics.charityExemptCount,
-        'المحصل نقداً بالخزينة (ج.م)': financialMetrics.netCashAfterExpenses,
-        'مطالبات شركات التأمين (ج.م)': financialMetrics.insuranceReceivables,
-        'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses
-      });
-
-      const wsSummary = buildFormattedRtlWorksheet(summaryRows, {
-        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات والأطباء وصافي الخزينة',
-        reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`
-      });
-      XLSX.utils.book_append_sheet(wb, wsSummary, 'ملخص العيادات والخزينة');
-
-      // 2. شيت السجل التفصيلي لكافة الحجوزات المفلترة
-      const formatBookingRow = (b: (typeof filteredBookings)[number], idx: number) => {
-        const paymentLabel =
-          b.paymentStatus === 'unpaid'
-            ? 'غير مسدد'
-            : b.paymentMethod === 'consultation'
-            ? 'استشارة مجانية'
-            : b.paymentStatus === 'exempt' || b.paymentMethod === 'charity_exempt'
-            ? 'إعفاء خيري'
-            : b.paymentMethod === 'insurance'
-            ? 'تأمين طبي'
-            : 'نقدي (كاش)';
-
-        const origFee = b.insuranceDetails?.originalFee ?? b.fee ?? 0;
-        const cashPaid =
-          b.paymentStatus === 'paid'
-            ? b.paymentMethod === 'insurance'
-              ? (b.insuranceDetails?.patientPaidAmount ?? b.fee ?? 0)
-              : b.fee
-            : 0;
-        const insCovered =
-          b.paymentStatus === 'paid' && b.paymentMethod === 'insurance'
-            ? (b.insuranceDetails?.insuranceCoveredAmount ?? Math.max(0, origFee - cashPaid))
-            : 0;
-
-        return {
-          'م': idx + 1,
-          'التاريخ': b.date,
-          'رقم التذكرة': b.ticketNumber,
-          'اسم المريض بالكامل': b.patientName,
-          'رقم الهاتف': b.patientPhone,
-          'العيادة التخصصية': b.clinicName,
-          'الطبيب المعالج': b.doctorName,
-          'طريقة السداد': paymentLabel,
-          'شركة التأمين': b.insuranceDetails?.companyName || '—',
-          'فئة الكارت': b.insuranceDetails?.cardCategory || '—',
-          'رقم كارت التأمين': b.insuranceDetails?.cardNumber || '—',
-          'نسبة التحمل بالكارت': b.insuranceDetails?.copayInputRaw
-            ? `${b.insuranceDetails.copayInputRaw} (${b.insuranceDetails.copayPercentage}%)`
-            : '—',
-          'قيمة الكشف الأصلية (ج.م)': origFee,
-          'المحصل بالخزينة (ج.م)': cashPaid,
-          'تحمل شركة التأمين (ج.م)': insCovered
-        };
       };
+    });
 
-      const allDetailedRows = filteredBookings.map((b, i) => formatBookingRow(b, i));
-      if (allDetailedRows.length > 0) {
-        allDetailedRows.push({
-          'م': 'الإجمالي' as any,
-          'التاريخ': '—',
-          'رقم التذكرة': `${filteredBookings.length} تذكرة`,
-          'اسم المريض بالكامل': 'إجمالي السجل التفصيلي',
-          'رقم الهاتف': '—',
-          'العيادة التخصصية': '—',
-          'الطبيب المعالج': '—',
-          'طريقة السداد': '—',
-          'شركة التأمين': '—',
-          'فئة الكارت': '—',
-          'رقم كارت التأمين': '—',
-          'نسبة التحمل بالكارت': '—',
-          'قيمة الكشف الأصلية (ج.م)': financialMetrics.totalGrossRevenue,
-          'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
-          'تحمل شركة التأمين (ج.م)': financialMetrics.insuranceReceivables
-        });
-      }
+    // صف إجمالي العيادات (واحد فقط واضح بدون تكرار)
+    rows.push({
+      'م': 'الإجمالي',
+      'العيادة التخصصية': 'إجمالي إيرادات العيادات التخصصية',
+      'الطبيب المعالج': `${clinicDoctorBreakdown.length} عيادة / طبيب`,
+      'إجمالي الحالات': financialMetrics.totalCases,
+      'تفصيل الحالات': `${financialMetrics.cashBookingsCount} نقدي · ${financialMetrics.insuranceBookingsCount} تأمين · ${financialMetrics.consultationCount} استشارة`,
+      'المحصل نقداً بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
+      'مطالبة شركة التأمين (ج.م)': financialMetrics.insuranceReceivables,
+      'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue
+    });
 
-      const wsAllDetailed = buildFormattedRtlWorksheet(
-        allDetailedRows.length > 0
-          ? allDetailedRows
-          : [{ 'بيان': 'لا توجد حجوزات مطابقة للفلاتر المحددة في هذه الفترة' }],
-        {
-          reportTitle: 'السجل التفصيلي الكامل للكشوفات وتفاصيل كروت التأمين الطبي',
-          reportSubtitle: periodSubtitleLabel
-        }
-      );
-      XLSX.utils.book_append_sheet(wb, wsAllDetailed, 'سجل الكشوفات التفصيلي');
+    // صف خصم المصروفات النثرية (بدون تكرار عدد الحالات حتى لا يختلط الجدول)
+    rows.push({
+      'م': '—',
+      'العيادة التخصصية': 'يُخصم: إجمالي المصروفات النثرية والمنصرف من الخزينة (-)',
+      'الطبيب المعالج': `${filteredExpenses.length} حركة صرف`,
+      'إجمالي الحالات': '—',
+      'تفصيل الحالات': 'تُخصم مباشرة من النقدية بالخزينة',
+      'المحصل نقداً بالخزينة (ج.م)': -financialMetrics.totalExpenses,
+      'مطالبة شركة التأمين (ج.م)': '—',
+      'إجمالي إيراد العيادة (ج.م)': -financialMetrics.totalExpenses
+    });
 
-      // 3. شيت مطالبات وتسديدات شركات التأمين
-      const insRows = insuranceClaimsSummary.map((item, idx) => ({
-        'م': idx + 1,
-        'اسم شركة التأمين': item.companyName,
-        'فئات الكروت المستخدمة': item.cardsList,
-        'عدد الكشوفات': item.casesCount,
-        'إجمالي قيمة الكشوفات (ج.م)': item.totalOriginalFees,
-        'إجمالي تحمل المرضى نقداً (ج.م)': item.totalPatientCopay,
-        'إجمالي المطالبة على الشركة (ج.م)': item.totalCompanyReceivable,
-        'المسدد من الشركة (ج.م)': item.settledAmount,
-        'المديونية المتبقية على الشركة (ج.م)': item.remainingBalance
-      }));
-      const wsInsurance = buildFormattedRtlWorksheet(
-        insRows.length > 0
-          ? insRows
-          : [{ 'بيان': 'لا توجد حالات تأمين طبي مسجلة في الفترة المحددة' }],
-        {
-          reportTitle: 'كشف حساب ومطالبات شركات التأمين الطبي المتعاقدة',
-          reportSubtitle: periodSubtitleLabel
-        }
-      );
-      XLSX.utils.book_append_sheet(wb, wsInsurance, 'مطالبات شركات التأمين');
+    // صف صافي النقدية الفعلي المتبقي بالخزينة (مميز باللون الأخضر والذهبي)
+    rows.push({
+      'م': '★',
+      'العيادة التخصصية': 'صافي النقدية الفعلي المتبقي بالخزينة (الرصيد الفعلي)',
+      'الطبيب المعالج': 'بعد خصم المصروفات النثرية',
+      'إجمالي الحالات': '—',
+      'تفصيل الحالات': `مستحقات الأطباء المحسوبة: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م`,
+      'المحصل نقداً بالخزينة (ج.م)': financialMetrics.netCashAfterExpenses,
+      'مطالبة شركة التأمين (ج.م)': financialMetrics.insuranceReceivables,
+      'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses
+    });
 
-      // 4. شيت المصروفات النثرية والسحب من الخزينة
-      const expenseRows = filteredExpenses.map((exp, idx) => ({
-        'م': idx + 1,
-        'التاريخ': exp.date,
-        'بيان المصروف / سبب السحب': exp.title,
-        'تصنيف المصروف': EXPENSE_CATEGORY_LABELS[exp.category] || exp.category,
-        'المبلغ المنصرف (ج.م)': exp.amount,
-        'المستلم / الجهة': exp.recipientName || '—',
-        'مسجل العملية': exp.createdBy,
-        'ملاحظات إضافية': exp.notes || '—'
-      }));
-      if (expenseRows.length > 0) {
-        expenseRows.push({
-          'م': 'الإجمالي' as any,
-          'التاريخ': '—',
-          'بيان المصروف / سبب السحب': 'إجمالي المصروفات المنصرفة من الخزينة',
-          'تصنيف المصروف': `${filteredExpenses.length} عملية`,
-          'المبلغ المنصرف (ج.م)': financialMetrics.totalExpenses,
-          'المستلم / الجهة': '—',
-          'مسجل العملية': '—',
-          'ملاحظات إضافية': '—'
-        });
-      }
-      const wsExpenses = buildFormattedRtlWorksheet(
-        expenseRows.length > 0
-          ? expenseRows
-          : [{ 'بيان': 'لا توجد مصروفات نثرية مسجلة في هذه الفترة' }],
-        {
-          reportTitle: 'سجل المصروفات النثرية والمنصرف النقدي من الخزينة',
-          reportSubtitle: periodSubtitleLabel
-        }
-      );
-      XLSX.utils.book_append_sheet(wb, wsExpenses, 'المصروفات النثرية');
+    return rows;
+  };
 
-      // 5. شيت تسليم واستلام الشفتات والخزينة
-      const handoverRows = shiftHandovers.map((h, idx) => ({
-        'م': idx + 1,
-        'التاريخ': h.shiftDate,
-        'القسم': h.department === 'cashier' ? 'الخزينة (الكاشير)' : 'الاستقبال',
-        'الموظف المُسلِّم': h.fromStaffName,
-        'الجهة / الموظف المُستلِم': h.toStaffName,
-        'نوع التسليم':
-          h.handoverType === 'cashier_to_management'
-            ? 'تسليم المبلغ للإدارة'
-            : h.handoverType === 'cashier_to_colleague'
-            ? 'تسليم الخزينة للزميل'
-            : 'تسليم شفت استقبال',
-        'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? '—',
-        'المبلغ الفعلي المستلم (ج.م)':
-          h.status === 'delivered_to_management'
-            ? (h.expectedAmount ?? '—')
-            : (h.actualReceivedAmount ?? 'قيد الاستلام'),
-        'الفرق المالي (ج.م)':
-          h.actualReceivedAmount !== undefined && h.expectedAmount !== undefined
-            ? h.actualReceivedAmount - h.expectedAmount
-            : 0,
-        'حالة الاستلام':
-          h.status === 'delivered_to_management'
-            ? 'تم التسليم للإدارة'
-            : h.status === 'accepted_exact'
-            ? 'تم الاستلام بالكامل (مطابق)'
-            : h.status === 'discrepancy_reported'
-            ? 'يوجد فرق (غير مطابق)'
-            : 'بانتظار تأكيد الزميل',
-        'اعتماد مدير المالية': h.managerApproved
-          ? `معتمد (${h.managerApprovedBy || 'مدير المالية'})`
-          : 'قيد المراجعة',
-        'ملاحظات': h.acknowledgmentNotes || h.notes || '—'
-      }));
-      const wsHandovers = buildFormattedRtlWorksheet(
-        handoverRows.length > 0 ? handoverRows : [{ 'بيان': 'لا توجد سجلات تسليم شفتات بعد' }],
-        {
-          reportTitle: 'سجل تسليم واستلام الشفتات وعهدة الخزينة واعتماد الإدارة المالية',
-          reportSubtitle: `إجمالي العمليات المسجلة: ${shiftHandovers.length}`
-        }
-      );
-      XLSX.utils.book_append_sheet(wb, wsHandovers, 'سجل تسليم الشفتات');
+  // 2. بناء صفوف شيت مستحقات ونسب الأطباء
+  const buildDoctorCommissionsSheetRows = () => {
+    const rows: Record<string, any>[] = doctorCommissionRows.map((r, idx) => ({
+      'م': idx + 1,
+      'اسم الطبيب': r.doctorName,
+      'العيادة التخصصية': r.clinicName,
+      'سعر كشف الدكتور (ج.م)': r.consultationFee,
+      'شروط الشرائح (ناقص / مطلوب / زيادة)': `ناقص (≤${r.belowCasesCount}): ${r.belowPercentage}% | مطلوب (${r.targetCasesCount}): ${r.targetPercentage}% | زيادة (≥${r.aboveCasesCount}): ${r.abovePercentage}%`,
+      'عدد الكشوفات المسددة': r.paidExamCases,
+      'استشارات مجانية': r.consultationCases,
+      'إجمالي قيمة الكشوفات (ج.م)': r.totalExamValueByDoctorFee,
+      'الشريحة المطبقة تلقائياً': r.appliedTierLabel,
+      'النسبة المستحقة (%)': `${r.appliedPercentage}%`,
+      'مستحقات الطبيب الصافية (ج.م)': r.doctorCommissionAmount,
+      'صافي نصيب العيادة / المركز (ج.م)': r.clinicNetShareAmount
+    }));
 
-      // 6. شيت مستقل لكل عيادة على حدة (مرتب ومنسق بالكامل)
+    if (rows.length > 0) {
+      rows.push({
+        'م': 'الإجمالي',
+        'اسم الطبيب': 'إجمالي مستحقات الأطباء ونصيب المركز',
+        'العيادة التخصصية': `${doctorCommissionRows.length} طبيب`,
+        'سعر كشف الدكتور (ج.م)': '—',
+        'شروط الشرائح (ناقص / مطلوب / زيادة)': 'حساب تلقائي حسب شريحة كل طبيب',
+        'عدد الكشوفات المسددة': doctorCommissionTotals.totalPaidCases,
+        'استشارات مجانية': doctorCommissionTotals.totalConsultationCases,
+        'إجمالي قيمة الكشوفات (ج.م)': doctorCommissionTotals.totalExamValue,
+        'الشريحة المطبقة تلقائياً': '—',
+        'النسبة المستحقة (%)': '—',
+        'مستحقات الطبيب الصافية (ج.م)': doctorCommissionTotals.totalDoctorShare,
+        'صافي نصيب العيادة / المركز (ج.م)': doctorCommissionTotals.totalClinicShare
+      });
+    }
+
+    return rows;
+  };
+
+  // 3. بناء صفوف السجل التفصيلي للكشوفات
+  const formatBookingRow = (b: (typeof filteredBookings)[number], idx: number) => {
+    const paymentLabel =
+      b.paymentStatus === 'unpaid'
+        ? 'غير مسدد'
+        : b.paymentMethod === 'consultation'
+        ? 'استشارة مجانية'
+        : b.paymentStatus === 'exempt' || b.paymentMethod === 'charity_exempt'
+        ? 'إعفاء خيري'
+        : b.paymentMethod === 'insurance'
+        ? 'تأمين طبي'
+        : 'نقدي (كاش)';
+
+    const origFee = b.insuranceDetails?.originalFee ?? b.fee ?? 0;
+    const cashPaid =
+      b.paymentStatus === 'paid'
+        ? b.paymentMethod === 'insurance'
+          ? (b.insuranceDetails?.patientPaidAmount ?? b.fee ?? 0)
+          : b.fee
+        : 0;
+    const insCovered =
+      b.paymentStatus === 'paid' && b.paymentMethod === 'insurance'
+        ? (b.insuranceDetails?.insuranceCoveredAmount ?? Math.max(0, origFee - cashPaid))
+        : 0;
+
+    return {
+      'م': idx + 1,
+      'التاريخ': b.date,
+      'رقم التذكرة': b.ticketNumber,
+      'اسم المريض بالكامل': b.patientName,
+      'رقم الهاتف': b.patientPhone,
+      'العيادة التخصصية': b.clinicName,
+      'الطبيب المعالج': b.doctorName,
+      'طريقة السداد': paymentLabel,
+      'شركة التأمين': b.insuranceDetails?.companyName || '—',
+      'فئة ورقم الكارت': b.insuranceDetails
+        ? `${b.insuranceDetails.cardCategory || ''} - ${b.insuranceDetails.cardNumber || ''}`
+        : '—',
+      'نسبة التحمل بالكارت': b.insuranceDetails?.copayInputRaw
+        ? `${b.insuranceDetails.copayInputRaw} (${b.insuranceDetails.copayPercentage}%)`
+        : '—',
+      'قيمة الكشف الأصلية (ج.م)': origFee,
+      'المحصل بالخزينة (ج.م)': cashPaid,
+      'تحمل شركة التأمين (ج.م)': insCovered
+    };
+  };
+
+  const buildDetailedBookingsSheetRows = () => {
+    const rows: Record<string, any>[] = filteredBookings.map((b, i) => formatBookingRow(b, i));
+    if (rows.length > 0) {
+      rows.push({
+        'م': 'الإجمالي',
+        'التاريخ': '—',
+        'رقم التذكرة': `${filteredBookings.length} تذكرة`,
+        'اسم المريض بالكامل': 'إجمالي السجل التفصيلي للكشوفات',
+        'رقم الهاتف': '—',
+        'العيادة التخصصية': '—',
+        'الطبيب المعالج': '—',
+        'طريقة السداد': '—',
+        'شركة التأمين': '—',
+        'فئة ورقم الكارت': '—',
+        'نسبة التحمل بالكارت': '—',
+        'قيمة الكشف الأصلية (ج.م)': financialMetrics.totalGrossRevenue,
+        'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
+        'تحمل شركة التأمين (ج.م)': financialMetrics.insuranceReceivables
+      });
+    }
+    return rows;
+  };
+
+  // 4. بناء صفوف شيت مطالبات شركات التأمين
+  const buildInsuranceClaimsSheetRows = () => {
+    const rows: Record<string, any>[] = insuranceClaimsSummary.map((item, idx) => ({
+      'م': idx + 1,
+      'اسم شركة التأمين': item.companyName,
+      'فئات الكروت المستخدمة': item.cardsList,
+      'عدد الكشوفات': item.casesCount,
+      'إجمالي قيمة الكشوفات (ج.م)': item.totalOriginalFees,
+      'تحمل المرضى نقداً (ج.م)': item.totalPatientCopay,
+      'إجمالي المطالبة على الشركة (ج.م)': item.totalCompanyReceivable,
+      'المسدد من الشركة (ج.م)': item.settledAmount,
+      'المديونية المتبقية على الشركة (ج.م)': item.remainingBalance
+    }));
+    if (rows.length > 0) {
+      rows.push({
+        'م': 'الإجمالي',
+        'اسم شركة التأمين': 'إجمالي مطالبات وتسديدات شركات التأمين',
+        'فئات الكروت المستخدمة': `${insuranceClaimsSummary.length} شركة`,
+        'عدد الكشوفات': financialMetrics.insuranceBookingsCount,
+        'إجمالي قيمة الكشوفات (ج.م)': insuranceClaimsSummary.reduce((s, x) => s + x.totalOriginalFees, 0),
+        'تحمل المرضى نقداً (ج.م)': insuranceClaimsSummary.reduce((s, x) => s + x.totalPatientCopay, 0),
+        'إجمالي المطالبة على الشركة (ج.م)': financialMetrics.insuranceReceivables,
+        'المسدد من الشركة (ج.م)': financialMetrics.totalSettledFromInsurance,
+        'المديونية المتبقية على الشركة (ج.م)': Math.max(
+          0,
+          financialMetrics.insuranceReceivables - financialMetrics.totalSettledFromInsurance
+        )
+      });
+    }
+    return rows;
+  };
+
+  // 5. بناء صفوف شيت المصروفات النثرية
+  const buildExpensesSheetRows = () => {
+    const rows: Record<string, any>[] = filteredExpenses.map((exp, idx) => ({
+      'م': idx + 1,
+      'التاريخ': exp.date,
+      'بيان المصروف / سبب السحب': exp.title,
+      'تصنيف المصروف': EXPENSE_CATEGORY_LABELS[exp.category] || exp.category,
+      'المبلغ المنصرف (ج.م)': exp.amount,
+      'المستلم / الجهة': exp.recipientName || exp.recipient || '—',
+      'مسجل العملية': exp.createdBy || exp.recordedBy,
+      'ملاحظات إضافية': exp.notes || '—'
+    }));
+    if (rows.length > 0) {
+      rows.push({
+        'م': 'الإجمالي',
+        'التاريخ': '—',
+        'بيان المصروف / سبب السحب': 'إجمالي المصروفات المنصرفة من الخزينة',
+        'تصنيف المصروف': `${filteredExpenses.length} حركة صرف`,
+        'المبلغ المنصرف (ج.م)': financialMetrics.totalExpenses,
+        'المستلم / الجهة': '—',
+        'مسجل العملية': '—',
+        'ملاحظات إضافية': '—'
+      });
+    }
+    return rows;
+  };
+
+  // 6. بناء صفوف شيت تسليم الشفتات
+  const buildHandoversSheetRows = () => {
+    return filteredHandovers.map((h, idx) => ({
+      'م': idx + 1,
+      'التاريخ': h.shiftDate,
+      'القسم': h.department === 'cashier' ? 'الخزينة (الكاشير)' : 'الاستقبال',
+      'الموظف المُسلِّم': h.fromStaffName,
+      'الجهة / الموظف المُستلِم': h.toStaffName,
+      'نوع التسليم':
+        h.handoverType === 'cashier_to_management'
+          ? 'تسليم المبلغ للإدارة'
+          : h.handoverType === 'cashier_to_colleague'
+          ? 'تسليم الخزينة للزميل'
+          : 'تسليم شفت استقبال',
+      'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? '—',
+      'المبلغ الفعلي المستلم (ج.م)':
+        h.status === 'delivered_to_management'
+          ? (h.expectedAmount ?? '—')
+          : (h.actualReceivedAmount ?? 'قيد الاستلام'),
+      'الفرق المالي (ج.م)':
+        h.actualReceivedAmount !== undefined && h.expectedAmount !== undefined
+          ? h.actualReceivedAmount - h.expectedAmount
+          : 0,
+      'حالة الاستلام':
+        h.status === 'delivered_to_management'
+          ? 'تم التسليم للإدارة'
+          : h.status === 'accepted_exact'
+          ? 'تم الاستلام بالكامل (مطابق)'
+          : h.status === 'discrepancy_reported'
+          ? 'يوجد فرق (غير مطابق)'
+          : 'بانتظار تأكيد الزميل',
+      'اعتماد مدير المالية': h.managerApproved
+        ? `معتمد (${h.managerApprovedBy || 'مدير المالية'})`
+        : 'قيد المراجعة',
+      'ملاحظات': h.acknowledgmentNotes || h.notes || '—'
+    }));
+  };
+
+  // ============================================================================
+  // أزرار التصدير المخصصة (المحدد ينزل شيت الجدول المحدد فقط — والشامل ينزل الشيت الشامل)
+  // ============================================================================
+
+  // أ) تصدير شيت ملخص العيادات والخزينة فقط
+  const handleExportClinicSummaryOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'ملخص العيادات والخزينة',
+        fileName: `ملخص_العيادات_والخزينة_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات وصافي الخزينة',
+        reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`,
+        rows: buildClinicSummarySheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '0F766E'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت ملخص العيادات والخزينة',
+        message: 'تم تصدير جدول ملخص العيادات وصافي الخزينة فقط بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // ب) تصدير شيت مستحقات ونسب الأطباء فقط
+  const handleExportDoctorCommissionsOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'مستحقات ونسب الأطباء',
+        fileName: `مستحقات_ونسب_الأطباء_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب شرائح ونسب ومستحقات الأطباء',
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي مستحقات الأطباء: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م · نصيب المركز: ${doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م`,
+        rows: buildDoctorCommissionsSheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '1E3A8A'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت مستحقات ونسب الأطباء (.xlsx)',
+        message: 'تم تصدير كشف حساب الأطباء وشرائح النسب وحصة العيادة بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // ج) تصدير شيت الكشوفات التفصيلية المفلترة فقط
+  const handleExportDetailedBookingsOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'سجل الكشوفات التفصيلي',
+        fileName: `سجل_الكشوفات_المفلتر_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — السجل التفصيلي للكشوفات المفلترة',
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${filteredBookings.length}`,
+        rows: buildDetailedBookingsSheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '047857'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت الكشوفات المفلترة فقط',
+        message: 'تم تصدير جدول الكشوفات المفلترة حالياً بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // د) تصدير شيت المصروفات النثرية فقط
+  const handleExportExpensesOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'المصروفات النثرية',
+        fileName: `سجل_المصروفات_النثرية_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — سجل المصروفات النثرية والمنصرف من الخزينة',
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي المنصرف: ${financialMetrics.totalExpenses.toLocaleString()} ج.م`,
+        rows: buildExpensesSheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: 'B45309'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت المصروفات النثرية فقط',
+        message: 'تم تصدير جدول المصروفات النثرية المحدد بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // هـ) تصدير شيت مطالبات شركات التأمين فقط
+  const handleExportInsuranceOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'مطالبات شركات التأمين',
+        fileName: `مطالبات_شركات_التأمين_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب ومطالبات شركات التأمين المتعاقدة',
+        reportSubtitle: `${periodSubtitleLabel} · إجمالي المطالبات: ${financialMetrics.insuranceReceivables.toLocaleString()} ج.م`,
+        rows: buildInsuranceClaimsSheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '1D4ED8'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت مطالبات شركات التأمين فقط',
+        message: 'تم تصدير جدول مطالبات وتسديدات شركات التأمين بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // و) تصدير شيت تسليم الشفتات فقط
+  const handleExportHandoversOnlyExcel = () => {
+    try {
+      exportSingleStyledSheetToExcel({
+        sheetName: 'سجل تسليم الشفتات',
+        fileName: `سجل_تسليم_الشفتات_${filePeriodSuffix}.xlsx`,
+        reportTitle: 'عيادات الشرايح التخصصية — سجل تسليم واستلام الشفتات واعتماد الإدارة المالية',
+        reportSubtitle: `إجمالي السجلات المعروضة: ${filteredHandovers.length}`,
+        rows: buildHandoversSheetRows(),
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '4338CA'
+      });
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل شيت تسليم الشفتات فقط',
+        message: 'تم تصدير جدول تسليم واستلام الشفتات بتنسيق ملون ومسطر.'
+      });
+    } catch (err: any) {
+      addToast({ type: 'error', title: 'تعذر التصدير', message: err?.message || 'حدث خطأ' });
+    }
+  };
+
+  // ز) تصدير الشيت المالي الشامل (يجمع كل الأوراق الملونة والمسطرة في مصنف واحد متكامل)
+  const handleExportComprehensiveExcel = () => {
+    try {
+      const wb = configureRtlWorkbook();
+
+      // 1. ورقة ملخص العيادات والخزينة
+      const wsSummary = buildFormattedRtlWorksheet(buildClinicSummarySheetRows(), {
+        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات والأطباء وصافي الخزينة',
+        reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '0F766E'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsSummary as any, 'ملخص العيادات والخزينة');
+
+      // 2. ورقة مستحقات ونسب الأطباء
+      const wsCommissions = buildFormattedRtlWorksheet(buildDoctorCommissionsSheetRows(), {
+        reportTitle: 'عيادات الشرايح التخصصية — كشف حساب شرائح ونسب ومستحقات الأطباء',
+        reportSubtitle: `${periodSubtitleLabel} · مستحقات الأطباء: ${doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م · نصيب المركز: ${doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م`,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '1E3A8A'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsCommissions as any, 'مستحقات ونسب الأطباء');
+
+      // 3. ورقة السجل التفصيلي للكشوفات
+      const wsAllDetailed = buildFormattedRtlWorksheet(buildDetailedBookingsSheetRows(), {
+        reportTitle: 'السجل التفصيلي الكامل للكشوفات وتفاصيل كروت التأمين الطبي',
+        reportSubtitle: periodSubtitleLabel,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '047857'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsAllDetailed as any, 'سجل الكشوفات التفصيلي');
+
+      // 4. ورقة مطالبات شركات التأمين
+      const wsInsurance = buildFormattedRtlWorksheet(buildInsuranceClaimsSheetRows(), {
+        reportTitle: 'كشف حساب ومطالبات شركات التأمين الطبي المتعاقدة',
+        reportSubtitle: periodSubtitleLabel,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '1D4ED8'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsInsurance as any, 'مطالبات شركات التأمين');
+
+      // 5. ورقة المصروفات النثرية
+      const wsExpenses = buildFormattedRtlWorksheet(buildExpensesSheetRows(), {
+        reportTitle: 'سجل المصروفات النثرية والمنصرف النقدي من الخزينة',
+        reportSubtitle: periodSubtitleLabel,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: 'B45309'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsExpenses as any, 'المصروفات النثرية');
+
+      // 6. ورقة تسليم الشفتات
+      const wsHandovers = buildFormattedRtlWorksheet(buildHandoversSheetRows(), {
+        reportTitle: 'سجل تسليم واستلام الشفتات وعهدة الخزينة واعتماد الإدارة المالية',
+        reportSubtitle: `إجمالي العمليات المسجلة: ${shiftHandovers.length}`,
+        enableAutoFilter: enableExcelAutoFilter,
+        headerBgColor: '4338CA'
+      });
+      XLSXStyle.utils.book_append_sheet(wb as any, wsHandovers as any, 'سجل تسليم الشفتات');
+
+      // 7. أوراق مستقلة لكل عيادة بها حجوزات في الفترة
       const clinicsWithBookings = clinics.filter(c =>
         filteredBookings.some(b => b.clinicId === c.id)
       );
@@ -731,8 +1169,7 @@ export const FinanceManagerView: React.FC = () => {
           'الطبيب المعالج': '—',
           'طريقة السداد': '—',
           'شركة التأمين': '—',
-          'فئة الكارت': '—',
-          'رقم كارت التأمين': '—',
+          'فئة ورقم الكارت': '—',
           'نسبة التحمل بالكارت': '—',
           'قيمة الكشف الأصلية (ج.م)': clinicOrigTotal,
           'المحصل بالخزينة (ج.م)': clinicCashTotal,
@@ -741,29 +1178,24 @@ export const FinanceManagerView: React.FC = () => {
 
         const wsClinic = buildFormattedRtlWorksheet(clinicRows, {
           reportTitle: `كشف حساب وحجوزات: ${clinic.name}`,
-          reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${clinicBookings.length}`
+          reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${clinicBookings.length}`,
+          enableAutoFilter: enableExcelAutoFilter,
+          headerBgColor: '0F766E'
         });
         const safeSheetName = clinic.name.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || clinic.id;
         try {
-          XLSX.utils.book_append_sheet(wb, wsClinic, safeSheetName);
+          XLSXStyle.utils.book_append_sheet(wb as any, wsClinic as any, safeSheetName);
         } catch {
           // ignore duplicate sheet name
         }
       }
 
-      const fileLabel =
-        dateFilterMode === 'today'
-          ? todayStr
-          : dateFilterMode === 'custom_range'
-          ? `${startDate}_to_${endDate}`
-          : 'all_dates';
-
-      XLSX.writeFile(wb, `Sharaya_Finance_Report_${fileLabel}.xlsx`);
+      writeStyledWorkbookFile(wb, `الشيت_المالي_الشامل_عيادات_الشرايح_${filePeriodSuffix}.xlsx`);
 
       addToast({
         type: 'success',
-        title: 'تم تصدير شيت الإكسل الاحترافي بنجاح',
-        message: 'تم ضبط اتجاه الشيت من اليمين لليسار وتوسيع كافة الخانات والأعمدة تلقائياً ليظهر الكلام كاملاً بوضوح.'
+        title: 'تم تصدير الشيت المالي الشامل الملون والمسطر بنجاح',
+        message: 'يحتوي الشيت على كافة الأوراق المالية + نسب الأطباء بتنسيق احترافي ملون ومسطر بالكامل.'
       });
     } catch (err: any) {
       addToast({
@@ -1062,10 +1494,24 @@ export const FinanceManagerView: React.FC = () => {
               type="button"
               onClick={handleExportComprehensiveExcel}
               className="flex-1 sm:flex-initial inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap"
+              title="تنزيل الدفتر المحاسبي الشامل المنسق والملون بجميع الشيتات (الملخص، نسب الأطباء، الحجوزات، التأمين، المصروفات، الشفتات)"
             >
               <FileSpreadsheet className="w-4 h-4 shrink-0" />
-              <span>تصدير شيت الإكسل (.xlsx)</span>
+              <span>الإكسل الشامل الكامل (.xlsx)</span>
             </button>
+
+            <label
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-[11px] font-bold text-slate-700 dark:text-slate-300 cursor-pointer select-none whitespace-nowrap"
+              title="عند التفعيل يظهر سهم الفلترة (▼) للفرز على الكمبيوتر، وعند الإيقاف تظهر العناوين كاملة على الموبايل بدون أي قص للحروف"
+            >
+              <input
+                type="checkbox"
+                checked={enableExcelAutoFilter}
+                onChange={e => setEnableExcelAutoFilter(e.target.checked)}
+                className="w-3.5 h-3.5 accent-emerald-600 rounded cursor-pointer"
+              />
+              <span>سهم فلتر الإكسل (▼)</span>
+            </label>
 
             <button
               type="button"
@@ -1109,8 +1555,8 @@ export const FinanceManagerView: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. شبكة المؤشرات المالية السريعة (شاملة صافي الخزينة بعد المصروفات) */}
-      <div className="print:hidden grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      {/* 2. شبكة المؤشرات المالية السريعة (شاملة صافي الخزينة ونسب الأطباء) */}
+      <div className="print:hidden grid grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-3.5">
         {/* صافي النقدية الفعلية بالخزينة بعد المصروفات */}
         <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
           <div className="flex items-start justify-between gap-2 mb-2">
@@ -1122,12 +1568,36 @@ export const FinanceManagerView: React.FC = () => {
             </div>
           </div>
           <div>
-            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
+            <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
               {financialMetrics.netCashAfterExpenses.toLocaleString()}{' '}
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
             <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
-              محصل: {financialMetrics.actualCashInSafe.toLocaleString()} · مصروفات: {financialMetrics.totalExpenses.toLocaleString()}
+              محصل: {financialMetrics.actualCashInSafe.toLocaleString()} · مصروف: {financialMetrics.totalExpenses.toLocaleString()}
+            </p>
+          </div>
+        </div>
+
+        {/* مستحقات نسب الأطباء وتارجت الحالات */}
+        <div
+          onClick={() => setActiveTab('commissions')}
+          className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-purple-200 dark:border-purple-800/70 shadow-xs flex flex-col justify-between cursor-pointer hover:border-purple-400 transition"
+        >
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <span className="text-[11px] sm:text-xs font-bold text-purple-700 dark:text-purple-300 leading-snug">
+              إجمالي نسب الأطباء
+            </span>
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0">
+              <Stethoscope className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            </div>
+          </div>
+          <div>
+            <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-purple-700 dark:text-purple-400">
+              {doctorCommissionTotals.totalDoctorShare.toLocaleString()}{' '}
+              <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
+            </div>
+            <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
+              صافي المركز: {doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م ({doctorCommissionTotals.totalPaidCases} حالة)
             </p>
           </div>
         </div>
@@ -1143,7 +1613,7 @@ export const FinanceManagerView: React.FC = () => {
             </div>
           </div>
           <div>
-            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400">
+            <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400">
               {financialMetrics.totalExpenses.toLocaleString()}{' '}
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
@@ -1164,7 +1634,7 @@ export const FinanceManagerView: React.FC = () => {
             </div>
           </div>
           <div>
-            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-blue-600 dark:text-blue-400">
+            <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-blue-600 dark:text-blue-400">
               {financialMetrics.insuranceReceivables.toLocaleString()}{' '}
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
@@ -1175,7 +1645,7 @@ export const FinanceManagerView: React.FC = () => {
         </div>
 
         {/* إجمالي قيمة الكشوفات */}
-        <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
+        <div className="col-span-2 lg:col-span-1 bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
           <div className="flex items-start justify-between gap-2 mb-2">
             <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
               إجمالي إيراد الكشوفات
@@ -1185,7 +1655,7 @@ export const FinanceManagerView: React.FC = () => {
             </div>
           </div>
           <div>
-            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white">
+            <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-slate-900 dark:text-white">
               {financialMetrics.totalGrossRevenue.toLocaleString()}{' '}
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
@@ -1196,25 +1666,38 @@ export const FinanceManagerView: React.FC = () => {
         </div>
       </div>
 
-      {/* 3. شريط التبويبات المدمج (4 تبويبات واضحة للموبايل والكمبيوتر) */}
-      <div className="print:hidden grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-slate-200/70 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80">
+      {/* 3. شريط التبويبات المدمج (5 تبويبات واضحة للموبايل والكمبيوتر) */}
+      <div className="print:hidden grid grid-cols-2 sm:grid-cols-5 gap-1.5 bg-slate-200/70 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80">
         <button
           type="button"
           onClick={() => setActiveTab('reports')}
-          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-3 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
             activeTab === 'reports'
               ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
               : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
           <FileSpreadsheet className="w-4 h-4 shrink-0" />
-          <span className="truncate">التقارير والإكسل</span>
+          <span className="truncate">التقارير والحجوزات</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveTab('commissions')}
+          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-3 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+            activeTab === 'commissions'
+              ? 'bg-white dark:bg-slate-900 text-purple-700 dark:text-purple-400 shadow-xs'
+              : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <Stethoscope className="w-4 h-4 shrink-0" />
+          <span className="truncate">نسب الأطباء ({doctors.length})</span>
         </button>
 
         <button
           type="button"
           onClick={() => setActiveTab('expenses')}
-          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-3 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
             activeTab === 'expenses'
               ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
               : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
@@ -1227,20 +1710,20 @@ export const FinanceManagerView: React.FC = () => {
         <button
           type="button"
           onClick={() => setActiveTab('insurance')}
-          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-3 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
             activeTab === 'insurance'
               ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
               : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
           }`}
         >
           <Shield className="w-4 h-4 shrink-0" />
-          <span className="truncate">التعاقدات والمطالبات ({insuranceContracts.length})</span>
+          <span className="truncate">التأمين والمطالبات ({insuranceContracts.length})</span>
         </button>
 
         <button
           type="button"
           onClick={() => setActiveTab('handovers')}
-          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+          className={`col-span-2 sm:col-span-1 flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-3 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
             activeTab === 'handovers'
               ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
               : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
@@ -1576,13 +2059,28 @@ export const FinanceManagerView: React.FC = () => {
 
           {/* السجل التفصيلي للكشوفات وتفاصيل كروت التأمين */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
-            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
               <div className="flex items-center gap-2">
                 <CreditCard className="w-5 h-5 text-emerald-600 shrink-0" />
-                <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                  السجل التفصيلي للكشوفات وتفاصيل كروت التأمين ({filteredBookings.length} حالة)
-                </h2>
+                <div>
+                  <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
+                    السجل التفصيلي للكشوفات وتفاصيل كروت التأمين ({filteredBookings.length} حالة)
+                  </h2>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    يعرض الحجوزات المطابقة للفلاتر الحالية فقط ({periodSubtitleLabel})
+                  </p>
+                </div>
               </div>
+
+              <button
+                type="button"
+                onClick={handleExportDetailedBookingsOnlyExcel}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold text-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                title="تنزيل شيت إكسل مستقل يحتوي فقط على جدول الحجوزات المفلترة حالياً"
+              >
+                <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                <span>تصدير إكسل الحجوزات المفلترة فقط (.xlsx)</span>
+              </button>
             </div>
 
             {filteredBookings.length === 0 ? (
@@ -1758,6 +2256,383 @@ export const FinanceManagerView: React.FC = () => {
       )}
 
       {/* ========================================== */}
+      {/* التبويب الجديد: نسب الأطباء وتارجت الحالات (3 شرائح يحددها مدير المالية) */}
+      {/* ========================================== */}
+      {activeTab === 'commissions' && (
+        <div className="print:hidden space-y-4">
+          {/* شريط علوي توضيحي + زر تصدير شيت نسب الأطباء المستقل */}
+          <div className="bg-white dark:bg-slate-800 rounded-2xl p-4 sm:p-5 border border-purple-200 dark:border-purple-800/70 shadow-xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <Stethoscope className="w-5 h-5 text-purple-600 shrink-0" />
+                <h2 className="text-base font-extrabold text-slate-900 dark:text-white">
+                  نظام احتساب نسب الأطباء وتارجت الحالات المتدرج ({periodSubtitleLabel})
+                </h2>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                يحدد مدير المالية لكل طبيب سعر الكشف المعتمد وعدد الحالات والنسبة المئوية في الـ 3 حالات (التارجت المطلوب · الزيادة · النقصان)، ويحسب النظام المستحقات تلقائياً من الحالات المسددة.
+              </p>
+            </div>
+
+            <div className="flex items-center flex-wrap gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handleExportDoctorCommissionsOnlyExcel}
+                className="inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap"
+                title="تنزيل شيت إكسل مستقل وملون يحتوي فقط على حساب نسب الأطباء وتارجت الحالات"
+              >
+                <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                <span>تصدير إكسل نسب الأطباء فقط (.xlsx)</span>
+              </button>
+            </div>
+          </div>
+
+          {/* ملخص سريع لإجمالي نسب الأطباء وصافي المركز */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-white dark:bg-slate-800 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700">
+              <div className="text-[11px] font-bold text-slate-500">إجمالي الحالات المسددة للأطباء</div>
+              <div className="text-lg font-black font-mono text-slate-900 dark:text-white mt-1">
+                {doctorCommissionTotals.totalPaidCases} حالة
+              </div>
+            </div>
+            <div className="bg-white dark:bg-slate-800 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700">
+              <div className="text-[11px] font-bold text-slate-500">إجمالي إيراد كشوفات الأطباء</div>
+              <div className="text-lg font-black font-mono text-blue-600 dark:text-blue-400 mt-1">
+                {doctorCommissionTotals.totalExamValue.toLocaleString()} ج.م
+              </div>
+            </div>
+            <div className="bg-purple-50/70 dark:bg-purple-950/30 p-3.5 rounded-2xl border border-purple-200 dark:border-purple-800/70">
+              <div className="text-[11px] font-bold text-purple-800 dark:text-purple-300">إجمالي مستحقات الأطباء</div>
+              <div className="text-lg font-black font-mono text-purple-700 dark:text-purple-400 mt-1">
+                {doctorCommissionTotals.totalDoctorShare.toLocaleString()} ج.م
+              </div>
+            </div>
+            <div className="bg-emerald-50/70 dark:bg-emerald-950/30 p-3.5 rounded-2xl border border-emerald-200 dark:border-emerald-800/70">
+              <div className="text-[11px] font-bold text-emerald-800 dark:text-emerald-300">صافي حصة المركز من الكشوفات</div>
+              <div className="text-lg font-black font-mono text-emerald-700 dark:text-emerald-400 mt-1">
+                {doctorCommissionTotals.totalClinicShare.toLocaleString()} ج.م
+              </div>
+            </div>
+          </div>
+
+          {/* نموذج تعديل شرائح الطبيب المختار (يظهر عند الضغط على زر ضبط النسب لأي طبيب) */}
+          {isCommissionModalOpen && editingRuleDoctor && (
+            <div className="bg-purple-50/60 dark:bg-purple-950/30 rounded-2xl p-4 sm:p-5 border-2 border-purple-400 dark:border-purple-600 shadow-md space-y-4">
+              <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-purple-200 dark:border-purple-800">
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold text-purple-950 dark:text-purple-100">
+                    ضبط شرائح الحالات والنسب المئوية للطبيب:{' '}
+                    <span className="underline">{editingRuleDoctor.name}</span>
+                  </h3>
+                  <p className="text-xs text-purple-700 dark:text-purple-300 mt-0.5">
+                    حدد عدد الحالات والنسبة المئوية لكل شريحة وسعر الكشف، وسيتم الحفظ فورا في قاعدة البيانات السحابية
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsCommissionModalOpen(false);
+                    setEditingRuleDoctor(null);
+                  }}
+                  className="p-1.5 rounded-xl text-purple-700 dark:text-purple-300 hover:bg-purple-100 dark:hover:bg-purple-900/50 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleSaveDoctorCommissionSubmit} className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                  {/* سعر الكشف المعتمد للحساب */}
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded-xl border border-slate-200 dark:border-slate-700">
+                    <label className="block text-xs font-extrabold text-slate-800 dark:text-slate-200 mb-1">
+                      سعر كشف الطبيب (ج.م) *
+                    </label>
+                    <input
+                      type="number"
+                      required
+                      min="0"
+                      step="any"
+                      value={ruleConsultationFee}
+                      onChange={e => setRuleConsultationFee(e.target.value)}
+                      className="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm font-mono font-black text-emerald-700 dark:text-emerald-400"
+                    />
+                    <p className="text-[10px] text-slate-500 mt-1">السعر الذي تسري عليه النسبة المئوية</p>
+                  </div>
+
+                  {/* الشريحة 1: التارجت المطلوب */}
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded-xl border border-amber-300 dark:border-amber-700/70">
+                    <div className="text-xs font-extrabold text-amber-800 dark:text-amber-300 mb-2">
+                      1. شريحة التارجت المطلوب (الأساسي)
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">عدد الحالات المطلوب</label>
+                        <input
+                          type="number"
+                          required
+                          min="1"
+                          value={ruleTargetCases}
+                          onChange={e => setRuleTargetCases(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">النسبة المئوية (%)</label>
+                        <input
+                          type="number"
+                          required
+                          min="0"
+                          max="100"
+                          step="any"
+                          value={ruleTargetPct}
+                          onChange={e => setRuleTargetPct(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold text-amber-700 dark:text-amber-400"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* الشريحة 2: حالة الزيادة (أكثر من المطلوب) */}
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded-xl border border-emerald-300 dark:border-emerald-700/70">
+                    <div className="text-xs font-extrabold text-emerald-800 dark:text-emerald-300 mb-2">
+                      2. شريحة الزيادة (تجاوز التارجت)
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">من عدد حالات (فأكثر)</label>
+                        <input
+                          type="number"
+                          required
+                          min="1"
+                          value={ruleAboveCases}
+                          onChange={e => setRuleAboveCases(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">نسبة الزيادة (%)</label>
+                        <input
+                          type="number"
+                          required
+                          min="0"
+                          max="100"
+                          step="any"
+                          value={ruleAbovePct}
+                          onChange={e => setRuleAbovePct(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold text-emerald-700 dark:text-emerald-400"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* الشريحة 3: حالة النقصان (أقل من المطلوب) */}
+                  <div className="bg-white dark:bg-slate-800 p-3 rounded-xl border border-rose-300 dark:border-rose-700/70">
+                    <div className="text-xs font-extrabold text-rose-800 dark:text-rose-300 mb-2">
+                      3. شريحة النقصان (أقل من التارجت)
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">عند حالات (أقل من التارجت)</label>
+                        <input
+                          type="number"
+                          required
+                          min="0"
+                          value={ruleBelowCases}
+                          onChange={e => setRuleBelowCases(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 mb-1">نسبة النقصان (%)</label>
+                        <input
+                          type="number"
+                          required
+                          min="0"
+                          max="100"
+                          step="any"
+                          value={ruleBelowPct}
+                          onChange={e => setRuleBelowPct(e.target.value)}
+                          className="w-full px-2.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono font-bold text-rose-700 dark:text-rose-400"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+                  <input
+                    type="text"
+                    value={ruleNotes}
+                    onChange={e => setRuleNotes(e.target.value)}
+                    placeholder="ملاحظات إضافية على اتفاق نسبة الطبيب (اختياري)..."
+                    className="flex-1 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-900 text-xs"
+                  />
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsCommissionModalOpen(false);
+                        setEditingRuleDoctor(null);
+                      }}
+                      className="px-4 py-2 rounded-xl bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 text-xs font-bold cursor-pointer"
+                    >
+                      إلغاء
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSavingCommissionRule}
+                      className="px-5 py-2 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-extrabold shadow-xs flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>{isSavingCommissionRule ? 'جاري الحفظ...' : 'حفظ النسب والاحتساب التلقائي'}</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {/* جدول وبطاقات الأطباء وحساب النسب التلقائي */}
+          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
+            {/* عرض الموبايل: بطاقات الأطباء */}
+            <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-700/60">
+              {doctorCommissionRows.map(d => (
+                <div key={d.doctorId} className="p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="font-extrabold text-sm text-slate-900 dark:text-white">{d.doctorName}</div>
+                      <div className="text-xs text-slate-500">
+                        {d.clinicName} · سعر الكشف: <strong className="font-mono">{d.consultationFee} ج.م</strong>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => openDoctorCommissionModal(d)}
+                      className="px-3 py-1.5 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 text-xs font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>تعديل النسب</span>
+                    </button>
+                  </div>
+
+                  {/* الشرائح الثلاث المحددة */}
+                  <div className="grid grid-cols-3 gap-1.5 text-[11px] text-center">
+                    <div className="p-2 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/50">
+                      <div className="text-slate-500">المطلوب ({d.targetCasesCount})</div>
+                      <div className="font-mono font-black text-amber-700 dark:text-amber-400">{d.targetPercentage}%</div>
+                    </div>
+                    <div className="p-2 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/60 dark:border-emerald-800/50">
+                      <div className="text-slate-500">الزيادة (≥{d.aboveCasesCount})</div>
+                      <div className="font-mono font-black text-emerald-700 dark:text-emerald-400">{d.abovePercentage}%</div>
+                    </div>
+                    <div className="p-2 rounded-xl bg-rose-50/70 dark:bg-rose-950/30 border border-rose-200/60 dark:border-rose-800/50">
+                      <div className="text-slate-500">النقصان (≤{d.belowCasesCount})</div>
+                      <div className="font-mono font-black text-rose-700 dark:text-rose-400">{d.belowPercentage}%</div>
+                    </div>
+                  </div>
+
+                  {/* النتيجة الفعلية المحسوبة */}
+                  <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-700 flex items-center justify-between gap-2 text-xs">
+                    <div>
+                      <div className="font-bold text-slate-800 dark:text-slate-200">
+                        الفعلي: <span className="font-mono font-black">{d.paidExamCases}</span> حالة ({d.appliedTierLabel})
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5">
+                        النسبة المطبقة تلقائياً: <strong className="font-mono text-purple-700 dark:text-purple-400">{d.appliedPercentage}%</strong> · الإيراد: {d.totalExamValueByDoctorFee.toLocaleString()} ج.م
+                      </div>
+                    </div>
+                    <div className="text-left shrink-0">
+                      <div className="text-[10px] text-purple-600 dark:text-purple-400 font-bold">مستحق الطبيب</div>
+                      <div className="text-sm font-mono font-black text-purple-700 dark:text-purple-300">
+                        {d.doctorCommissionAmount.toLocaleString()} ج.م
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* عرض الكمبيوتر: جدول كامل وواضح */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-right text-xs lg:text-sm">
+                <thead className="bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 text-xs font-bold">
+                  <tr>
+                    <th className="py-3.5 px-3">الطبيب والعيادة</th>
+                    <th className="py-3.5 px-3 text-center">سعر الكشف</th>
+                    <th className="py-3.5 px-3 text-center">التارجت المطلوب</th>
+                    <th className="py-3.5 px-3 text-center">شريحة الزيادة</th>
+                    <th className="py-3.5 px-3 text-center">شريحة النقصان</th>
+                    <th className="py-3.5 px-3 text-center">الحالات الفعلية</th>
+                    <th className="py-3.5 px-3 text-center">الشريحة والنسبة المطبقة</th>
+                    <th className="py-3.5 px-3">إجمالي كشوفات الطبيب</th>
+                    <th className="py-3.5 px-3">مستحق الطبيب (النسبة)</th>
+                    <th className="py-3.5 px-3">صافي حصة المركز</th>
+                    <th className="py-3.5 px-3 text-center">ضبط النسب</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                  {doctorCommissionRows.map(d => (
+                    <tr key={d.doctorId} className="hover:bg-slate-50/70 dark:hover:bg-slate-700/30">
+                      <td className="py-3 px-3">
+                        <div className="font-extrabold text-slate-900 dark:text-white">{d.doctorName}</div>
+                        <div className="text-xs text-slate-500">{d.clinicName}</div>
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono font-bold text-slate-800 dark:text-slate-200">
+                        {d.consultationFee.toLocaleString()} ج.م
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <span className="inline-block px-2 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/50 text-amber-800 dark:text-amber-300 font-mono text-xs font-bold border border-amber-200/70 dark:border-amber-800/60">
+                          {d.targetCasesCount} ح ← {d.targetPercentage}%
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <span className="inline-block px-2 py-1 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 font-mono text-xs font-bold border border-emerald-200/70 dark:border-emerald-800/60">
+                          ≥{d.aboveCasesCount} ح ← {d.abovePercentage}%
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <span className="inline-block px-2 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/50 text-rose-800 dark:text-rose-300 font-mono text-xs font-bold border border-rose-200/70 dark:border-rose-800/60">
+                          ≤{d.belowCasesCount} ح ← {d.belowPercentage}%
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 text-center font-mono font-black text-base text-slate-900 dark:text-white">
+                        {d.paidExamCases}
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <div className="font-bold text-xs text-slate-800 dark:text-slate-200">{d.appliedTierLabel}</div>
+                        <div className="font-mono font-black text-xs text-purple-700 dark:text-purple-400">
+                          تُطبق نسبة {d.appliedPercentage}%
+                        </div>
+                      </td>
+                      <td className="py-3 px-3 font-mono font-bold text-blue-700 dark:text-blue-400">
+                        {d.totalExamValueByDoctorFee.toLocaleString()} ج.م
+                      </td>
+                      <td className="py-3 px-3 font-mono font-black text-purple-700 dark:text-purple-300 text-sm">
+                        {d.doctorCommissionAmount.toLocaleString()} ج.م
+                      </td>
+                      <td className="py-3 px-3 font-mono font-extrabold text-emerald-700 dark:text-emerald-400">
+                        {d.clinicNetShareAmount.toLocaleString()} ج.م
+                      </td>
+                      <td className="py-3 px-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => openDoctorCommissionModal(d)}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold transition cursor-pointer whitespace-nowrap"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>تحديد النسب</span>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
       {/* التبويب الثاني: سجل المصروفات النثرية والسحب من الخزينة */}
       {/* ========================================== */}
       {activeTab === 'expenses' && (
@@ -1774,14 +2649,26 @@ export const FinanceManagerView: React.FC = () => {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setIsExpenseModalOpen(true)}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-4 h-4 shrink-0" />
-                <span>تسجيل مصروف أو سحب نقدي</span>
-              </button>
+              <div className="flex items-center flex-wrap gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={handleExportExpensesOnlyExcel}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold text-xs transition cursor-pointer whitespace-nowrap"
+                  title="تنزيل شيت إكسل مستقل يحتوي فقط على جدول المصروفات النثرية"
+                >
+                  <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                  <span>تصدير إكسل المصروفات فقط (.xlsx)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIsExpenseModalOpen(true)}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span>تسجيل مصروف أو سحب نقدي</span>
+                </button>
+              </div>
             </div>
 
             {filteredExpenses.length === 0 ? (
@@ -1992,16 +2879,28 @@ export const FinanceManagerView: React.FC = () => {
 
           {/* ملخص المطالبات المالية المستحقة على شركات التأمين */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
-            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between flex-wrap gap-2">
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between flex-wrap gap-3">
               <div className="flex items-center gap-2">
                 <BadgePercent className="w-5 h-5 text-blue-600 shrink-0" />
-                <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                  كشف حساب ومطالبات شركات التأمين والمديونية المتبقية
-                </h3>
+                <div>
+                  <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
+                    كشف حساب ومطالبات شركات التأمين والمديونية المتبقية
+                  </h3>
+                  <span className="text-xs text-slate-500">
+                    إجمالي المطالبات: <strong className="font-mono text-blue-600 dark:text-blue-400">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</strong>
+                  </span>
+                </div>
               </div>
-              <span className="text-xs text-slate-500">
-                إجمالي المطالبات: <strong className="font-mono text-blue-600 dark:text-blue-400">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</strong>
-              </span>
+
+              <button
+                type="button"
+                onClick={handleExportInsuranceOnlyExcel}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/60 hover:bg-blue-100 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 font-bold text-xs transition cursor-pointer whitespace-nowrap"
+                title="تنزيل شيت إكسل مستقل يحتوي فقط على مطالبات ومديونيات شركات التأمين"
+              >
+                <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                <span>تصدير إكسل مطالبات التأمين فقط (.xlsx)</span>
+              </button>
             </div>
 
             {insuranceClaimsSummary.length === 0 ? (
@@ -2159,54 +3058,66 @@ export const FinanceManagerView: React.FC = () => {
               </p>
             </div>
 
-            {/* أزرار فلترة الشفتات */}
-            <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-700 overflow-x-auto">
+            <div className="flex items-center flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => setHandoverFilter('all')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
-                  handoverFilter === 'all'
-                    ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-2xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
+                onClick={handleExportHandoversOnlyExcel}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 hover:bg-emerald-100 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 font-bold text-xs transition cursor-pointer whitespace-nowrap"
+                title="تنزيل شيت إكسل مستقل يحتوي فقط على سجل تسليم واستلام الشفتات"
               >
-                الكل ({shiftHandovers.length})
+                <FileSpreadsheet className="w-4 h-4 shrink-0" />
+                <span>تصدير إكسل الشفتات فقط (.xlsx)</span>
               </button>
-              <button
-                type="button"
-                onClick={() => setHandoverFilter('cashier')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
-                  handoverFilter === 'cashier'
-                    ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-2xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                الخزينة
-              </button>
-              <button
-                type="button"
-                onClick={() => setHandoverFilter('reception')}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
-                  handoverFilter === 'reception'
-                    ? 'bg-white dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 shadow-2xs'
-                    : 'text-slate-600 dark:text-slate-400'
-                }`}
-              >
-                الاستقبال
-              </button>
-              {discrepancyHandoversCount > 0 && (
+
+              {/* أزرار فلترة الشفتات */}
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-1 rounded-xl border border-slate-200 dark:border-slate-700 overflow-x-auto">
                 <button
                   type="button"
-                  onClick={() => setHandoverFilter('discrepancy')}
+                  onClick={() => setHandoverFilter('all')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
-                    handoverFilter === 'discrepancy'
-                      ? 'bg-rose-600 text-white shadow-2xs'
-                      : 'text-rose-600 dark:text-rose-400'
+                    handoverFilter === 'all'
+                      ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400'
                   }`}
                 >
-                  بها فرق ({discrepancyHandoversCount})
+                  الكل ({shiftHandovers.length})
                 </button>
-              )}
+                <button
+                  type="button"
+                  onClick={() => setHandoverFilter('cashier')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
+                    handoverFilter === 'cashier'
+                      ? 'bg-white dark:bg-slate-800 text-emerald-700 dark:text-emerald-400 shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  الخزينة
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setHandoverFilter('reception')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
+                    handoverFilter === 'reception'
+                      ? 'bg-white dark:bg-slate-800 text-indigo-700 dark:text-indigo-400 shadow-2xs'
+                      : 'text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  الاستقبال
+                </button>
+                {discrepancyHandoversCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setHandoverFilter('discrepancy')}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer whitespace-nowrap ${
+                      handoverFilter === 'discrepancy'
+                        ? 'bg-rose-600 text-white shadow-2xs'
+                        : 'text-rose-600 dark:text-rose-400'
+                    }`}
+                  >
+                    بها فرق ({discrepancyHandoversCount})
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
