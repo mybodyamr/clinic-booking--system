@@ -68,6 +68,60 @@ export interface ShiftHandoverRecord {
   createdAt: string;
   acknowledgedAt?: string;
   shiftDate: string;
+  managerApproved?: boolean;
+  managerApprovedBy?: string;
+  managerApprovedAt?: string;
+  managerNotes?: string;
+}
+
+export type ExpenseCategory =
+  | 'medical_supplies'
+  | 'utilities_bills'
+  | 'utilities_maintenance'
+  | 'maintenance'
+  | 'hospitality'
+  | 'hospitality_Allowance'
+  | 'refund_return'
+  | 'petty_cash'
+  | 'other';
+
+export interface FinanceExpenseRecord {
+  id: string;
+  date: string;
+  amount: number;
+  category: ExpenseCategory;
+  title: string;
+  recipient?: string;
+  recipientName?: string;
+  notes?: string;
+  recordedBy: string;
+  recordedByUsername: string;
+  createdBy?: string;
+  createdAt: string;
+}
+
+export interface InsuranceClaimSettlementRecord {
+  id: string;
+  companyId?: string;
+  companyName: string;
+  settlementDate: string;
+  paymentDate?: string;
+  periodFrom?: string;
+  periodTo?: string;
+  claimedAmount?: number;
+  paidAmount: number;
+  amountPaid?: number;
+  paymentMethod?: 'bank_transfer' | 'cheque' | 'cash';
+  paymentReference?: string;
+  referenceNumber?: string;
+  notes?: string;
+  recordedBy: string;
+  createdAt: string;
+}
+
+export interface FinanceLedgerState {
+  expenses: FinanceExpenseRecord[];
+  settlements: InsuranceClaimSettlementRecord[];
 }
 
 export interface SelectivePurgeOptions {
@@ -75,6 +129,7 @@ export interface SelectivePurgeOptions {
   purgeAllBookings: boolean;
   beforeDate?: string;
   purgeShiftHandovers: boolean;
+  purgeFinanceExpenses?: boolean;
   purgeConsultationStamps: boolean;
   purgeWhatsAppAndPrintLogs: boolean;
   purgeSystemErrorLogs: boolean;

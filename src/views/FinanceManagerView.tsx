@@ -24,11 +24,15 @@ import {
   Search,
   ChevronDown,
   ChevronUp,
-  RotateCcw
+  RotateCcw,
+  Receipt,
+  Printer,
+  BadgeCheck
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { getLocalDateStr } from '../services/scheduleService';
-import { InsuranceCompanyContract, SelectivePurgeOptions } from '../types';
+import { buildFormattedRtlWorksheet, setWorkbookRtlView } from '../services/storage';
+import { InsuranceCompanyContract, SelectivePurgeOptions, FinanceExpenseRecord } from '../types';
 
 const PRESET_CARD_CATEGORIES = [
   'فضي (Silver)',
@@ -38,6 +42,18 @@ const PRESET_CARD_CATEGORIES = [
   'VIP',
   'عادي (Standard)'
 ];
+
+const EXPENSE_CATEGORY_LABELS: Record<FinanceExpenseRecord['category'], string> = {
+  medical_supplies: 'مستلزمات طبية وتعقيم',
+  utilities_bills: 'فواتير ومرافق',
+  utilities_maintenance: 'صيانة ومرافق وفواتير',
+  maintenance: 'صيانة وإصلاحات',
+  hospitality: 'ضيافة واستقبال',
+  hospitality_Allowance: 'ضيافة وبدلات انتداب',
+  refund_return: 'رد كشف لمريض',
+  petty_cash: 'نثريات عامة',
+  other: 'مصروفات نثرية أخرى'
+};
 
 export const FinanceManagerView: React.FC = () => {
   const {
@@ -49,6 +65,12 @@ export const FinanceManagerView: React.FC = () => {
     saveInsuranceContract,
     deleteInsuranceContract,
     shiftHandovers,
+    approveShiftHandoverByManager,
+    financeLedger,
+    addFinanceExpense,
+    deleteFinanceExpense,
+    addInsuranceSettlement,
+    deleteInsuranceSettlement,
     consultationRegistry,
     errorLogs,
     selectivePurgeRecords,
@@ -59,7 +81,7 @@ export const FinanceManagerView: React.FC = () => {
   const todayStr = getLocalDateStr(new Date());
 
   // التبويب النشط
-  const [activeTab, setActiveTab] = useState<'reports' | 'insurance' | 'handovers'>('reports');
+  const [activeTab, setActiveTab] = useState<'reports' | 'expenses' | 'insurance' | 'handovers'>('reports');
 
   // فلاتر التقارير وشيت الإكسل
   const [dateFilterMode, setDateFilterMode] = useState<'today' | 'custom_range' | 'all'>('today');
@@ -74,6 +96,28 @@ export const FinanceManagerView: React.FC = () => {
 
   // فلتر سجل تسليم الشفتات
   const [handoverFilter, setHandoverFilter] = useState<'all' | 'cashier' | 'reception' | 'discrepancy'>('all');
+  const [approvingHandoverId, setApprovingHandoverId] = useState<string | null>(null);
+
+  // نافذة إضافة مصروف أو سحب نقدي من الخزينة
+  const [isExpenseModalOpen, setIsExpenseModalOpen] = useState<boolean>(false);
+  const [expenseTitle, setExpenseTitle] = useState<string>('');
+  const [expenseCategory, setExpenseCategory] = useState<FinanceExpenseRecord['category']>('medical_supplies');
+  const [expenseAmount, setExpenseAmount] = useState<string>('');
+  const [expenseRecipient, setExpenseRecipient] = useState<string>('');
+  const [expenseDate, setExpenseDate] = useState<string>(todayStr);
+  const [expenseNotes, setExpenseNotes] = useState<string>('');
+  const [isSavingExpense, setIsSavingExpense] = useState<boolean>(false);
+
+  // نافذة تسجيل تحصيل دفعة من شركة تأمين
+  const [isSettlementModalOpen, setIsSettlementModalOpen] = useState<boolean>(false);
+  const [settlementCompanyName, setSettlementCompanyName] = useState<string>('');
+  const [settlementCompanyId, setSettlementCompanyId] = useState<string>('');
+  const [settlementAmount, setSettlementAmount] = useState<string>('');
+  const [settlementDate, setSettlementDate] = useState<string>(todayStr);
+  const [settlementMethod, setSettlementMethod] = useState<'bank_transfer' | 'cheque' | 'cash'>('bank_transfer');
+  const [settlementRefNumber, setSettlementRefNumber] = useState<string>('');
+  const [settlementNotes, setSettlementNotes] = useState<string>('');
+  const [isSavingSettlement, setIsSavingSettlement] = useState<boolean>(false);
 
   // نافذة إضافة / تعديل شركة تأمين (Modal)
   const [isContractModalOpen, setIsContractModalOpen] = useState<boolean>(false);
@@ -98,7 +142,8 @@ export const FinanceManagerView: React.FC = () => {
     purgeShiftHandovers: false,
     purgeConsultationStamps: false,
     purgeWhatsAppAndPrintLogs: true,
-    purgeSystemErrorLogs: false
+    purgeSystemErrorLogs: false,
+    purgeFinanceExpenses: false
   });
   const [isPurging, setIsPurging] = useState<boolean>(false);
 
@@ -184,7 +229,20 @@ export const FinanceManagerView: React.FC = () => {
     searchQuery
   ]);
 
-  // المؤشرات المالية الدقيقة (Financial KPIs)
+  // المصروفات النثرية المفلترة حسب الفترة الزمنية المختارة
+  const filteredExpenses = useMemo(() => {
+    const list = financeLedger?.expenses || [];
+    return list.filter(exp => {
+      if (dateFilterMode === 'today') return exp.date === todayStr;
+      if (dateFilterMode === 'custom_range') {
+        if (startDate && exp.date < startDate) return false;
+        if (endDate && exp.date > endDate) return false;
+      }
+      return true;
+    });
+  }, [financeLedger?.expenses, dateFilterMode, todayStr, startDate, endDate]);
+
+  // المؤشرات المالية الدقيقة (Financial KPIs) شاملة المصروفات وصافي الخزينة
   const financialMetrics = useMemo(() => {
     let totalGrossRevenue = 0;
     let actualCashInSafe = 0;
@@ -226,10 +284,21 @@ export const FinanceManagerView: React.FC = () => {
       }
     }
 
+    const totalExpenses = filteredExpenses.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+    const netCashAfterExpenses = actualCashInSafe - totalExpenses;
+
+    const totalSettledFromInsurance = (financeLedger?.settlements || []).reduce(
+      (sum, s) => sum + (Number(s.paidAmount ?? s.amountPaid) || 0),
+      0
+    );
+
     return {
       totalGrossRevenue,
       actualCashInSafe,
+      totalExpenses,
+      netCashAfterExpenses,
       insuranceReceivables,
+      totalSettledFromInsurance,
       cashBookingsCount,
       insuranceBookingsCount,
       consultationCount,
@@ -237,7 +306,7 @@ export const FinanceManagerView: React.FC = () => {
       unpaidCount,
       totalCases: filteredBookings.length
     };
-  }, [filteredBookings]);
+  }, [filteredBookings, filteredExpenses, financeLedger?.settlements]);
 
   // تجميع إحصائيات كل عيادة وكل طبيب
   const clinicDoctorBreakdown = useMemo(() => {
@@ -303,7 +372,7 @@ export const FinanceManagerView: React.FC = () => {
     return Array.from(map.values()).sort((a, b) => b.grossRevenue - a.grossRevenue);
   }, [filteredBookings]);
 
-  // تجميع مطالبات شركات التأمين
+  // تجميع مطالبات شركات التأمين شاملة التسديدات والمديونية المتبقية
   const insuranceClaimsSummary = useMemo(() => {
     const map = new Map<
       string,
@@ -346,11 +415,25 @@ export const FinanceManagerView: React.FC = () => {
       }
     }
 
-    return Array.from(map.values()).map(item => ({
-      ...item,
-      cardsList: Array.from(item.cardsUsed).join(' · ') || 'غير محدد'
-    }));
-  }, [filteredBookings]);
+    const settlementsList = financeLedger?.settlements || [];
+
+    return Array.from(map.values()).map(item => {
+      const settledAmount = settlementsList
+        .filter(
+          s =>
+            (item.companyId && s.companyId === item.companyId) ||
+            s.companyName.trim() === item.companyName.trim()
+        )
+        .reduce((acc, s) => acc + (Number(s.paidAmount ?? s.amountPaid) || 0), 0);
+
+      return {
+        ...item,
+        cardsList: Array.from(item.cardsUsed).join(' · ') || 'غير محدد',
+        settledAmount,
+        remainingBalance: Math.max(0, item.totalCompanyReceivable - settledAmount)
+      };
+    });
+  }, [filteredBookings, financeLedger?.settlements]);
 
   // فلترة سجل تسليم الشفتات
   const filteredHandovers = useMemo(() => {
@@ -362,15 +445,22 @@ export const FinanceManagerView: React.FC = () => {
     });
   }, [shiftHandovers, handoverFilter]);
 
-  // تصدير شيت الإكسل الشامل
+  const periodSubtitleLabel = useMemo(() => {
+    if (dateFilterMode === 'today') return `تقرير يوم: ${todayStr}`;
+    if (dateFilterMode === 'custom_range') return `الفترة من ${startDate} إلى ${endDate}`;
+    return 'سجل شامل لكافة الفترات الزمنية';
+  }, [dateFilterMode, todayStr, startDate, endDate]);
+
+  // تصدير شيت الإكسل الشامل بتنسيق احترافي من اليمين لليسار وعرض أعمدة تلقائي كامل
   const handleExportComprehensiveExcel = () => {
     try {
       const wb = XLSX.utils.book_new();
+      setWorkbookRtlView(wb);
 
-      // 1. شيت ملخص العيادات والأطباء
+      // 1. شيت ملخص العيادات والأطباء وصافي الخزينة
       const summaryRows = clinicDoctorBreakdown.map((r, idx) => ({
         'م': idx + 1,
-        'العيادة': r.clinicName,
+        'اسم العيادة': r.clinicName,
         'الطبيب المعالج': r.doctorName,
         'إجمالي الحالات': r.totalPatients,
         'كشوفات نقدي': r.cashCount,
@@ -378,26 +468,59 @@ export const FinanceManagerView: React.FC = () => {
         'استشارات مجانية': r.consultationCount,
         'إعفاء خيري': r.exemptCount,
         'المحصل نقداً بالخزينة (ج.م)': r.cashInSafe,
-        'مستحقات شركات التأمين (ج.م)': r.insuranceClaim,
+        'مطالبات شركات التأمين (ج.م)': r.insuranceClaim,
         'إجمالي إيراد العيادة (ج.م)': r.grossRevenue
       }));
 
       summaryRows.push({
-        'م': 0,
-        'العيادة': 'الإجمالي العام',
-        'الطبيب المعالج': `${clinicDoctorBreakdown.length} عيادة/طبيب`,
+        'م': '—' as any,
+        'اسم العيادة': 'الإجمالي العام لإيرادات الكشوفات',
+        'الطبيب المعالج': `${clinicDoctorBreakdown.length} عيادة / طبيب`,
         'إجمالي الحالات': financialMetrics.totalCases,
         'كشوفات نقدي': financialMetrics.cashBookingsCount,
         'كشوفات تأمين': financialMetrics.insuranceBookingsCount,
         'استشارات مجانية': financialMetrics.consultationCount,
         'إعفاء خيري': financialMetrics.charityExemptCount,
         'المحصل نقداً بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
-        'مستحقات شركات التأمين (ج.م)': financialMetrics.insuranceReceivables,
+        'مطالبات شركات التأمين (ج.م)': financialMetrics.insuranceReceivables,
         'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue
       });
 
-      const wsSummary = XLSX.utils.json_to_sheet(summaryRows);
-      XLSX.utils.book_append_sheet(wb, wsSummary, 'ملخص العيادات والأطباء');
+      if (financialMetrics.totalExpenses > 0) {
+        summaryRows.push({
+          'م': '—' as any,
+          'اسم العيادة': 'إجمالي المصروفات النثرية والسحب من الخزينة (-)',
+          'الطبيب المعالج': `${filteredExpenses.length} حركة صرف`,
+          'إجمالي الحالات': 0,
+          'كشوفات نقدي': 0,
+          'كشوفات تأمين': 0,
+          'استشارات مجانية': 0,
+          'إعفاء خيري': 0,
+          'المحصل نقداً بالخزينة (ج.م)': -financialMetrics.totalExpenses,
+          'مطالبات شركات التأمين (ج.م)': 0,
+          'إجمالي إيراد العيادة (ج.م)': -financialMetrics.totalExpenses
+        });
+      }
+
+      summaryRows.push({
+        'م': '★' as any,
+        'اسم العيادة': 'صافي النقدية الفعلي المتبقي بالخزينة',
+        'الطبيب المعالج': 'بعد خصم المصروفات النثرية',
+        'إجمالي الحالات': financialMetrics.totalCases,
+        'كشوفات نقدي': financialMetrics.cashBookingsCount,
+        'كشوفات تأمين': financialMetrics.insuranceBookingsCount,
+        'استشارات مجانية': financialMetrics.consultationCount,
+        'إعفاء خيري': financialMetrics.charityExemptCount,
+        'المحصل نقداً بالخزينة (ج.م)': financialMetrics.netCashAfterExpenses,
+        'مطالبات شركات التأمين (ج.م)': financialMetrics.insuranceReceivables,
+        'إجمالي إيراد العيادة (ج.م)': financialMetrics.totalGrossRevenue - financialMetrics.totalExpenses
+      });
+
+      const wsSummary = buildFormattedRtlWorksheet(summaryRows, {
+        reportTitle: 'عيادات الشرايح التخصصية — ملخص إيرادات العيادات والأطباء وصافي الخزينة',
+        reportSubtitle: `${periodSubtitleLabel} · تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')}`
+      });
+      XLSX.utils.book_append_sheet(wb, wsSummary, 'ملخص العيادات والخزينة');
 
       // 2. شيت السجل التفصيلي لكافة الحجوزات المفلترة
       const formatBookingRow = (b: (typeof filteredBookings)[number], idx: number) => {
@@ -428,47 +551,113 @@ export const FinanceManagerView: React.FC = () => {
           'م': idx + 1,
           'التاريخ': b.date,
           'رقم التذكرة': b.ticketNumber,
-          'اسم المريض': b.patientName,
+          'اسم المريض بالكامل': b.patientName,
           'رقم الهاتف': b.patientPhone,
-          'العيادة': b.clinicName,
-          'الطبيب': b.doctorName,
-          'نوع السداد': paymentLabel,
-          'شركة التأمين': b.insuranceDetails?.companyName || '-',
-          'فئة الكارت': b.insuranceDetails?.cardCategory || '-',
-          'رقم كارت التأمين': b.insuranceDetails?.cardNumber || '-',
-          'نسبة التحمل المكتوبة بالكارت': b.insuranceDetails?.copayInputRaw
+          'العيادة التخصصية': b.clinicName,
+          'الطبيب المعالج': b.doctorName,
+          'طريقة السداد': paymentLabel,
+          'شركة التأمين': b.insuranceDetails?.companyName || '—',
+          'فئة الكارت': b.insuranceDetails?.cardCategory || '—',
+          'رقم كارت التأمين': b.insuranceDetails?.cardNumber || '—',
+          'نسبة التحمل بالكارت': b.insuranceDetails?.copayInputRaw
             ? `${b.insuranceDetails.copayInputRaw} (${b.insuranceDetails.copayPercentage}%)`
-            : '-',
+            : '—',
           'قيمة الكشف الأصلية (ج.م)': origFee,
-          'المدفوع نقداً بالخزينة (ج.م)': cashPaid,
-          'المستحق على شركة التأمين (ج.م)': insCovered
+          'المحصل بالخزينة (ج.م)': cashPaid,
+          'تحمل شركة التأمين (ج.م)': insCovered
         };
       };
 
       const allDetailedRows = filteredBookings.map((b, i) => formatBookingRow(b, i));
-      const wsAllDetailed = XLSX.utils.json_to_sheet(
+      if (allDetailedRows.length > 0) {
+        allDetailedRows.push({
+          'م': 'الإجمالي' as any,
+          'التاريخ': '—',
+          'رقم التذكرة': `${filteredBookings.length} تذكرة`,
+          'اسم المريض بالكامل': 'إجمالي السجل التفصيلي',
+          'رقم الهاتف': '—',
+          'العيادة التخصصية': '—',
+          'الطبيب المعالج': '—',
+          'طريقة السداد': '—',
+          'شركة التأمين': '—',
+          'فئة الكارت': '—',
+          'رقم كارت التأمين': '—',
+          'نسبة التحمل بالكارت': '—',
+          'قيمة الكشف الأصلية (ج.م)': financialMetrics.totalGrossRevenue,
+          'المحصل بالخزينة (ج.م)': financialMetrics.actualCashInSafe,
+          'تحمل شركة التأمين (ج.م)': financialMetrics.insuranceReceivables
+        });
+      }
+
+      const wsAllDetailed = buildFormattedRtlWorksheet(
         allDetailedRows.length > 0
           ? allDetailedRows
-          : [{ 'ملاحظة': 'لا توجد حجوزات مطابقة للفلاتر المحددة' }]
+          : [{ 'بيان': 'لا توجد حجوزات مطابقة للفلاتر المحددة في هذه الفترة' }],
+        {
+          reportTitle: 'السجل التفصيلي الكامل للكشوفات وتفاصيل كروت التأمين الطبي',
+          reportSubtitle: periodSubtitleLabel
+        }
       );
-      XLSX.utils.book_append_sheet(wb, wsAllDetailed, 'سجل الحجوزات التفصيلي');
+      XLSX.utils.book_append_sheet(wb, wsAllDetailed, 'سجل الكشوفات التفصيلي');
 
-      // 3. شيت مطالبات شركات التأمين
+      // 3. شيت مطالبات وتسديدات شركات التأمين
       const insRows = insuranceClaimsSummary.map((item, idx) => ({
         'م': idx + 1,
         'اسم شركة التأمين': item.companyName,
         'فئات الكروت المستخدمة': item.cardsList,
-        'عدد الحالات': item.casesCount,
+        'عدد الكشوفات': item.casesCount,
         'إجمالي قيمة الكشوفات (ج.م)': item.totalOriginalFees,
         'إجمالي تحمل المرضى نقداً (ج.م)': item.totalPatientCopay,
-        'صافي المطالبة المستحقة على الشركة (ج.م)': item.totalCompanyReceivable
+        'إجمالي المطالبة على الشركة (ج.م)': item.totalCompanyReceivable,
+        'المسدد من الشركة (ج.م)': item.settledAmount,
+        'المديونية المتبقية على الشركة (ج.م)': item.remainingBalance
       }));
-      const wsInsurance = XLSX.utils.json_to_sheet(
-        insRows.length > 0 ? insRows : [{ 'ملاحظة': 'لا توجد حالات تأمين طبي في الفترة المحددة' }]
+      const wsInsurance = buildFormattedRtlWorksheet(
+        insRows.length > 0
+          ? insRows
+          : [{ 'بيان': 'لا توجد حالات تأمين طبي مسجلة في الفترة المحددة' }],
+        {
+          reportTitle: 'كشف حساب ومطالبات شركات التأمين الطبي المتعاقدة',
+          reportSubtitle: periodSubtitleLabel
+        }
       );
       XLSX.utils.book_append_sheet(wb, wsInsurance, 'مطالبات شركات التأمين');
 
-      // 4. شيت تسليم واستلام الشفتات والخزينة
+      // 4. شيت المصروفات النثرية والسحب من الخزينة
+      const expenseRows = filteredExpenses.map((exp, idx) => ({
+        'م': idx + 1,
+        'التاريخ': exp.date,
+        'بيان المصروف / سبب السحب': exp.title,
+        'تصنيف المصروف': EXPENSE_CATEGORY_LABELS[exp.category] || exp.category,
+        'المبلغ المنصرف (ج.م)': exp.amount,
+        'المستلم / الجهة': exp.recipientName || '—',
+        'مسجل العملية': exp.createdBy,
+        'ملاحظات إضافية': exp.notes || '—'
+      }));
+      if (expenseRows.length > 0) {
+        expenseRows.push({
+          'م': 'الإجمالي' as any,
+          'التاريخ': '—',
+          'بيان المصروف / سبب السحب': 'إجمالي المصروفات المنصرفة من الخزينة',
+          'تصنيف المصروف': `${filteredExpenses.length} عملية`,
+          'المبلغ المنصرف (ج.م)': financialMetrics.totalExpenses,
+          'المستلم / الجهة': '—',
+          'مسجل العملية': '—',
+          'ملاحظات إضافية': '—'
+        });
+      }
+      const wsExpenses = buildFormattedRtlWorksheet(
+        expenseRows.length > 0
+          ? expenseRows
+          : [{ 'بيان': 'لا توجد مصروفات نثرية مسجلة في هذه الفترة' }],
+        {
+          reportTitle: 'سجل المصروفات النثرية والمنصرف النقدي من الخزينة',
+          reportSubtitle: periodSubtitleLabel
+        }
+      );
+      XLSX.utils.book_append_sheet(wb, wsExpenses, 'المصروفات النثرية');
+
+      // 5. شيت تسليم واستلام الشفتات والخزينة
       const handoverRows = shiftHandovers.map((h, idx) => ({
         'م': idx + 1,
         'التاريخ': h.shiftDate,
@@ -481,12 +670,12 @@ export const FinanceManagerView: React.FC = () => {
             : h.handoverType === 'cashier_to_colleague'
             ? 'تسليم الخزينة للزميل'
             : 'تسليم شفت استقبال',
-        'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? '-',
+        'المبلغ المُسلَّم (ج.م)': h.expectedAmount ?? '—',
         'المبلغ الفعلي المستلم (ج.م)':
           h.status === 'delivered_to_management'
-            ? (h.expectedAmount ?? '-')
+            ? (h.expectedAmount ?? '—')
             : (h.actualReceivedAmount ?? 'قيد الاستلام'),
-        'الفرق (ج.م)':
+        'الفرق المالي (ج.م)':
           h.actualReceivedAmount !== undefined && h.expectedAmount !== undefined
             ? h.actualReceivedAmount - h.expectedAmount
             : 0,
@@ -498,22 +687,63 @@ export const FinanceManagerView: React.FC = () => {
             : h.status === 'discrepancy_reported'
             ? 'يوجد فرق (غير مطابق)'
             : 'بانتظار تأكيد الزميل',
-        'ملاحظات': h.acknowledgmentNotes || h.notes || '-'
+        'اعتماد مدير المالية': h.managerApproved
+          ? `معتمد (${h.managerApprovedBy || 'مدير المالية'})`
+          : 'قيد المراجعة',
+        'ملاحظات': h.acknowledgmentNotes || h.notes || '—'
       }));
-      const wsHandovers = XLSX.utils.json_to_sheet(
-        handoverRows.length > 0 ? handoverRows : [{ 'ملاحظة': 'لا توجد سجلات تسليم شفتات بعد' }]
+      const wsHandovers = buildFormattedRtlWorksheet(
+        handoverRows.length > 0 ? handoverRows : [{ 'بيان': 'لا توجد سجلات تسليم شفتات بعد' }],
+        {
+          reportTitle: 'سجل تسليم واستلام الشفتات وعهدة الخزينة واعتماد الإدارة المالية',
+          reportSubtitle: `إجمالي العمليات المسجلة: ${shiftHandovers.length}`
+        }
       );
-      XLSX.utils.book_append_sheet(wb, wsHandovers, 'سجل تسليم الشفتات والخزينة');
+      XLSX.utils.book_append_sheet(wb, wsHandovers, 'سجل تسليم الشفتات');
 
-      // 5. شيت مستقل لكل عيادة على حدة
+      // 6. شيت مستقل لكل عيادة على حدة (مرتب ومنسق بالكامل)
       const clinicsWithBookings = clinics.filter(c =>
         filteredBookings.some(b => b.clinicId === c.id)
       );
       for (const clinic of clinicsWithBookings) {
         const clinicBookings = filteredBookings.filter(b => b.clinicId === clinic.id);
         const clinicRows = clinicBookings.map((b, i) => formatBookingRow(b, i));
-        const wsClinic = XLSX.utils.json_to_sheet(clinicRows);
-        const safeSheetName = clinic.name.replace(/[\\/?*[\]:]/g, '').slice(0, 30) || clinic.id;
+        const clinicCashTotal = clinicRows.reduce(
+          (acc, r) => acc + (Number(r['المحصل بالخزينة (ج.م)']) || 0),
+          0
+        );
+        const clinicInsTotal = clinicRows.reduce(
+          (acc, r) => acc + (Number(r['تحمل شركة التأمين (ج.م)']) || 0),
+          0
+        );
+        const clinicOrigTotal = clinicRows.reduce(
+          (acc, r) => acc + (Number(r['قيمة الكشف الأصلية (ج.م)']) || 0),
+          0
+        );
+
+        clinicRows.push({
+          'م': 'الإجمالي' as any,
+          'التاريخ': '—',
+          'رقم التذكرة': `${clinicBookings.length} حالة`,
+          'اسم المريض بالكامل': `إجمالي ${clinic.name}`,
+          'رقم الهاتف': '—',
+          'العيادة التخصصية': clinic.name,
+          'الطبيب المعالج': '—',
+          'طريقة السداد': '—',
+          'شركة التأمين': '—',
+          'فئة الكارت': '—',
+          'رقم كارت التأمين': '—',
+          'نسبة التحمل بالكارت': '—',
+          'قيمة الكشف الأصلية (ج.م)': clinicOrigTotal,
+          'المحصل بالخزينة (ج.م)': clinicCashTotal,
+          'تحمل شركة التأمين (ج.م)': clinicInsTotal
+        });
+
+        const wsClinic = buildFormattedRtlWorksheet(clinicRows, {
+          reportTitle: `كشف حساب وحجوزات: ${clinic.name}`,
+          reportSubtitle: `${periodSubtitleLabel} · إجمالي الحالات: ${clinicBookings.length}`
+        });
+        const safeSheetName = clinic.name.replace(/[\\/?*[\]:]/g, '').slice(0, 28) || clinic.id;
         try {
           XLSX.utils.book_append_sheet(wb, wsClinic, safeSheetName);
         } catch {
@@ -532,8 +762,8 @@ export const FinanceManagerView: React.FC = () => {
 
       addToast({
         type: 'success',
-        title: 'تم تصدير شيت الإكسل الشامل بنجاح',
-        message: 'تم تحميل ملف الإكسل شاملاً ملخص العيادات والأطباء، وشيت مستقل لكل عيادة، ومطالبات التأمين، وسجل الخزينة.'
+        title: 'تم تصدير شيت الإكسل الاحترافي بنجاح',
+        message: 'تم ضبط اتجاه الشيت من اليمين لليسار وتوسيع كافة الخانات والأعمدة تلقائياً ليظهر الكلام كاملاً بوضوح.'
       });
     } catch (err: any) {
       addToast({
@@ -541,6 +771,77 @@ export const FinanceManagerView: React.FC = () => {
         title: 'تعذر تصدير الإكسل',
         message: err?.message || 'حدث خطأ أثناء إنشاء ملف الإكسل.'
       });
+    }
+  };
+
+  // طباعة التقرير المالي اليومي الرسمي المختوم (A4 / PDF)
+  const handlePrintOfficialFinancialReport = () => {
+    window.print();
+  };
+
+  // حفظ مصروف نثري جديد
+  const handleSaveExpenseSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingExpense(true);
+    try {
+      const ok = await addFinanceExpense({
+        title: expenseTitle,
+        category: expenseCategory,
+        amount: Number(expenseAmount),
+        recipientName: expenseRecipient,
+        date: expenseDate || todayStr,
+        notes: expenseNotes
+      });
+      if (ok) {
+        setIsExpenseModalOpen(false);
+        setExpenseTitle('');
+        setExpenseAmount('');
+        setExpenseRecipient('');
+        setExpenseNotes('');
+      }
+    } finally {
+      setIsSavingExpense(false);
+    }
+  };
+
+  // حفظ تسديد مطالبة تأمين
+  const handleSaveSettlementSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingSettlement(true);
+    try {
+      const matchedContract = insuranceContracts.find(
+        c => c.id === settlementCompanyId || c.companyName === settlementCompanyName
+      );
+      const ok = await addInsuranceSettlement({
+        companyId: matchedContract?.id || settlementCompanyId || undefined,
+        companyName: matchedContract?.companyName || settlementCompanyName,
+        paidAmount: Number(settlementAmount),
+        amountPaid: Number(settlementAmount),
+        settlementDate: settlementDate || todayStr,
+        paymentDate: settlementDate || todayStr,
+        paymentMethod: settlementMethod,
+        paymentReference: settlementRefNumber,
+        referenceNumber: settlementRefNumber,
+        notes: settlementNotes
+      });
+      if (ok) {
+        setIsSettlementModalOpen(false);
+        setSettlementAmount('');
+        setSettlementRefNumber('');
+        setSettlementNotes('');
+      }
+    } finally {
+      setIsSavingSettlement(false);
+    }
+  };
+
+  // اعتماد تسليم الشفت بواسطة مدير المالية
+  const handleApproveHandover = async (handoverId: string) => {
+    setApprovingHandoverId(handoverId);
+    try {
+      await approveShiftHandoverByManager(handoverId, 'تمت المراجعة والاعتماد من الإدارة المالية');
+    } finally {
+      setApprovingHandoverId(null);
     }
   };
 
@@ -624,8 +925,116 @@ export const FinanceManagerView: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 py-4 sm:py-6 space-y-4 sm:space-y-5" dir="rtl">
+      {/* ================================================================= */}
+      {/* نسخة الطباعة الرسمية للتقرير المالي اليومي المختوم (تظهر عند الطباعة فقط A4) */}
+      {/* ================================================================= */}
+      <div className="hidden print:block bg-white text-slate-900 p-6 space-y-5 border border-slate-300 rounded-xl">
+        <div className="flex items-center justify-between border-b-2 border-slate-800 pb-4">
+          <div>
+            <h1 className="text-xl font-black">عيادات الشرايح التخصصية — الإدارة المالية</h1>
+            <p className="text-sm font-bold text-slate-600 mt-0.5">
+              تقرير التقفيل المالي وإيرادات العيادات وصافي الخزينة ({periodSubtitleLabel})
+            </p>
+          </div>
+          <div className="text-left text-xs font-mono">
+            <div>تاريخ الطباعة: {new Date().toLocaleDateString('ar-EG')}</div>
+            <div>الوقت: {new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' })}</div>
+            <div>المسؤول: {currentUser?.displayName}</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-5 gap-3 text-center border border-slate-300 rounded-xl p-3 bg-slate-50">
+          <div>
+            <div className="text-[11px] font-bold text-slate-600">إجمالي إيراد العيادات</div>
+            <div className="text-base font-black font-mono">{financialMetrics.totalGrossRevenue.toLocaleString()} ج.م</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold text-slate-600">المحصل نقداً بالخزينة</div>
+            <div className="text-base font-black font-mono text-emerald-700">{financialMetrics.actualCashInSafe.toLocaleString()} ج.م</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold text-slate-600">المصروفات النثرية (-)</div>
+            <div className="text-base font-black font-mono text-rose-700">{financialMetrics.totalExpenses.toLocaleString()} ج.م</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold text-slate-900">صافي النقدية الفعلي بالخزينة</div>
+            <div className="text-base font-black font-mono text-emerald-900">{financialMetrics.netCashAfterExpenses.toLocaleString()} ج.م</div>
+          </div>
+          <div>
+            <div className="text-[11px] font-bold text-slate-600">مطالبات شركات التأمين</div>
+            <div className="text-base font-black font-mono text-blue-700">{financialMetrics.insuranceReceivables.toLocaleString()} ج.م</div>
+          </div>
+        </div>
+
+        <div>
+          <h2 className="text-sm font-black mb-2">أولاً: ملخص إيرادات العيادات والأطباء</h2>
+          <table className="w-full text-right text-xs border-collapse border border-slate-400">
+            <thead>
+              <tr className="bg-slate-100">
+                <th className="border border-slate-400 p-1.5">العيادة</th>
+                <th className="border border-slate-400 p-1.5">الطبيب</th>
+                <th className="border border-slate-400 p-1.5 text-center">الحالات</th>
+                <th className="border border-slate-400 p-1.5 text-center">نقدي</th>
+                <th className="border border-slate-400 p-1.5 text-center">تأمين</th>
+                <th className="border border-slate-400 p-1.5">المحصل بالخزينة</th>
+                <th className="border border-slate-400 p-1.5">مطالبة التأمين</th>
+                <th className="border border-slate-400 p-1.5">إجمالي الإيراد</th>
+              </tr>
+            </thead>
+            <tbody>
+              {clinicDoctorBreakdown.map(r => (
+                <tr key={`${r.clinicId}_${r.doctorId}`}>
+                  <td className="border border-slate-400 p-1.5 font-bold">{r.clinicName}</td>
+                  <td className="border border-slate-400 p-1.5">{r.doctorName}</td>
+                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.totalPatients}</td>
+                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.cashCount}</td>
+                  <td className="border border-slate-400 p-1.5 text-center font-mono">{r.insuranceCount}</td>
+                  <td className="border border-slate-400 p-1.5 font-mono font-bold">{r.cashInSafe.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1.5 font-mono">{r.insuranceClaim.toLocaleString()} ج.م</td>
+                  <td className="border border-slate-400 p-1.5 font-mono font-black">{r.grossRevenue.toLocaleString()} ج.م</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {filteredExpenses.length > 0 && (
+          <div>
+            <h2 className="text-sm font-black mb-2">ثانياً: بيان المصروفات النثرية والمنصرف من الخزينة</h2>
+            <table className="w-full text-right text-xs border-collapse border border-slate-400">
+              <thead>
+                <tr className="bg-slate-100">
+                  <th className="border border-slate-400 p-1.5">التاريخ</th>
+                  <th className="border border-slate-400 p-1.5">بيان المصروف</th>
+                  <th className="border border-slate-400 p-1.5">التصنيف</th>
+                  <th className="border border-slate-400 p-1.5">المستلم</th>
+                  <th className="border border-slate-400 p-1.5">المبلغ</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredExpenses.map(exp => (
+                  <tr key={exp.id}>
+                    <td className="border border-slate-400 p-1.5 font-mono">{exp.date}</td>
+                    <td className="border border-slate-400 p-1.5 font-bold">{exp.title}</td>
+                    <td className="border border-slate-400 p-1.5">{EXPENSE_CATEGORY_LABELS[exp.category]}</td>
+                    <td className="border border-slate-400 p-1.5">{exp.recipientName || '—'}</td>
+                    <td className="border border-slate-400 p-1.5 font-mono font-bold">{exp.amount.toLocaleString()} ج.م</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="grid grid-cols-3 gap-6 pt-8 text-center text-xs font-bold">
+          <div className="border-t border-slate-400 pt-2">توقيع مسؤول الخزينة</div>
+          <div className="border-t border-slate-400 pt-2">مراجعة واعتماد مدير المالية ({currentUser?.displayName})</div>
+          <div className="border-t border-slate-400 pt-2">اعتماد إدارة عيادات الشرايح</div>
+        </div>
+      </div>
+
       {/* 1. شريط الهيدر العلوي الأنيق والمدمج (Compact Executive Header) */}
-      <div className="bg-white dark:bg-slate-800 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-700/80 shadow-xs">
+      <div className="print:hidden bg-white dark:bg-slate-800 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-700/80 shadow-xs">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3.5">
           <div className="flex items-start sm:items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-emerald-700 text-white flex items-center justify-center shrink-0 shadow-xs">
@@ -642,7 +1051,7 @@ export const FinanceManagerView: React.FC = () => {
                 </span>
               </div>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                متابعة إيرادات العيادات والأطباء · مطالبات وتعاقدات شركات التأمين · رقابة تسليم الخزينة
+                متابعة إيرادات العيادات وصافي الخزينة · المصروفات النثرية · مطالبات التأمين · اعتماد الشفتات
               </p>
             </div>
           </div>
@@ -656,6 +1065,25 @@ export const FinanceManagerView: React.FC = () => {
             >
               <FileSpreadsheet className="w-4 h-4 shrink-0" />
               <span>تصدير شيت الإكسل (.xlsx)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handlePrintOfficialFinancialReport}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-slate-900 dark:bg-slate-700 hover:bg-slate-800 dark:hover:bg-slate-600 text-white font-bold text-xs transition cursor-pointer whitespace-nowrap"
+              title="طباعة تقرير التقفيل المالي الرسمي A4 أو حفظه PDF"
+            >
+              <Printer className="w-4 h-4 shrink-0" />
+              <span>طباعة التقرير (A4)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsExpenseModalOpen(true)}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800/70 font-bold text-xs transition cursor-pointer whitespace-nowrap"
+            >
+              <Receipt className="w-4 h-4 shrink-0" />
+              <span>+ مصروف نثري</span>
             </button>
 
             <button
@@ -681,13 +1109,13 @@ export const FinanceManagerView: React.FC = () => {
         </div>
       </div>
 
-      {/* 2. شبكة المؤشرات المالية السريعة (2×2 على الموبايل و 4 أعمدة على الشاشات الكبيرة) */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        {/* النقدية الفعلية بالخزينة */}
+      {/* 2. شبكة المؤشرات المالية السريعة (شاملة صافي الخزينة بعد المصروفات) */}
+      <div className="print:hidden grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        {/* صافي النقدية الفعلية بالخزينة بعد المصروفات */}
         <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
           <div className="flex items-start justify-between gap-2 mb-2">
             <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
-              النقدية الفعلية بالخزينة
+              صافي النقدية بالخزينة
             </span>
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
               <Wallet className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
@@ -695,11 +1123,32 @@ export const FinanceManagerView: React.FC = () => {
           </div>
           <div>
             <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400">
-              {financialMetrics.actualCashInSafe.toLocaleString()}{' '}
+              {financialMetrics.netCashAfterExpenses.toLocaleString()}{' '}
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
             <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
-              {financialMetrics.cashBookingsCount} نقدي · {financialMetrics.insuranceBookingsCount} تحمل تأمين
+              محصل: {financialMetrics.actualCashInSafe.toLocaleString()} · مصروفات: {financialMetrics.totalExpenses.toLocaleString()}
+            </p>
+          </div>
+        </div>
+
+        {/* المصروفات النثرية والسحب النقدي */}
+        <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
+              المصروفات النثرية (المنصرف)
+            </span>
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0">
+              <Receipt className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
+            </div>
+          </div>
+          <div>
+            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400">
+              {financialMetrics.totalExpenses.toLocaleString()}{' '}
+              <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
+            </div>
+            <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
+              {filteredExpenses.length} حركة صرف مسجلة في الفترة
             </p>
           </div>
         </div>
@@ -708,7 +1157,7 @@ export const FinanceManagerView: React.FC = () => {
         <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
           <div className="flex items-start justify-between gap-2 mb-2">
             <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
-              مستحقات شركات التأمين
+              مطالبات شركات التأمين
             </span>
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
               <Shield className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
@@ -720,7 +1169,7 @@ export const FinanceManagerView: React.FC = () => {
               <span className="text-[11px] sm:text-xs font-sans font-bold">ج.م</span>
             </div>
             <p className="text-[10px] sm:text-xs text-slate-500 dark:text-slate-400 mt-1 truncate">
-              مطالبات {financialMetrics.insuranceBookingsCount} كشف تأمين طبي
+              مسدد منها: {financialMetrics.totalSettledFromInsurance.toLocaleString()} ج.م ({financialMetrics.insuranceBookingsCount} كشف)
             </p>
           </div>
         </div>
@@ -729,7 +1178,7 @@ export const FinanceManagerView: React.FC = () => {
         <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
           <div className="flex items-start justify-between gap-2 mb-2">
             <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
-              إجمالي قيمة الكشوفات
+              إجمالي إيراد الكشوفات
             </span>
             <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-teal-50 dark:bg-teal-950/60 text-teal-600 dark:text-teal-400 flex items-center justify-center shrink-0">
               <DollarSign className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
@@ -745,45 +1194,10 @@ export const FinanceManagerView: React.FC = () => {
             </p>
           </div>
         </div>
-
-        {/* رقابة تسليم الشفتات والخزينة */}
-        <div className="bg-white dark:bg-slate-800 rounded-2xl p-3.5 sm:p-4 border border-slate-200 dark:border-slate-700/80 shadow-xs flex flex-col justify-between">
-          <div className="flex items-start justify-between gap-2 mb-2">
-            <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 leading-snug">
-              رقابة تسليم الشفتات
-            </span>
-            <div
-              className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                discrepancyHandoversCount > 0
-                  ? 'bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400'
-                  : 'bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400'
-              }`}
-            >
-              <ArrowRightLeft className="w-4 h-4 sm:w-4.5 sm:h-4.5" />
-            </div>
-          </div>
-          <div>
-            <div className="text-lg sm:text-2xl font-black font-mono tabular-nums text-slate-900 dark:text-white">
-              {shiftHandovers.length}{' '}
-              <span className="text-[11px] sm:text-xs font-sans font-bold">عملية</span>
-            </div>
-            <p className="text-[10px] sm:text-xs mt-1 truncate">
-              {discrepancyHandoversCount > 0 ? (
-                <span className="text-rose-600 dark:text-rose-400 font-bold">
-                  يوجد {discrepancyHandoversCount} عملية بها فرق!
-                </span>
-              ) : (
-                <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                  جميع التسليمات مطابقة
-                </span>
-              )}
-            </p>
-          </div>
-        </div>
       </div>
 
-      {/* 3. شريط التبويبات المدمج (Segmented 3-Column Bar on Mobile & Desktop) */}
-      <div className="grid grid-cols-3 gap-1.5 bg-slate-200/70 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80">
+      {/* 3. شريط التبويبات المدمج (4 تبويبات واضحة للموبايل والكمبيوتر) */}
+      <div className="print:hidden grid grid-cols-2 sm:grid-cols-4 gap-1.5 bg-slate-200/70 dark:bg-slate-800/90 p-1.5 rounded-2xl border border-slate-200 dark:border-slate-700/80">
         <button
           type="button"
           onClick={() => setActiveTab('reports')}
@@ -799,6 +1213,19 @@ export const FinanceManagerView: React.FC = () => {
 
         <button
           type="button"
+          onClick={() => setActiveTab('expenses')}
+          className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
+            activeTab === 'expenses'
+              ? 'bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-400 shadow-xs'
+              : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+          }`}
+        >
+          <Receipt className="w-4 h-4 shrink-0" />
+          <span className="truncate">المصروفات ({filteredExpenses.length})</span>
+        </button>
+
+        <button
+          type="button"
           onClick={() => setActiveTab('insurance')}
           className={`flex items-center justify-center gap-1.5 py-2.5 px-2 sm:px-4 rounded-xl font-bold text-xs sm:text-sm transition cursor-pointer whitespace-nowrap ${
             activeTab === 'insurance'
@@ -807,7 +1234,7 @@ export const FinanceManagerView: React.FC = () => {
           }`}
         >
           <Shield className="w-4 h-4 shrink-0" />
-          <span className="truncate">التعاقدات ({insuranceContracts.length})</span>
+          <span className="truncate">التعاقدات والمطالبات ({insuranceContracts.length})</span>
         </button>
 
         <button
@@ -820,7 +1247,7 @@ export const FinanceManagerView: React.FC = () => {
           }`}
         >
           <ArrowRightLeft className="w-4 h-4 shrink-0" />
-          <span className="truncate">الشفتات ({shiftHandovers.length})</span>
+          <span className="truncate">الشفتات والاعتماد ({shiftHandovers.length})</span>
           {discrepancyHandoversCount > 0 && (
             <span className="w-2 h-2 rounded-full bg-rose-500 shrink-0" title="يوجد فرق مالي" />
           )}
@@ -831,7 +1258,7 @@ export const FinanceManagerView: React.FC = () => {
       {/* التبويب الأول: التقارير المالية وشيت الإكسل */}
       {/* ========================================== */}
       {activeTab === 'reports' && (
-        <div className="space-y-4 sm:space-y-5">
+        <div className="print:hidden space-y-4 sm:space-y-5">
           {/* شريط البحث والفلترة الذكي (مدمج على الموبايل ومفتوح على الكمبيوتر) */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-700/80 shadow-xs space-y-3.5">
             {/* الصف العلوي: البحث السريع + الفترة الزمنية + زر الفلاتر المتقدمة للموبايل */}
@@ -1331,10 +1758,127 @@ export const FinanceManagerView: React.FC = () => {
       )}
 
       {/* ========================================== */}
-      {/* التبويب الثاني: تعاقدات شركات التأمين وفئات الكروت */}
+      {/* التبويب الثاني: سجل المصروفات النثرية والسحب من الخزينة */}
+      {/* ========================================== */}
+      {activeTab === 'expenses' && (
+        <div className="print:hidden space-y-4">
+          <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
+            <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h2 className="text-base font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                  <Receipt className="w-5 h-5 text-amber-600 shrink-0" />
+                  <span>سجل المصروفات النثرية والمنصرف النقدي من الخزينة ({filteredExpenses.length})</span>
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  تُخصم هذه المصروفات تلقائياً من إجمالي النقدية لحساب صافي الخزينة الفعلي بدقة ({periodSubtitleLabel})
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsExpenseModalOpen(true)}
+                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Plus className="w-4 h-4 shrink-0" />
+                <span>تسجيل مصروف أو سحب نقدي</span>
+              </button>
+            </div>
+
+            {filteredExpenses.length === 0 ? (
+              <div className="py-10 px-4 text-center text-slate-400 text-xs sm:text-sm">
+                لا توجد مصروفات نثرية مسجلة في الفترة المحددة.
+              </div>
+            ) : (
+              <>
+                <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-700/60">
+                  {filteredExpenses.map(exp => (
+                    <div key={exp.id} className="p-4 flex items-start justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="font-extrabold text-sm text-slate-900 dark:text-white">
+                          {exp.title}
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          {EXPENSE_CATEGORY_LABELS[exp.category]} · <span className="font-mono">{exp.date}</span>
+                          {exp.recipientName ? ` · المستلم: ${exp.recipientName}` : ''}
+                        </div>
+                        {exp.notes && (
+                          <div className="text-[11px] text-slate-400">{exp.notes}</div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="font-mono font-black text-sm text-rose-600 dark:text-rose-400">
+                          -{exp.amount.toLocaleString()} ج.م
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => deleteFinanceExpense(exp.id)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                          title="حذف المصروف"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-right text-sm">
+                    <thead className="bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 text-xs font-bold">
+                      <tr>
+                        <th className="py-3 px-4">التاريخ</th>
+                        <th className="py-3 px-4">بيان المصروف / سبب السحب</th>
+                        <th className="py-3 px-4">التصنيف</th>
+                        <th className="py-3 px-4">المستلم / الجهة</th>
+                        <th className="py-3 px-4">المبلغ المنصرف</th>
+                        <th className="py-3 px-4">مسجل العملية</th>
+                        <th className="py-3 px-4 text-center">إجراء</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                      {filteredExpenses.map(exp => (
+                        <tr key={exp.id} className="hover:bg-slate-50/70 dark:hover:bg-slate-700/30">
+                          <td className="py-3 px-4 font-mono text-xs text-slate-500">{exp.date}</td>
+                          <td className="py-3 px-4">
+                            <div className="font-bold text-slate-900 dark:text-white">{exp.title}</div>
+                            {exp.notes && <div className="text-xs text-slate-500">{exp.notes}</div>}
+                          </td>
+                          <td className="py-3 px-4 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                            {EXPENSE_CATEGORY_LABELS[exp.category]}
+                          </td>
+                          <td className="py-3 px-4 text-xs text-slate-700 dark:text-slate-300">
+                            {exp.recipientName || '—'}
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums font-black text-rose-600 dark:text-rose-400">
+                            -{exp.amount.toLocaleString()} ج.م
+                          </td>
+                          <td className="py-3 px-4 text-xs text-slate-500">{exp.createdBy}</td>
+                          <td className="py-3 px-4 text-center">
+                            <button
+                              type="button"
+                              onClick={() => deleteFinanceExpense(exp.id)}
+                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                              title="حذف المصروف"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* التبويب الثالث: تعاقدات شركات التأمين وفئات الكروت وتسوية المطالبات */}
       {/* ========================================== */}
       {activeTab === 'insurance' && (
-        <div className="space-y-5">
+        <div className="print:hidden space-y-5">
           {/* قسم شركات التأمين المتعاقدة + زر إضافة شركة تأمين يفتح نافذة منبثقة نظيفة */}
           <div className="bg-white dark:bg-slate-800 rounded-2xl p-4 sm:p-5 border border-slate-200 dark:border-slate-700/80 shadow-xs space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-700/70">
@@ -1348,14 +1892,30 @@ export const FinanceManagerView: React.FC = () => {
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={openNewContractModal}
-                className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-4 h-4 shrink-0" />
-                <span>إضافة شركة تأمين جديدة</span>
-              </button>
+              <div className="flex items-center flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const firstCompany = insuranceContracts[0];
+                    setSettlementCompanyId(firstCompany?.id || '');
+                    setSettlementCompanyName(firstCompany?.companyName || '');
+                    setIsSettlementModalOpen(true);
+                  }}
+                  className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap"
+                >
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>تسجيل تحصيل دفعة من شركة تأمين</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={openNewContractModal}
+                  className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs shadow-xs transition cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-4 h-4 shrink-0" />
+                  <span>إضافة شركة تأمين جديدة</span>
+                </button>
+              </div>
             </div>
 
             {/* بطاقات شركات التأمين المتعاقدة — مدمجة وأنيقة */}
@@ -1412,15 +1972,15 @@ export const FinanceManagerView: React.FC = () => {
 
                     <div className="pt-2.5 border-t border-slate-200/70 dark:border-slate-700/60 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
                       <span>
-                        الحالات المسجلة:{' '}
+                        الحالات:{' '}
                         <strong className="font-mono text-slate-800 dark:text-slate-200">
                           {companyStats?.casesCount || 0}
                         </strong>
                       </span>
                       <span>
-                        المطالبة:{' '}
+                        المتبقي:{' '}
                         <strong className="font-mono text-blue-600 dark:text-blue-400">
-                          {(companyStats?.totalCompanyReceivable || 0).toLocaleString()} ج.م
+                          {(companyStats?.remainingBalance ?? companyStats?.totalCompanyReceivable ?? 0).toLocaleString()} ج.م
                         </strong>
                       </span>
                     </div>
@@ -1436,7 +1996,7 @@ export const FinanceManagerView: React.FC = () => {
               <div className="flex items-center gap-2">
                 <BadgePercent className="w-5 h-5 text-blue-600 shrink-0" />
                 <h3 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                  ملخص المطالبات المالية المستحقة على شركات التأمين
+                  كشف حساب ومطالبات شركات التأمين والمديونية المتبقية
                 </h3>
               </div>
               <span className="text-xs text-slate-500">
@@ -1450,7 +2010,6 @@ export const FinanceManagerView: React.FC = () => {
               </div>
             ) : (
               <>
-                {/* عرض الموبايل: بطاقات ملخص واضحة لكل شركة تأمين */}
                 <div className="md:hidden divide-y divide-slate-100 dark:divide-slate-700/60">
                   {insuranceClaimsSummary.map(item => (
                     <div key={item.companyName} className="p-4 space-y-2">
@@ -1468,17 +2027,23 @@ export const FinanceManagerView: React.FC = () => {
                         </span>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 pt-1">
-                        <div className="p-2 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/50">
-                          <div className="text-[10px] text-emerald-800 dark:text-emerald-300">تحمل المرضى (نقداً)</div>
-                          <div className="text-xs font-mono font-extrabold text-emerald-700 dark:text-emerald-400">
-                            {item.totalPatientCopay.toLocaleString()} ج.م
-                          </div>
-                        </div>
+                      <div className="grid grid-cols-3 gap-2 pt-1">
                         <div className="p-2 rounded-xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-100 dark:border-blue-900/50">
-                          <div className="text-[10px] text-blue-800 dark:text-blue-300">المستحق على الشركة</div>
+                          <div className="text-[10px] text-blue-800 dark:text-blue-300">إجمالي المطالبة</div>
                           <div className="text-xs font-mono font-black text-blue-700 dark:text-blue-400">
                             {item.totalCompanyReceivable.toLocaleString()} ج.م
+                          </div>
+                        </div>
+                        <div className="p-2 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-100 dark:border-emerald-900/50">
+                          <div className="text-[10px] text-emerald-800 dark:text-emerald-300">المسدد</div>
+                          <div className="text-xs font-mono font-extrabold text-emerald-700 dark:text-emerald-400">
+                            {item.settledAmount.toLocaleString()} ج.م
+                          </div>
+                        </div>
+                        <div className="p-2 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-100 dark:border-amber-900/50">
+                          <div className="text-[10px] text-amber-800 dark:text-amber-300">المتبقي</div>
+                          <div className="text-xs font-mono font-black text-amber-700 dark:text-amber-400">
+                            {item.remainingBalance.toLocaleString()} ج.م
                           </div>
                         </div>
                       </div>
@@ -1486,7 +2051,6 @@ export const FinanceManagerView: React.FC = () => {
                   ))}
                 </div>
 
-                {/* عرض الكمبيوتر: جدول كامل */}
                 <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-right text-sm">
                     <thead className="bg-slate-50 dark:bg-slate-900/60 text-slate-600 dark:text-slate-300 text-xs font-bold">
@@ -1495,7 +2059,9 @@ export const FinanceManagerView: React.FC = () => {
                         <th className="py-3 px-4">فئات الكروت المستخدمة</th>
                         <th className="py-3 px-4 text-center">عدد الكشوفات</th>
                         <th className="py-3 px-4">تحمل المرضى (نقداً)</th>
-                        <th className="py-3 px-4">المستحق على الشركة</th>
+                        <th className="py-3 px-4">إجمالي المطالبة</th>
+                        <th className="py-3 px-4">المسدد من الشركة</th>
+                        <th className="py-3 px-4">المديونية المتبقية</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -1516,6 +2082,12 @@ export const FinanceManagerView: React.FC = () => {
                           <td className="py-3 px-4 font-mono tabular-nums font-black text-blue-600 dark:text-blue-400">
                             {item.totalCompanyReceivable.toLocaleString()} ج.م
                           </td>
+                          <td className="py-3 px-4 font-mono tabular-nums font-bold text-emerald-600">
+                            {item.settledAmount.toLocaleString()} ج.م
+                          </td>
+                          <td className="py-3 px-4 font-mono tabular-nums font-black text-amber-600 dark:text-amber-400">
+                            {item.remainingBalance.toLocaleString()} ج.م
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -1524,24 +2096,66 @@ export const FinanceManagerView: React.FC = () => {
               </>
             )}
           </div>
+
+          {/* سجل الدفعات والشيكات المحصلة من شركات التأمين */}
+          {(financeLedger?.settlements || []).length > 0 && (
+            <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
+              <div className="p-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
+                <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  سجل الدفعات والشيكات المحصلة من شركات التأمين ({financeLedger.settlements.length})
+                </h3>
+              </div>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700/60">
+                {financeLedger.settlements.map(st => (
+                  <div key={st.id} className="p-3.5 sm:px-5 flex items-center justify-between gap-3 text-xs">
+                    <div>
+                      <div className="font-extrabold text-slate-900 dark:text-white">
+                        {st.companyName} —{' '}
+                        <span className="font-mono text-emerald-600 dark:text-emerald-400">
+                          {(st.paidAmount ?? st.amountPaid ?? 0).toLocaleString()} ج.م
+                        </span>
+                      </div>
+                      <div className="text-slate-500 mt-0.5">
+                        تاريخ السداد: <span className="font-mono">{st.settlementDate || st.paymentDate}</span> · طريقة الدفع:{' '}
+                        {st.paymentMethod === 'bank_transfer'
+                          ? 'تحويل بنكي'
+                          : st.paymentMethod === 'cheque'
+                          ? 'شيك بنكي'
+                          : 'نقدي'}{' '}
+                        {st.paymentReference || st.referenceNumber ? `· مرجع: ${st.paymentReference || st.referenceNumber}` : ''}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => deleteInsuranceSettlement(st.id)}
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 cursor-pointer"
+                      title="حذف عملية التحصيل"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
       {/* ========================================== */}
-      {/* التبويب الثالث: رقابة تسليم واستلام الشفتات والخزينة */}
+      {/* التبويب الرابع: رقابة تسليم واستلام الشفتات واعتماد مدير المالية */}
       {/* ========================================== */}
       {activeTab === 'handovers' && (
-        <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
+        <div className="print:hidden bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700/80 shadow-xs overflow-hidden">
           <div className="p-4 sm:p-5 border-b border-slate-200 dark:border-slate-700 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
                 <ArrowRightLeft className="w-5 h-5 text-emerald-600 shrink-0" />
                 <h2 className="text-sm sm:text-base font-extrabold text-slate-900 dark:text-white">
-                  سجل تسليم واستلام الشفتات وعهدة الخزينة ({filteredHandovers.length})
+                  سجل تسليم واستلام الشفتات واعتماد الإدارة المالية ({filteredHandovers.length})
                 </h2>
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                متابعة تسليم المبلغ للإدارة أو للزميل والتأكد من مطابقة المبلغ الفعلي المستلم
+                متابعة تسليم المبلغ للإدارة أو للزميل واعتماد التقفيل رسمياً بواسطة مدير المالية
               </p>
             </div>
 
@@ -1675,11 +2289,26 @@ export const FinanceManagerView: React.FC = () => {
                         </div>
                       )}
 
-                      {(h.acknowledgmentNotes || h.notes) && (
+                      <div className="flex items-center justify-between pt-1">
                         <div className="text-[11px] text-slate-500 dark:text-slate-400">
-                          ملاحظات: {h.acknowledgmentNotes || h.notes}
+                          {h.acknowledgmentNotes || h.notes || ''}
                         </div>
-                      )}
+                        {h.managerApproved ? (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700 dark:text-emerald-400">
+                            <BadgeCheck className="w-4 h-4" />
+                            <span>معتمد ({h.managerApprovedBy})</span>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={approvingHandoverId === h.id}
+                            onClick={() => handleApproveHandover(h.id)}
+                            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold cursor-pointer"
+                          >
+                            {approvingHandoverId === h.id ? 'جاري الاعتماد...' : 'اعتماد التقفيل'}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}
@@ -1698,7 +2327,7 @@ export const FinanceManagerView: React.FC = () => {
                       <th className="py-3.5 px-4">المبلغ المُسلَّم</th>
                       <th className="py-3.5 px-4">المبلغ الفعلي المستلم</th>
                       <th className="py-3.5 px-4">الحالة والفرق</th>
-                      <th className="py-3.5 px-4">ملاحظات</th>
+                      <th className="py-3.5 px-4">اعتماد مدير المالية</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-slate-700/60">
@@ -1769,9 +2398,28 @@ export const FinanceManagerView: React.FC = () => {
                                 بانتظار استلام الزميل
                               </span>
                             )}
+                            {(h.acknowledgmentNotes || h.notes) && (
+                              <div className="text-[11px] font-normal text-slate-400 mt-0.5">
+                                {h.acknowledgmentNotes || h.notes}
+                              </div>
+                            )}
                           </td>
-                          <td className="py-3.5 px-4 text-xs text-slate-500">
-                            {h.acknowledgmentNotes || h.notes || '—'}
+                          <td className="py-3.5 px-4 text-xs">
+                            {h.managerApproved ? (
+                              <div className="inline-flex items-center gap-1 font-bold text-emerald-700 dark:text-emerald-400">
+                                <BadgeCheck className="w-4 h-4 shrink-0" />
+                                <span>معتمد ({h.managerApprovedBy})</span>
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={approvingHandoverId === h.id}
+                                onClick={() => handleApproveHandover(h.id)}
+                                className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs transition cursor-pointer whitespace-nowrap"
+                              >
+                                {approvingHandoverId === h.id ? 'جاري الاعتماد...' : 'اعتماد التقفيل'}
+                              </button>
+                            )}
                           </td>
                         </tr>
                       );
@@ -2109,7 +2757,27 @@ export const FinanceManagerView: React.FC = () => {
                 </div>
               </label>
 
-              {/* خيار 6: مسح سجلات أخطاء النظام */}
+              {/* خيار 6: مسح سجلات المصروفات النثرية */}
+              <label className="flex items-start gap-3 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/30 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!purgeOptions.purgeFinanceExpenses}
+                  onChange={e =>
+                    setPurgeOptions(prev => ({ ...prev, purgeFinanceExpenses: e.target.checked }))
+                  }
+                  className="mt-1 w-4 h-4 accent-rose-600"
+                />
+                <div className="flex-1 text-xs">
+                  <div className="font-extrabold text-slate-900 dark:text-white">
+                    مسح سجلات المصروفات النثرية السابقة ({financeLedger?.expenses?.length || 0} عملية)
+                  </div>
+                  <p className="text-slate-500 mt-0.5">
+                    تفريغ سجل المصروفات النثرية والمنصرف النقدي السابق بعد تصديره للإكسل.
+                  </p>
+                </div>
+              </label>
+
+              {/* خيار 7: مسح سجلات أخطاء النظام */}
               <label className="flex items-start gap-3 p-3 rounded-2xl border border-slate-200 dark:border-slate-700 hover:bg-slate-50 dark:hover:bg-slate-700/30 cursor-pointer">
                 <input
                   type="checkbox"
@@ -2148,6 +2816,295 @@ export const FinanceManagerView: React.FC = () => {
                 <span>{isPurging ? 'جاري المسح...' : 'تنفيذ مسح السجلات المحددة'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* نافذة تسجيل مصروف نثري أو سحب نقدي من الخزينة */}
+      {/* ========================================== */}
+      {isExpenseModalOpen && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl max-w-md w-full p-5 sm:p-6 border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-700">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 flex items-center justify-center shrink-0">
+                  <Receipt className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    تسجيل مصروف نثري / سحب من الخزينة
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    يُخصم المبلغ تلقائياً من النقدية لإظهار صافي الخزينة الفعلي
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsExpenseModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveExpenseSubmit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  بيان المصروف أو سبب السحب *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={expenseTitle}
+                  onChange={e => setExpenseTitle(e.target.value)}
+                  placeholder="مثال: شراء مستلزمات تعقيم / رد كشف مريض / فاتورة كهرباء"
+                  className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs sm:text-sm font-semibold"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    المبلغ المنصرف (ج.م) *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    step="any"
+                    value={expenseAmount}
+                    onChange={e => setExpenseAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    التاريخ *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={expenseDate}
+                    onChange={e => setExpenseDate(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  تصنيف المصروف
+                </label>
+                <select
+                  value={expenseCategory}
+                  onChange={e => setExpenseCategory(e.target.value as FinanceExpenseRecord['category'])}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold"
+                >
+                  <option value="medical_supplies">مستلزمات طبية وتعقيم</option>
+                  <option value="utilities_maintenance">صيانة ومرافق وفواتير</option>
+                  <option value="hospitality_Allowance">ضيافة وبدلات انتداب</option>
+                  <option value="refund_return">رد كشف لمريض</option>
+                  <option value="other">مصروفات نثرية أخرى</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  اسم المستلم / الجهة (اختياري)
+                </label>
+                <input
+                  type="text"
+                  value={expenseRecipient}
+                  onChange={e => setExpenseRecipient(e.target.value)}
+                  placeholder="اسم الموظف أو المورد المستلم للمبلغ"
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  ملاحظات إضافية (اختياري)
+                </label>
+                <input
+                  type="text"
+                  value={expenseNotes}
+                  onChange={e => setExpenseNotes(e.target.value)}
+                  placeholder="رقم إيصال أو تفاصيل إضافية..."
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setIsExpenseModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingExpense}
+                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-extrabold text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{isSavingExpense ? 'جاري الحفظ...' : 'حفظ المصروف وخصمه من الخزينة'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* نافذة تسجيل تحصيل دفعة من شركة تأمين */}
+      {/* ========================================== */}
+      {isSettlementModalOpen && (
+        <div className="print:hidden fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-xs p-3 sm:p-4">
+          <div className="bg-white dark:bg-slate-800 rounded-3xl max-w-md w-full p-5 sm:p-6 border border-slate-200 dark:border-slate-700 shadow-2xl space-y-4">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-100 dark:border-slate-700">
+              <div className="flex items-center gap-2.5">
+                <div className="w-10 h-10 rounded-xl bg-blue-100 dark:bg-blue-950 text-blue-700 dark:text-blue-300 flex items-center justify-center shrink-0">
+                  <Shield className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900 dark:text-white">
+                    تسجيل تحصيل دفعة من شركة تأمين
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    تُخصم الدفعة من إجمالي المطالبات لإظهار المديونية المتبقية بدقة
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsSettlementModalOpen(false)}
+                className="p-1.5 rounded-xl text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveSettlementSubmit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  شركة التأمين *
+                </label>
+                <select
+                  required
+                  value={settlementCompanyName}
+                  onChange={e => {
+                    const name = e.target.value;
+                    setSettlementCompanyName(name);
+                    const c = insuranceContracts.find(ic => ic.companyName === name);
+                    setSettlementCompanyId(c?.id || '');
+                  }}
+                  className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold"
+                >
+                  <option value="">— اختر شركة التأمين —</option>
+                  {insuranceContracts.map(c => (
+                    <option key={c.id} value={c.companyName}>
+                      {c.companyName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    المبلغ المحصل (ج.م) *
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    min="1"
+                    step="any"
+                    value={settlementAmount}
+                    onChange={e => setSettlementAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-sm font-mono font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    تاريخ التحصيل *
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={settlementDate}
+                    onChange={e => setSettlementDate(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    طريقة السداد
+                  </label>
+                  <select
+                    value={settlementMethod}
+                    onChange={e =>
+                      setSettlementMethod(e.target.value as 'bank_transfer' | 'cheque' | 'cash')
+                    }
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-bold"
+                  >
+                    <option value="bank_transfer">تحويل بنكي</option>
+                    <option value="cheque">شيك بنكي</option>
+                    <option value="cash">نقدي بالخزينة</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                    رقم الشيك / التحويل
+                  </label>
+                  <input
+                    type="text"
+                    value={settlementRefNumber}
+                    onChange={e => setSettlementRefNumber(e.target.value)}
+                    placeholder="اختياري..."
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
+                  ملاحظات التسوية (اختياري)
+                </label>
+                <input
+                  type="text"
+                  value={settlementNotes}
+                  onChange={e => setSettlementNotes(e.target.value)}
+                  placeholder="مثال: دفعة تحت حساب مطالبات شهر أكتوبر..."
+                  className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 text-xs"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-700">
+                <button
+                  type="button"
+                  onClick={() => setIsSettlementModalOpen(false)}
+                  className="px-4 py-2.5 rounded-xl bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingSettlement}
+                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-xs shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{isSavingSettlement ? 'جاري الحفظ...' : 'تسجيل التحصيل'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

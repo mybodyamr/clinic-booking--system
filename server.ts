@@ -4489,7 +4489,9 @@ export function createApiApp(options?: ServerRecoveryOptions) {
               return true;
             }
             if (
-              (rowId === '_system_whatsapp_sent' || rowId === '_system_consultations') &&
+              (rowId === '_system_whatsapp_sent' ||
+                rowId === '_system_consultations' ||
+                rowId === '_system_finance_ledger') &&
               (!verifiedCallerRole || !['admin', 'finance_manager', 'reception', 'cashier'].includes(verifiedCallerRole))
             ) {
               return true;
@@ -4708,11 +4710,13 @@ export function createApiApp(options?: ServerRecoveryOptions) {
                 bodyObj.id === '_system_insurance_bookings' ||
                 bodyObj.id === '_system_shift_handovers' ||
                 bodyObj.id === '_system_finance_managers' ||
+                bodyObj.id === '_system_finance_ledger' ||
                 subPath.includes('_system_consultations') ||
                 subPath.includes('_system_insurance_contracts') ||
                 subPath.includes('_system_insurance_bookings') ||
                 subPath.includes('_system_shift_handovers') ||
-                subPath.includes('_system_finance_managers');
+                subPath.includes('_system_finance_managers') ||
+                subPath.includes('_system_finance_ledger');
               const idFilter = targetUrlObj.searchParams.get('id') || '';
               const targetClinicId = idFilter.startsWith('eq.') ? idFilter.slice(3).trim() : '';
               const hasValidTargetClinicId = isValidServerEntityId(targetClinicId) && !targetClinicId.startsWith('_system');

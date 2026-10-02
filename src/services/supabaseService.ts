@@ -34,7 +34,8 @@ import {
   ConsultationRegistryState,
   InsuranceCompanyContract,
   BookingInsuranceDetails,
-  ShiftHandoverRecord
+  ShiftHandoverRecord,
+  FinanceLedgerState
 } from '../types';
 
 // ==========================================
@@ -1667,7 +1668,8 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
         '_system_insurance_contracts',
         '_system_insurance_bookings',
         '_system_shift_handovers',
-        '_system_finance_managers'
+        '_system_finance_managers',
+        '_system_finance_ledger'
       ]);
 
     if (Array.isArray(clinicSettings)) {
@@ -1709,6 +1711,8 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
           map['shift_handovers_json'] = row.description;
         } else if (row.id === '_system_finance_managers' && row.description) {
           map['finance_managers_json'] = row.description;
+        } else if (row.id === '_system_finance_ledger' && row.description) {
+          map['finance_ledger_json'] = row.description;
         }
       }
     }
@@ -2004,6 +2008,22 @@ export async function saveShiftHandoversToDb(
     'System Shift Handovers',
     jsonStr,
     'shift_handovers_updated'
+  );
+}
+
+export async function saveFinanceLedgerToDb(
+  ledger: FinanceLedgerState
+): Promise<boolean> {
+  const clean: FinanceLedgerState = {
+    expenses: Array.isArray(ledger?.expenses) ? ledger.expenses.slice(0, 400) : [],
+    settlements: Array.isArray(ledger?.settlements) ? ledger.settlements.slice(0, 300) : [],
+  };
+  const jsonStr = JSON.stringify(clean);
+  return upsertSystemSettingRowInClinics(
+    '_system_finance_ledger',
+    'System Finance Ledger',
+    jsonStr,
+    'finance_ledger_updated'
   );
 }
 

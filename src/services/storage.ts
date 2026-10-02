@@ -15,7 +15,10 @@ import {
   ConsultationStamp,
   InsuranceCompanyContract,
   BookingInsuranceDetails,
-  ShiftHandoverRecord
+  ShiftHandoverRecord,
+  FinanceLedgerState,
+  FinanceExpenseRecord,
+  InsuranceClaimSettlementRecord
 } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
@@ -43,10 +46,11 @@ const STORAGE_KEYS = {
   INSURANCE_CONTRACTS: 'sharaya_insurance_contracts_v1',
   INSURANCE_BOOKINGS: 'sharaya_insurance_bookings_v1',
   SHIFT_HANDOVERS: 'sharaya_shift_handovers_v1',
+  FINANCE_LEDGER: 'sharaya_finance_ledger_v1',
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v9_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v10_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -897,29 +901,206 @@ export function checkBookingRateLimit(
 }
 
 /**
+ * دالة احترافية لبناء ورقة عمل إكسل (Worksheet) منسقة بالكامل باللغة العربية (من اليمين لليسار RTL)
+ * مع ترويسة التقرير، وضبط تلقائي لعرض الأعمدة (Auto-fit) وارتفاع الصفوف، وصف الإجمالي، وتفعيل الفلتر التلقائي
+ */
+export function buildFormattedRtlWorksheet(
+  rowsOrOptions:
+    | Record<string, any>[]
+    | {
+        reportTitle: string;
+        reportSubtitle: string;
+        rows: Record<string, any>[];
+        totalsRow?: Record<string, any>;
+        emptyMessage?: string;
+      },
+  maybeOptions?: {
+    reportTitle?: string;
+    reportSubtitle?: string;
+    totalsRow?: Record<string, any>;
+    emptyMessage?: string;
+  }
+): XLSX.WorkSheet {
+  const isArrayArg = Array.isArray(rowsOrOptions);
+  const rows = isArrayArg ? rowsOrOptions : rowsOrOptions.rows;
+  const reportTitle = isArrayArg
+    ? maybeOptions?.reportTitle || 'عيادات الشرايح التخصصية'
+    : rowsOrOptions.reportTitle;
+  const reportSubtitle = isArrayArg
+    ? maybeOptions?.reportSubtitle || ''
+    : rowsOrOptions.reportSubtitle;
+  const totalsRow = isArrayArg ? maybeOptions?.totalsRow : rowsOrOptions.totalsRow;
+  const emptyMessage = isArrayArg ? maybeOptions?.emptyMessage : rowsOrOptions.emptyMessage;
+
+  const effectiveRows =
+    rows.length > 0
+      ? rows
+      : [{ 'البيان / الملاحظة': emptyMessage || 'لا توجد سجلات مطابقة للفترة أو الفلاتر المحددة' }];
+
+  const headers = Object.keys(effectiveRows[0]);
+  const numCols = Math.max(1, headers.length);
+
+  // بناء المصفوفة الثنائية (Array of Arrays) لضمان ترتيب الترويسة والجدول بدقة
+  const aoa: (string | number)[][] = [];
+
+  // الصف 1: عنوان التقرير الرئيسي
+  const titleRow: (string | number)[] = new Array(numCols).fill('');
+  titleRow[0] = sanitizeSpreadsheetCell(reportTitle);
+  aoa.push(titleRow);
+
+  // الصف 2: العنوان الفرعي وتفاصيل الفترة وتاريخ الاستخراج
+  const subRow: (string | number)[] = new Array(numCols).fill('');
+  subRow[0] = sanitizeSpreadsheetCell(reportSubtitle);
+  aoa.push(subRow);
+
+  // الصف 3: صف فارغ للفصل البصري المريح
+  aoa.push(new Array(numCols).fill(''));
+
+  // الصف 4: رؤوس الأعمدة
+  aoa.push(headers.map((h) => sanitizeSpreadsheetCell(h)));
+
+  // الصفوف 5..N: صفوف البيانات الفعلية
+  for (const r of effectiveRows) {
+    aoa.push(headers.map((h) => sanitizeSpreadsheetCell(r[h] ?? '—')));
+  }
+
+  // صف الإجمالي العام في نهاية الجدول (إن وجد وكان هناك بيانات)
+  if (totalsRow && rows.length > 0) {
+    aoa.push(headers.map((h) => sanitizeSpreadsheetCell(totalsRow[h] ?? '')));
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+
+  // 1. تفعيل اتجاه الورقة من اليمين لليسار (RTL)
+  ws['!views'] = [{ rightToLeft: true }];
+
+  // 2. دمج خلايا العنوان الرئيسي والعنوان الفرعي عبر جميع أعمدة الجدول
+  if (numCols > 1) {
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } },
+      { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } },
+    ];
+  }
+
+  // 3. حساب عرض كل عمود تلقائياً (Auto-fit) بناءً على أطول نص في العمود + هامش مريح للخط العربي
+  const colWidths = headers.map((headerText, colIdx) => {
+    const cleanHeader = String(headerText || '').trim();
+    if (cleanHeader === 'م' || cleanHeader === '#') {
+      return { wch: 8 };
+    }
+
+    let maxLen = cleanHeader.length;
+    for (let rIdx = 4; rIdx < aoa.length; rIdx++) {
+      const cellVal = aoa[rIdx]?.[colIdx];
+      if (cellVal !== undefined && cellVal !== null) {
+        const strVal =
+          typeof cellVal === 'number'
+            ? cellVal.toLocaleString('en-US')
+            : String(cellVal).trim();
+        if (strVal.length > maxLen) {
+          maxLen = strVal.length;
+        }
+      }
+    }
+
+    // إضافة هامش مريح للخطوط العربية والأرقام لضمان عدم اختفاء أو قطع أي كلمة
+    const paddedWidth = Math.min(58, Math.max(18, Math.ceil(maxLen * 1.25) + 8));
+    return { wch: paddedWidth };
+  });
+  ws['!cols'] = colWidths;
+
+  // 4. ضبط ارتفاع الصفوف لتكون مريحة وواضحة في القراءة والطباعة
+  const rowHeights: { hpt: number }[] = [
+    { hpt: 30 }, // صف العنوان الرئيسي
+    { hpt: 22 }, // صف العنوان الفرعي
+    { hpt: 12 }, // صف الفاصل
+    { hpt: 28 }, // صف رؤوس الأعمدة
+  ];
+  for (let i = 0; i < effectiveRows.length; i++) {
+    rowHeights.push({ hpt: 23 });
+  }
+  if (totalsRow && rows.length > 0) {
+    rowHeights.push({ hpt: 28 }); // صف الإجمالي العام
+  }
+  ws['!rows'] = rowHeights;
+
+  // 5. تفعيل الفلتر التلقائي (AutoFilter) على صف رؤوس الأعمدة لتسهيل التصفية والترتيب داخل برنامج Excel
+  if (rows.length > 0 && numCols > 1) {
+    ws['!autofilter'] = {
+      ref: XLSX.utils.encode_range({
+        s: { r: 3, c: 0 },
+        e: { r: 3 + rows.length, c: numCols - 1 },
+      }),
+    };
+  }
+
+  return ws;
+}
+
+/**
+ * ضبط مصنف الإكسل بالكامل (Workbook) ليفتح من اليمين لليسار (RTL) افتراضياً
+ */
+export function setWorkbookRtlView(wb: XLSX.WorkBook): void {
+  wb.Workbook = {
+    ...(wb.Workbook || {}),
+    Views: [{ RTL: true }],
+  };
+}
+
+export function configureRtlWorkbook(): XLSX.WorkBook {
+  const wb = XLSX.utils.book_new();
+  setWorkbookRtlView(wb);
+  return wb;
+}
+
+/**
  * تصدير البيانات إلى ملف Excel بصيغة xlsx مع الحماية ضد حقن المعادلات (CSV/Excel Formula Injection)
  */
 export function exportBookingsToExcel(bookings: Booking[], fileName = 'سجل_حجوزات_عيادات_الجمعية_الشرعية.xlsx'): void {
-  const rows = bookings.map(b => ({
+  const rows = bookings.map((b, idx) => ({
+    'م': idx + 1,
     'رقم التذكرة': sanitizeSpreadsheetCell(b.ticketNumber),
     'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
     'رقم الهاتف': sanitizeSpreadsheetCell(b.patientPhone),
-    'العيادة': sanitizeSpreadsheetCell(b.clinicName),
+    'العيادة التخصصية': sanitizeSpreadsheetCell(b.clinicName),
     'الطبيب المعالج': sanitizeSpreadsheetCell(b.doctorName),
     'تاريخ الكشف': sanitizeSpreadsheetCell(b.date),
     'الموعد التقريبي': sanitizeSpreadsheetCell(b.timeSlot),
     'رقم الدور': Number(b.queuePosition || 0),
     'حالة الكشف': b.status === 'completed' ? 'مكتمل' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي',
-    'حالة الدفع': b.paymentStatus === 'paid' ? 'تم السداد' : b.paymentStatus === 'exempt' ? 'إعفاء خيري' : 'غير مسدد',
+    'حالة السداد': b.paymentStatus === 'paid' ? 'تم السداد' : b.paymentStatus === 'exempt' ? 'إعفاء خيري' : 'غير مسدد',
     'قيمة الكشف (ج.م)': Number(b.fee || 0),
     'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || b.notes || '—'),
     'وقت الحجز': sanitizeSpreadsheetCell(b.createdAt)
   }));
 
-  const worksheet = XLSX.utils.json_to_sheet(rows);
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'الحجوزات');
-  
+  const totalFees = bookings.reduce((sum, b) => sum + (b.paymentStatus === 'paid' ? Number(b.fee || 0) : 0), 0);
+
+  const worksheet = buildFormattedRtlWorksheet({
+    reportTitle: 'عيادات الجمعية الشرعية — سجل الحجوزات والكشوفات الشامل',
+    reportSubtitle: `تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')} | إجمالي السجلات: ${bookings.length} حالة | إجمالي المحصل: ${totalFees.toLocaleString()} ج.م`,
+    rows,
+    totalsRow: {
+      'م': '',
+      'رقم التذكرة': 'الإجمالي العام',
+      'اسم المريض': `${bookings.length} حالة`,
+      'رقم الهاتف': '',
+      'العيادة التخصصية': '',
+      'الطبيب المعالج': '',
+      'تاريخ الكشف': '',
+      'الموعد التقريبي': '',
+      'رقم الدور': '',
+      'حالة الكشف': '',
+      'حالة السداد': 'إجمالي المسدد:',
+      'قيمة الكشف (ج.م)': totalFees,
+      'ملاحظات التشخيص': '',
+      'وقت الحجز': ''
+    }
+  });
+
+  const workbook = configureRtlWorkbook();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'سجل الحجوزات');
+
   // حفظ وتنزيل الملف
   XLSX.writeFile(workbook, fileName);
 }
@@ -1574,6 +1755,36 @@ export function clearWhatsAppAndPrintLogs(): void {
     localStorage.removeItem('sharaya_whatsapp_sent_v1');
     localStorage.removeItem('sharaya_printed_receipts_v1');
   } catch {}
+}
+
+// ==================== دفتر المصروفات اليومية وتسويات مطالبات التأمين ====================
+
+export function getStoredFinanceLedger(): FinanceLedgerState {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.FINANCE_LEDGER);
+    if (!raw) {
+      return { expenses: [], settlements: [] };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      expenses: Array.isArray(parsed?.expenses) ? parsed.expenses : [],
+      settlements: Array.isArray(parsed?.settlements) ? parsed.settlements : [],
+    };
+  } catch {
+    return { expenses: [], settlements: [] };
+  }
+}
+
+export function saveFinanceLedger(ledger: FinanceLedgerState): void {
+  try {
+    const clean: FinanceLedgerState = {
+      expenses: Array.isArray(ledger?.expenses) ? ledger.expenses.slice(0, 400) : [],
+      settlements: Array.isArray(ledger?.settlements) ? ledger.settlements.slice(0, 300) : [],
+    };
+    localStorage.setItem(STORAGE_KEYS.FINANCE_LEDGER, JSON.stringify(clean));
+  } catch (e) {
+    console.error('فشل حفظ دفتر المصروفات والتسويات:', e);
+  }
 }
 
 

@@ -22,7 +22,10 @@ import {
   InsuranceCompanyContract,
   BookingInsuranceDetails,
   ShiftHandoverRecord,
-  SelectivePurgeOptions
+  SelectivePurgeOptions,
+  FinanceLedgerState,
+  FinanceExpenseRecord,
+  InsuranceClaimSettlementRecord
 } from '../types';
 import { 
   getStoredClinics, 
@@ -81,7 +84,9 @@ import {
   saveInsuranceBookingsMap,
   getStoredShiftHandovers,
   saveShiftHandovers,
-  clearWhatsAppAndPrintLogs
+  clearWhatsAppAndPrintLogs,
+  getStoredFinanceLedger,
+  saveFinanceLedger
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
@@ -132,6 +137,7 @@ import {
   saveInsuranceContractsToDb,
   saveInsuranceBookingsMapToDb,
   saveShiftHandoversToDb,
+  saveFinanceLedgerToDb,
   parseCloudStaffRegistryState,
   mergeStaffAccountsWithCloudRegistry
 } from '../services/supabaseService';
@@ -274,6 +280,19 @@ interface AppContextType {
     actualReceivedAmount?: number,
     acknowledgmentNotes?: string
   ) => Promise<boolean>;
+  approveShiftHandoverByManager: (
+    handoverId: string,
+    managerNotes?: string
+  ) => Promise<boolean>;
+  financeLedger: FinanceLedgerState;
+  addFinanceExpense: (
+    input: Omit<FinanceExpenseRecord, 'id' | 'createdAt' | 'recordedBy' | 'recordedByUsername'>
+  ) => Promise<boolean>;
+  deleteFinanceExpense: (expenseId: string) => Promise<boolean>;
+  addInsuranceSettlement: (
+    input: Omit<InsuranceClaimSettlementRecord, 'id' | 'createdAt' | 'recordedBy'>
+  ) => Promise<boolean>;
+  deleteInsuranceSettlement: (settlementId: string) => Promise<boolean>;
   selectivePurgeRecords: (
     options: SelectivePurgeOptions
   ) => Promise<{ success: boolean; summary: string }>;
@@ -345,6 +364,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // سجلات تسليم واستلام الشفتات والخزينة
   const [shiftHandovers, setShiftHandovers] = useState<ShiftHandoverRecord[]>(
     getStoredShiftHandovers
+  );
+
+  // دفتر المصروفات اليومية وتسويات مطالبات شركات التأمين
+  const [financeLedger, setFinanceLedger] = useState<FinanceLedgerState>(
+    getStoredFinanceLedger
   );
 
   const mergeErrorLogLists = (cloudList: SystemErrorLog[], localList: SystemErrorLog[]): SystemErrorLog[] => {
@@ -565,6 +589,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (Array.isArray(parsedHandovers)) {
               setShiftHandovers(parsedHandovers);
               saveShiftHandovers(parsedHandovers);
+            }
+          } catch {}
+        }
+        if (dbSettings && dbSettings['finance_ledger_json']) {
+          try {
+            const parsedLedger = JSON.parse(dbSettings['finance_ledger_json']);
+            if (parsedLedger && typeof parsedLedger === 'object') {
+              const normalizedLedger: FinanceLedgerState = {
+                expenses: Array.isArray(parsedLedger.expenses) ? parsedLedger.expenses : [],
+                settlements: Array.isArray(parsedLedger.settlements) ? parsedLedger.settlements : [],
+              };
+              setFinanceLedger(normalizedLedger);
+              saveFinanceLedger(normalizedLedger);
             }
           } catch {}
         }
@@ -793,6 +830,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (Array.isArray(parsed)) {
               setShiftHandovers(parsed);
               saveShiftHandovers(parsed);
+            }
+          } catch {}
+        }
+      })
+      .on('broadcast', { event: 'finance_ledger_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (parsed && typeof parsed === 'object') {
+              const normalizedLedger: FinanceLedgerState = {
+                expenses: Array.isArray(parsed.expenses) ? parsed.expenses : [],
+                settlements: Array.isArray(parsed.settlements) ? parsed.settlements : [],
+              };
+              setFinanceLedger(normalizedLedger);
+              saveFinanceLedger(normalizedLedger);
             }
           } catch {}
         }
@@ -4395,6 +4449,231 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
+  // اعتماد ومراجعة تسليم الشفت والخزينة من مدير المالية أو مدير النظام
+  const approveShiftHandoverByManager = async (
+    handoverId: string,
+    managerNotes?: string
+  ): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')
+    ) {
+      addToast({
+        type: 'error',
+        title: 'غير مصرح',
+        message: 'اعتماد المراجعة المالية للشفت مخصص لمدير المالية أو مدير النظام.'
+      });
+      return false;
+    }
+
+    const target = shiftHandovers.find(h => h.id === handoverId);
+    if (!target) return false;
+
+    const nowIso = new Date().toISOString();
+    const nextList = shiftHandovers.map(h =>
+      h.id === handoverId
+        ? {
+            ...h,
+            managerApproved: true,
+            managerApprovedBy: currentUser.displayName,
+            managerApprovedAt: nowIso,
+            managerNotes: managerNotes ? sanitizeText(managerNotes) : h.managerNotes
+          }
+        : h
+    );
+
+    lastSettingsSaveAtRef.current = Date.now();
+    setShiftHandovers(nextList);
+    saveShiftHandovers(nextList);
+
+    if (isSupabaseConfigured) {
+      await saveShiftHandoversToDb(nextList);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم اعتماد المراجعة المالية للشفت',
+      message: `تم توثيق مراجعة واعتماد الشفت بواسطة (${currentUser.displayName}) وحفظه سحابياً في Supabase.`
+    });
+    return true;
+  };
+
+  // ==========================================
+  // إدارة المصروفات اليومية والنثريات وتسويات شركات التأمين
+  // ==========================================
+  const addFinanceExpense = async (
+    input: Omit<FinanceExpenseRecord, 'id' | 'createdAt' | 'recordedBy' | 'recordedByUsername'>
+  ): Promise<boolean> => {
+    if (!currentUser) return false;
+    const cleanTitle = sanitizeText(input.title);
+    const cleanAmount = Math.max(0, Number(input.amount) || 0);
+    if (!cleanTitle || cleanAmount <= 0) {
+      addToast({
+        type: 'error',
+        title: 'بيانات المصروف غير مكتملة',
+        message: 'يرجى إدخال بيان المصروف ومبلغ صحيح أكبر من الصفر.'
+      });
+      return false;
+    }
+
+    const cleanRecipient = input.recipient || input.recipientName;
+    const newRecord: FinanceExpenseRecord = {
+      id: `exp-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      date: input.date || getLocalDateStr(new Date()),
+      amount: cleanAmount,
+      category: input.category || 'other',
+      title: cleanTitle,
+      recipient: cleanRecipient ? sanitizeText(cleanRecipient) : undefined,
+      recipientName: cleanRecipient ? sanitizeText(cleanRecipient) : undefined,
+      notes: input.notes ? sanitizeText(input.notes) : undefined,
+      recordedBy: currentUser.displayName,
+      createdBy: currentUser.displayName,
+      recordedByUsername: currentUser.username,
+      createdAt: new Date().toISOString()
+    };
+
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      expenses: [newRecord, ...financeLedger.expenses].slice(0, 400)
+    };
+
+    lastSettingsSaveAtRef.current = Date.now();
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    if (isSupabaseConfigured) {
+      await saveFinanceLedgerToDb(nextLedger);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم تسجيل المصروف بالخزينة',
+      message: `تم تسجيل مصروف (${cleanTitle}) بقيمة ${cleanAmount.toLocaleString()} ج.م وخصمه من صافي الخزينة.`
+    });
+    return true;
+  };
+
+  const deleteFinanceExpense = async (expenseId: string): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')
+    ) {
+      return false;
+    }
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      expenses: financeLedger.expenses.filter(e => e.id !== expenseId)
+    };
+    lastSettingsSaveAtRef.current = Date.now();
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    if (isSupabaseConfigured) {
+      await saveFinanceLedgerToDb(nextLedger);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'info',
+      title: 'تم حذف سجل المصروف',
+      message: 'تم إزالة المصروف وتحديث صافي النقدية الفعلي بالخزينة.'
+    });
+    return true;
+  };
+
+  const addInsuranceSettlement = async (
+    input: Omit<InsuranceClaimSettlementRecord, 'id' | 'createdAt' | 'recordedBy'>
+  ): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')
+    ) {
+      return false;
+    }
+    const cleanCompany = sanitizeText(input.companyName);
+    const cleanPaid = Math.max(0, Number(input.paidAmount ?? input.amountPaid) || 0);
+    if (!cleanCompany || cleanPaid <= 0) {
+      addToast({
+        type: 'error',
+        title: 'بيانات التسوية غير مكتملة',
+        message: 'يرجى تحديد شركة التأمين وإدخال المبلغ المحصل.'
+      });
+      return false;
+    }
+
+    const effDate = input.settlementDate || input.paymentDate || getLocalDateStr(new Date());
+    const effRef = input.paymentReference || input.referenceNumber;
+    const newSettlement: InsuranceClaimSettlementRecord = {
+      id: `settle-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      companyId: input.companyId,
+      companyName: cleanCompany,
+      settlementDate: effDate,
+      paymentDate: effDate,
+      periodFrom: input.periodFrom,
+      periodTo: input.periodTo,
+      claimedAmount: Math.max(0, Number(input.claimedAmount) || 0),
+      paidAmount: cleanPaid,
+      amountPaid: cleanPaid,
+      paymentMethod: input.paymentMethod || 'bank_transfer',
+      paymentReference: effRef ? sanitizeText(effRef) : undefined,
+      referenceNumber: effRef ? sanitizeText(effRef) : undefined,
+      notes: input.notes ? sanitizeText(input.notes) : undefined,
+      recordedBy: currentUser.displayName,
+      createdAt: new Date().toISOString()
+    };
+
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      settlements: [newSettlement, ...financeLedger.settlements].slice(0, 300)
+    };
+
+    lastSettingsSaveAtRef.current = Date.now();
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    if (isSupabaseConfigured) {
+      await saveFinanceLedgerToDb(nextLedger);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'success',
+      title: 'تم تسجيل تحصيل وتسوية مطالبة التأمين',
+      message: `تم توثيق استلام دفعة بقيمة ${cleanPaid.toLocaleString()} ج.م من شركة (${cleanCompany}) وحفظها في Supabase.`
+    });
+    return true;
+  };
+
+  const deleteInsuranceSettlement = async (settlementId: string): Promise<boolean> => {
+    if (
+      !currentUser ||
+      (currentUser.role !== 'finance_manager' && currentUser.role !== 'admin')
+    ) {
+      return false;
+    }
+    const nextLedger: FinanceLedgerState = {
+      ...financeLedger,
+      settlements: financeLedger.settlements.filter(s => s.id !== settlementId)
+    };
+    lastSettingsSaveAtRef.current = Date.now();
+    setFinanceLedger(nextLedger);
+    saveFinanceLedger(nextLedger);
+
+    if (isSupabaseConfigured) {
+      await saveFinanceLedgerToDb(nextLedger);
+      lastSettingsSaveAtRef.current = Date.now();
+    }
+
+    addToast({
+      type: 'info',
+      title: 'تم حذف سجل التسوية',
+      message: 'تم حذف سجل دفعة التأمين وتحديث رصيد المطالبات.'
+    });
+    return true;
+  };
+
   // ==========================================
   // نافذة المسح والتفريغ الانتقائي للسجلات (لمدير المالية والأدمن)
   // ==========================================
@@ -4475,6 +4754,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await saveShiftHandoversToDb([]);
         }
         actionsSummary.push(`مسح سجلات تسليم الشفتات والخزينة (${count} سجل)`);
+      }
+
+      // 2-ب. مسح سجلات المصروفات اليومية والنثريات
+      if (options.purgeFinanceExpenses) {
+        const count = financeLedger.expenses.length;
+        const nextLedger: FinanceLedgerState = {
+          ...financeLedger,
+          expenses: []
+        };
+        setFinanceLedger(nextLedger);
+        saveFinanceLedger(nextLedger);
+        if (isSupabaseConfigured) {
+          await saveFinanceLedgerToDb(nextLedger);
+        }
+        actionsSummary.push(`مسح سجلات المصروفات اليومية (${count} سجل)`);
       }
 
       // 3. مسح بصمات الاستشارة المجانية
@@ -4611,6 +4905,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         shiftHandovers,
         createShiftHandover,
         acknowledgeShiftHandover,
+        approveShiftHandoverByManager,
+        financeLedger,
+        addFinanceExpense,
+        deleteFinanceExpense,
+        addInsuranceSettlement,
+        deleteInsuranceSettlement,
         selectivePurgeRecords
       }}
     >

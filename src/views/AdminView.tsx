@@ -36,7 +36,7 @@ import {
   Cloud
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { AVAILABLE_PERMISSIONS, sanitizeSpreadsheetCell } from '../services/storage';
+import { AVAILABLE_PERMISSIONS, sanitizeSpreadsheetCell, buildFormattedRtlWorksheet, setWorkbookRtlView } from '../services/storage';
 import { getLocalDateStr, isDoctorScheduledOnDate, getArabicDayName } from '../services/scheduleService';
 import { DailyClinicScheduleItem, SystemPermission, UserRole, StaffAccount, Doctor, Clinic, SystemErrorSource } from '../types';
 import { DailyScheduleExportModal, ScheduleExportMode } from '../components/DailyScheduleExportModal';
@@ -414,27 +414,39 @@ export const AdminView: React.FC = () => {
     .filter(b => b.paymentStatus === 'paid')
     .reduce((acc, b) => acc + b.fee, 0);
 
-  // تصدير التقارير إلى Excel حقيقي باستخدام xlsx
+  // تصدير التقارير إلى Excel حقيقي باستخدام xlsx بتنسيق عربي RTL وعرض أعمدة تلقائي كامل
   const handleExportToExcel = () => {
     try {
-      const dataToExport = displayedReportBookings.map(b => ({
+      const dataToExport = displayedReportBookings.map((b, idx) => ({
+        'م': idx + 1,
+        'التاريخ': sanitizeSpreadsheetCell(b.date),
         'رقم التذكرة': sanitizeSpreadsheetCell(b.ticketNumber),
-        'اسم المريض': sanitizeSpreadsheetCell(b.patientName),
+        'اسم المريض بالكامل': sanitizeSpreadsheetCell(b.patientName),
         'رقم الهاتف': sanitizeSpreadsheetCell(b.patientPhone),
         'العيادة التخصصية': sanitizeSpreadsheetCell(b.clinicName),
         'الطبيب المعالج': sanitizeSpreadsheetCell(b.doctorName),
-        'التاريخ': sanitizeSpreadsheetCell(b.date),
         'الفترة': sanitizeSpreadsheetCell(b.timeSlot),
         'رقم الدور': b.queuePosition,
-        'قيمة الكشف': b.paymentMethod === 'consultation' ? 0 : b.fee,
         'حالة الكشف': b.status === 'completed' ? 'تم الكشف' : b.status === 'in-progress' ? 'داخل العيادة' : b.status === 'waiting' ? 'في الانتظار' : 'ملغي',
         'حالة السداد': b.paymentStatus === 'paid' ? 'مسدد' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentStatus === 'exempt' ? 'معفى خيري' : 'غير مسدد',
-        'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentMethod === 'charity_exempt' ? 'تكافل خيري' : 'غير مسدد',
-        'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || '-')
+        'طريقة الدفع': b.paymentMethod === 'cash' ? 'نقدي (كاش)' : b.paymentMethod === 'insurance' ? 'تأمين طبي' : b.paymentMethod === 'consultation' ? 'استشارة مجانية' : b.paymentMethod === 'charity_exempt' ? 'تكافل خيري' : 'غير مسدد',
+        'شركة التأمين': sanitizeSpreadsheetCell(b.insuranceDetails?.companyName || '—'),
+        'قيمة الكشف المحصلة (ج.م)': b.paymentMethod === 'consultation' ? 0 : b.fee,
+        'ملاحظات التشخيص': sanitizeSpreadsheetCell(b.doctorDiagnosis || '—')
       }));
 
-      const worksheet = XLSX.utils.json_to_sheet(dataToExport);
       const workbook = XLSX.utils.book_new();
+      setWorkbookRtlView(workbook);
+
+      const worksheet = buildFormattedRtlWorksheet(
+        dataToExport.length > 0
+          ? dataToExport
+          : [{ 'بيان': 'لا توجد حجوزات مطابقة للفلاتر المحددة' }],
+        {
+          reportTitle: 'عيادات الشرايح التخصصية — تقرير حجوزات العيادات',
+          reportSubtitle: `تاريخ الاستخراج: ${new Date().toLocaleString('ar-EG')} · إجمالي السجلات: ${dataToExport.length}`
+        }
+      );
       XLSX.utils.book_append_sheet(workbook, worksheet, 'تقرير حجوزات العيادات');
 
       const fileName = `تقرير_عيادات_الجمعية_الشرعية_${new Date().toISOString().split('T')[0]}.xlsx`;
