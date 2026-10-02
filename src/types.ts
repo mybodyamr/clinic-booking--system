@@ -323,3 +323,18 @@ export interface SystemErrorLog {
   syncedToDb?: boolean;
 }
 
+export type SystemLicenseMode = 'trial' | 'permanent' | 'locked';
+
+export interface SystemTrialLicenseConfig {
+  mode: SystemLicenseMode;
+  trialDays: number;
+  startedAt: string;
+  expiresAt: string;
+  showBannerToStaff: boolean;
+  lockPublicPagesOnExpiry: boolean;
+  lockMessage: string;
+  developerPhone?: string;
+  updatedAt: string;
+}
+
+

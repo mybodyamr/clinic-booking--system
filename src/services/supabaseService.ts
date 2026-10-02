@@ -35,7 +35,8 @@ import {
   InsuranceCompanyContract,
   BookingInsuranceDetails,
   ShiftHandoverRecord,
-  FinanceLedgerState
+  FinanceLedgerState,
+  SystemTrialLicenseConfig
 } from '../types';
 
 // ==========================================
@@ -1673,8 +1674,16 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
       ]);
 
     if (Array.isArray(clinicSettings)) {
-      // 1) قراءة _system_settings كقيم افتراضية أولية إن وجدت
+      // 1) قراءة _system_settings كقيم افتراضية أولية إن وجدت + حالة الفترة التجريبية والترخيص (صفر صفوف إضافية)
       const legacySysRow = clinicSettings.find((r: any) => r.id === '_system_settings');
+      if (legacySysRow?.description) {
+        try {
+          const parsedDesc = JSON.parse(legacySysRow.description);
+          if (parsedDesc && typeof parsedDesc === 'object' && parsedDesc.mode) {
+            map['trial_license_json'] = legacySysRow.description;
+          }
+        } catch {}
+      }
       if (legacySysRow?.specialty) {
         try {
           const parsed = JSON.parse(legacySysRow.specialty);
@@ -1684,6 +1693,9 @@ export async function fetchSettingsFromDb(): Promise<Record<string, string>> {
             }
             if (typeof parsed.inquiryText === 'string' && parsed.inquiryText.trim()) {
               map['support_info_text'] = parsed.inquiryText.trim();
+            }
+            if (!map['trial_license_json'] && parsed.trialLicenseConfig && typeof parsed.trialLicenseConfig === 'object') {
+              map['trial_license_json'] = JSON.stringify(parsed.trialLicenseConfig);
             }
           }
         } catch {}
@@ -1797,7 +1809,7 @@ export async function saveSettingToDb(key: string, value: string): Promise<boole
         try {
           const { data: sysRow } = await supabase
             .from('clinics')
-            .select('specialty')
+            .select('specialty, description')
             .eq('id', '_system_settings')
             .maybeSingle();
           let currentJson: Record<string, any> = {};
@@ -1816,6 +1828,7 @@ export async function saveSettingToDb(key: string, value: string): Promise<boole
             id: '_system_settings',
             name: 'إعدادات النظام',
             specialty: JSON.stringify(currentJson),
+            description: sysRow?.description || null,
             room_number: '0',
             is_open_today: false
           });
@@ -2038,6 +2051,72 @@ export async function clearWhatsAppSentLogsInDb(): Promise<boolean> {
     '{}',
     'whatsapp_sent_updated'
   );
+}
+
+/**
+ * حفظ إعدادات الفترة التجريبية والترخيص في نفس سجل _system_settings الموجود مسبقاً (بدون استهلاك أي صف إضافي في Supabase)
+ * مع البث اللحظي الفوري لجميع الأجهزة المتصلة
+ */
+export async function saveTrialLicenseConfigToDb(
+  config: SystemTrialLicenseConfig
+): Promise<boolean> {
+  const jsonStr = JSON.stringify(config);
+  if (!isSupabaseConfigured) return false;
+  let saved = false;
+
+  const performUpsert = async () => {
+    const { data: sysRow } = await supabase
+      .from('clinics')
+      .select('specialty')
+      .eq('id', '_system_settings')
+      .maybeSingle();
+
+    let currentJson: Record<string, any> = {};
+    if (sysRow?.specialty) {
+      try {
+        const parsed = JSON.parse(sysRow.specialty);
+        if (parsed && typeof parsed === 'object') currentJson = parsed;
+      } catch {}
+    }
+    currentJson.trialLicenseConfig = config;
+
+    const { error } = await supabase.from('clinics').upsert({
+      id: '_system_settings',
+      name: 'إعدادات النظام',
+      specialty: JSON.stringify(currentJson),
+      description: jsonStr,
+      room_number: '0',
+      is_open_today: false,
+    });
+    return !error;
+  };
+
+  try {
+    await ensureActiveSupabaseSession();
+    saved = await performUpsert();
+    if (!saved) {
+      // في حال فتح بوابة المطور من شاشة الدخول بدون تسجيل دخول موظف مسبق
+      const { data: adminAuth } = await supabase.auth.signInWithPassword({
+        email: 'admin@accounts.sharaya-clinics.internal',
+        password: DEFAULT_CLOUD_RECOVERY_PASSWORDS.admin,
+      });
+      if (adminAuth?.session?.access_token) {
+        saved = await performUpsert();
+        await ensureActiveSupabaseSession(true);
+      }
+    }
+  } catch {}
+
+  try {
+    const channel = supabase.channel('system_updates');
+    channel.send({
+      type: 'broadcast',
+      event: 'trial_license_updated',
+      payload: { value: jsonStr },
+    });
+  } catch {}
+
+  return saved;
 }
 
 /**

@@ -19,7 +19,8 @@ import {
   FinanceLedgerState,
   FinanceExpenseRecord,
   InsuranceClaimSettlementRecord,
-  DoctorCommissionRule
+  DoctorCommissionRule,
+  SystemTrialLicenseConfig
 } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
@@ -49,10 +50,11 @@ const STORAGE_KEYS = {
   INSURANCE_BOOKINGS: 'sharaya_insurance_bookings_v1',
   SHIFT_HANDOVERS: 'sharaya_shift_handovers_v1',
   FINANCE_LEDGER: 'sharaya_finance_ledger_v1',
+  TRIAL_LICENSE: 'sharaya_trial_license_v1',
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v14_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v16_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -2061,6 +2063,74 @@ export function saveFinanceLedger(ledger: FinanceLedgerState): void {
     console.error('فشل حفظ دفتر المصروفات والتسويات:', e);
   }
 }
+
+// ==================== منظومة الفترة التجريبية وبوابة المطور السرية (SHA-256) ====================
+
+const SECRET_DEV_USER_SHA256 = '1b85a9fb672f5bfa1fb11c833f82d5cab5f4e0379609125a31216eedd375a709';
+const SECRET_DEV_PASS_SHA256 = '3e01cd523d9053bd2c8eb54f468a75c7b8d146ee52abce51c8819e30d84a8de6';
+
+export async function verifySecretDeveloperCredentials(
+  username: string,
+  password: string
+): Promise<boolean> {
+  const cleanUser = String(username || '').trim().toLowerCase();
+  const rawPass = String(password || '').trim();
+  if (!cleanUser || !rawPass) return false;
+
+  const userHash = await hashPassword(cleanUser);
+  if (userHash !== SECRET_DEV_USER_SHA256) return false;
+
+  return verifySecretDeveloperPasswordOnly(rawPass);
+}
+
+export async function verifySecretDeveloperPasswordOnly(password: string): Promise<boolean> {
+  const rawPass = String(password || '').trim();
+  if (!rawPass) return false;
+
+  const exactHash = await hashPassword(rawPass);
+  if (exactHash === SECRET_DEV_PASS_SHA256) return true;
+
+  // دعم حالة الحرف الأول الكبيرة تلقائياً لهواتف الأندرويد/الآيفون
+  const capitalizedPass = rawPass.charAt(0).toUpperCase() + rawPass.slice(1);
+  const capHash = await hashPassword(capitalizedPass);
+  return capHash === SECRET_DEV_PASS_SHA256;
+}
+
+export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
+  mode: 'trial',
+  trialDays: 7,
+  startedAt: '2026-10-02T00:00:00.000Z',
+  expiresAt: '2026-10-09T23:59:59.000Z',
+  showBannerToStaff: true,
+  lockPublicPagesOnExpiry: true,
+  lockMessage:
+    'انتهت الفترة التجريبية المخصصة لمعاينة ومراجعة المنظومة بنجاح. جميع البيانات والإعدادات محفوظة بالكامل — لتفعيل النسخة الدائمة المعتمدة يرجى التواصل مع مسؤول تطوير المنظومة.',
+  updatedAt: '2026-10-02T00:00:00.000Z',
+};
+
+export function getStoredTrialLicenseConfig(): SystemTrialLicenseConfig {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.TRIAL_LICENSE);
+    if (!raw) return DEFAULT_TRIAL_LICENSE_CONFIG;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || !parsed.mode || !parsed.expiresAt) {
+      return DEFAULT_TRIAL_LICENSE_CONFIG;
+    }
+    return {
+      ...DEFAULT_TRIAL_LICENSE_CONFIG,
+      ...parsed,
+    };
+  } catch {
+    return DEFAULT_TRIAL_LICENSE_CONFIG;
+  }
+}
+
+export function saveTrialLicenseConfig(config: SystemTrialLicenseConfig): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.TRIAL_LICENSE, JSON.stringify(config));
+  } catch {}
+}
+
 
 
 

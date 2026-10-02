@@ -19,11 +19,29 @@ import { CashierView } from './views/CashierView';
 import { AdminView } from './views/AdminView';
 import { FinanceManagerView } from './views/FinanceManagerView';
 import { OfflineBanner } from './components/OfflineBanner';
+import { TrialLicensePortal } from './components/TrialLicensePortal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Hospital, Moon, Sun, ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
   const { currentView, currentUser, theme, toggleTheme } = useApp();
+  const secretClickCountRef = React.useRef<number>(0);
+  const secretClickTimerRef = React.useRef<number | null>(null);
+
+  const handleFooterSecretClick = () => {
+    secretClickCountRef.current += 1;
+    if (secretClickTimerRef.current) {
+      window.clearTimeout(secretClickTimerRef.current);
+    }
+    if (secretClickCountRef.current >= 5) {
+      secretClickCountRef.current = 0;
+      window.dispatchEvent(new CustomEvent('sharaya:open-secret-dev-unlock'));
+      return;
+    }
+    secretClickTimerRef.current = window.setTimeout(() => {
+      secretClickCountRef.current = 0;
+    }, 1800);
+  };
 
   const renderView = () => {
     switch (currentView) {
@@ -79,6 +97,7 @@ const AppContent: React.FC = () => {
       {/* شريط تنبيه انقطاع الاتصال بالإنترنت ووضع الـ PWA Offline */}
       <div className="no-print">
         <OfflineBanner />
+        <TrialLicensePortal />
       </div>
 
       {/* الشريط العلوي العام */}
@@ -104,7 +123,10 @@ const AppContent: React.FC = () => {
       <footer className="relative z-10 no-print border-t border-slate-200/80 dark:border-white/10 bg-white/95 dark:bg-[#040B09]/95 backdrop-blur-md py-5 sm:py-6 pb-safe text-xs text-slate-500 dark:text-slate-400 transition-colors duration-300">
         <div className="max-w-[1440px] mx-auto px-3 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3 sm:gap-4 text-center sm:text-right">
           <div className="flex flex-col sm:flex-row items-center gap-2.5 sm:gap-3">
-            <div className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs shrink-0">
+            <div
+              onClick={handleFooterSecretClick}
+              className="w-9 h-9 rounded-xl bg-emerald-900 dark:bg-emerald-950 text-amber-300 dark:text-amber-400 flex items-center justify-center border border-emerald-800/60 shadow-2xs shrink-0 select-none"
+            >
               <Hospital className="w-4 h-4" />
             </div>
             <div>

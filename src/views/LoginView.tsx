@@ -97,6 +97,9 @@ export const LoginView: React.FC = () => {
 
     if (!result.success) {
       setError(result.error || 'بيانات الدخول غير صحيحة، يرجى التحقق من اسم المستخدم وكلمة المرور');
+    } else {
+      setUsername('');
+      setPassword('');
     }
   };
 
