@@ -88,7 +88,7 @@
           if ('caches' in window) {
             window.caches.keys().then(function(keys) {
               keys.forEach(function(key) {
-                if (key !== 'sharaya-clinics-v30') {
+                if (key !== 'sharaya-clinics-v31') {
                   window.caches.delete(key);
                 } else {
                   window.caches.open(key).then(function(cache) {

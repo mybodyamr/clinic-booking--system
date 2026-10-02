@@ -57,7 +57,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v20_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v22_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -2144,6 +2144,10 @@ export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   blockNonEgyptVpn: false,
   antiCopyAndPrint: false,
   showTrialWatermark: false,
+  archiveCycleMonths: 4,
+  lastArchiveDate: '2026-10-02T00:00:00.000Z',
+  nextArchiveDate: '2027-02-02T00:00:00.000Z',
+  keepRecentDaysDefault: 10,
   activeBroadcastMessage: null,
   blockedEntities: [],
   intrusionLogs: [],

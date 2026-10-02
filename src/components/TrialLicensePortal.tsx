@@ -34,6 +34,11 @@ import {
   Layers,
   Copy,
   FileCheck2,
+  Archive,
+  HardDriveDownload,
+  HardDriveUpload,
+  FolderDown,
+  FolderUp,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -48,7 +53,22 @@ import {
   fetchVisitorNetworkIdentity,
   checkClockRollbackTamper,
   DMCA_OWNERSHIP_CERTIFICATE_ID,
+  saveBookings,
+  saveClinics,
+  saveDoctors,
+  saveDailySchedule,
+  saveShiftHandovers,
+  saveFinanceLedger,
+  saveInsuranceContracts,
+  saveTrialLicenseConfig,
 } from '../services/storage';
+import {
+  saveTrialLicenseConfigToDb,
+  saveShiftHandoversToDb,
+  saveFinanceLedgerToDb,
+  saveInsuranceContractsToDb,
+} from '../services/supabaseService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 // حفظ المراجع الأصلية لدوال الكونسول قبل تعطيلها لإمكانية استعادتها عند رغبة المطور
 const ORIGINAL_CONSOLE = {
@@ -89,6 +109,17 @@ export const TrialLicensePortal: React.FC = () => {
     currentView,
     currentUser,
     selectivePurgeRecords,
+    clinics,
+    doctors,
+    dailySchedule,
+    bookings,
+    shiftHandovers,
+    financeLedger,
+    insuranceContracts,
+    staffAccounts,
+    supportInfoText,
+    officialWorkingHours,
+    rolePermissions,
     addToast,
   } = useApp();
 
@@ -415,6 +446,21 @@ export const TrialLicensePortal: React.FC = () => {
     'staff_only'
   );
 
+  const [activePortalTab, setActivePortalTab] = useState<
+    'license' | 'archive' | 'demo' | 'shields' | 'devices' | 'purge'
+  >('license');
+  const [keepRecentDaysInput, setKeepRecentDaysInput] = useState<string>(
+    String(trialLicenseConfig.keepRecentDaysDefault || 10)
+  );
+  const [archiveCycleInput, setArchiveCycleInput] = useState<string>(
+    String(trialLicenseConfig.archiveCycleMonths || 4)
+  );
+  const [isPruningArchive, setIsPruningArchive] = useState(false);
+  const [confirmArchivePruneOpen, setConfirmArchivePruneOpen] = useState(false);
+  const [pendingRestoreData, setPendingRestoreData] = useState<any>(null);
+  const [restoreModalOpen, setRestoreModalOpen] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
+
   // حالات لوحة تحكم المطور السرية
   const [draftConfig, setDraftConfig] = useState<SystemTrialLicenseConfig>(trialLicenseConfig);
   const [customDaysInput, setCustomDaysInput] = useState<string>(
@@ -433,6 +479,8 @@ export const TrialLicensePortal: React.FC = () => {
     if (isDeveloperPortalOpen) {
       setDraftConfig(trialLicenseConfig);
       setCustomDaysInput(String(trialLicenseConfig.trialDays || 7));
+      setKeepRecentDaysInput(String(trialLicenseConfig.keepRecentDaysDefault || 10));
+      setArchiveCycleInput(String(trialLicenseConfig.archiveCycleMonths || 4));
     }
   }, [isDeveloperPortalOpen, trialLicenseConfig]);
 
@@ -710,6 +758,288 @@ export const TrialLicensePortal: React.FC = () => {
       setIsPurging(false);
     }
   };
+
+  // تصدير وتحميل ملف الأرشيف الكامل على جهاز المطور مع اسم يحمل التواريخ بدقة
+  const handleDownloadFullBackup = () => {
+    try {
+      const validDates = bookings
+        .map((b) => b.date)
+        .filter((d): d is string => typeof d === 'string' && d.length >= 8)
+        .sort();
+      const minDate = validDates[0] || new Date().toISOString().slice(0, 10);
+      const maxDate = validDates[validDates.length - 1] || new Date().toISOString().slice(0, 10);
+      const dateStr = new Date().toISOString().slice(0, 10);
+
+      const backupPayload = {
+        backupMetadata: {
+          systemTitle: 'منظومة عيادات الجمعية الشرعية التخصصية بأوسيم',
+          developer: 'Eng. Amr (Amrr)',
+          generatedAt: new Date().toISOString(),
+          firstBookingDate: minDate,
+          lastBookingDate: maxDate,
+          totalBookingsCount: bookings.length,
+          totalClinicsCount: clinics.length,
+          totalDoctorsCount: doctors.length,
+          totalShiftHandoversCount: shiftHandovers.length,
+          totalExpensesCount: financeLedger?.expenses?.length || 0,
+          version: 'v31_archive_format',
+          certificateId: DMCA_OWNERSHIP_CERTIFICATE_ID,
+        },
+        clinics,
+        doctors,
+        dailySchedule,
+        bookings,
+        shiftHandovers,
+        financeLedger,
+        insuranceContracts,
+        staffAccounts: staffAccounts.map((s) => ({ ...s, passwordHash: undefined })),
+        supportInfoText,
+        officialWorkingHours,
+        rolePermissions,
+        trialLicenseConfig: draftConfig,
+      };
+
+      const jsonStr = JSON.stringify(backupPayload, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const filename = `Sharaya_Archive_From_${minDate}_To_${maxDate}_Date_${dateStr}.json`;
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل ملف الأرشيف بنجاح 📥',
+        message: `تم تحميل ملف الأرشيف الكامل (${bookings.length} حجز) باسم (${filename}) على جهازك بأمان.`,
+      });
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'فشل تصدير الأرشيف',
+        message: 'حدث خطأ أثناء تجميع ملف النسخة الاحتياطية. يرجى المحاولة مرة أخرى.',
+      });
+    }
+  };
+
+  // تصدير وتحميل أرشيف الحجوزات القديمة فقط (المستهدفة للتفريغ)
+  const handleDownloadOldArchiveOnly = () => {
+    try {
+      const keepDays = Math.max(1, Math.min(365, Number(keepRecentDaysInput) || 10));
+      const cutoffTime = Date.now() - keepDays * 24 * 60 * 60 * 1000;
+      const cutoff = new Date(cutoffTime).toISOString().slice(0, 10);
+      const oldBookings = bookings.filter((b) => b.date < cutoff);
+
+      if (oldBookings.length === 0) {
+        addToast({
+          type: 'info',
+          title: 'لا توجد حجوزات قديمة',
+          message: `جميع الحجوزات الحالية (${bookings.length}) تقع ضمن فترة الحماية (آخر ${keepDays} يوماً).`,
+        });
+        return;
+      }
+
+      const validDates = oldBookings
+        .map((b) => b.date)
+        .filter((d): d is string => typeof d === 'string' && d.length >= 8)
+        .sort();
+      const minDate = validDates[0] || 'Start';
+      const maxDate = cutoff;
+      const dateStr = new Date().toISOString().slice(0, 10);
+
+      const oldArchivePayload = {
+        archiveMetadata: {
+          systemTitle: 'أرشيف الحجوزات السابقة — عيادات الجمعية الشرعية بأوسيم',
+          developer: 'Eng. Amr (Amrr)',
+          generatedAt: new Date().toISOString(),
+          cutoffDate: cutoff,
+          firstBookingDate: minDate,
+          lastBookingDate: maxDate,
+          totalBookingsCount: oldBookings.length,
+          certificateId: DMCA_OWNERSHIP_CERTIFICATE_ID,
+        },
+        bookings: oldBookings,
+      };
+
+      const jsonStr = JSON.stringify(oldArchivePayload, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const filename = `Sharaya_Old_Archive_Before_${cutoff}_From_${minDate}_To_${maxDate}_Date_${dateStr}.json`;
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      addToast({
+        type: 'success',
+        title: 'تم تنزيل أرشيف الحجوزات القديمة 📥',
+        message: `تم تنزيل (${oldBookings.length} حجز قديم) باسم (${filename}) بنجاح. يمكنك الآن تفريغها من Supabase وأنت مطمئن.`,
+      });
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'فشل تصدير الأرشيف',
+        message: 'حدث خطأ أثناء تجميع ملف الأرشيف.',
+      });
+    }
+  };
+
+  // تفريغ الحجوزات السابقة لتاريخ محدد مع الإبقاء على آخر X يوماً
+  const handlePruneBeforeDays = async () => {
+    const keepDays = Math.max(1, Math.min(365, Number(keepRecentDaysInput) || 10));
+    const cutoffTime = Date.now() - keepDays * 24 * 60 * 60 * 1000;
+    const cutoffDateStr = new Date(cutoffTime).toISOString().slice(0, 10);
+
+    setIsPruningArchive(true);
+    try {
+      const toRemoveCount = bookings.filter((b) => b.date < cutoffDateStr).length;
+      await selectivePurgeRecords({
+        purgePastBookings: true,
+        purgeAllBookings: false,
+        beforeDate: cutoffDateStr,
+        purgeShiftHandovers: false,
+        purgeFinanceExpenses: false,
+        purgeConsultationStamps: false,
+        purgeWhatsAppAndPrintLogs: false,
+        purgeSystemErrorLogs: false,
+      });
+
+      const cycleMonths = Number(archiveCycleInput) || draftConfig.archiveCycleMonths || 4;
+      const nextArchive = new Date();
+      nextArchive.setMonth(nextArchive.getMonth() + cycleMonths);
+
+      const nextConfig: SystemTrialLicenseConfig = {
+        ...draftConfig,
+        archiveCycleMonths: cycleMonths,
+        lastArchiveDate: new Date().toISOString(),
+        nextArchiveDate: nextArchive.toISOString(),
+        keepRecentDaysDefault: keepDays,
+      };
+      setDraftConfig(nextConfig);
+      await handleSaveConfig(nextConfig);
+
+      setConfirmArchivePruneOpen(false);
+      addToast({
+        type: 'success',
+        title: 'تم تفريغ الأرشيف القديم بنجاح 🧹',
+        message: `تم تفريغ ${toRemoveCount} حجز قديم ما قبل تاريخ (${cutoffDateStr}) من Supabase، والإبقاء الكامل على آخر ${keepDays} يوماً والعيادات والأطباء.`,
+      });
+    } finally {
+      setIsPruningArchive(false);
+    }
+  };
+
+  // معالجة اختيار ملف للاسترجاع
+  const handleFileRestoreSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const content = event.target?.result as string;
+        const parsed = JSON.parse(content);
+        if (parsed && (Array.isArray(parsed.bookings) || Array.isArray(parsed.clinics))) {
+          setPendingRestoreData(parsed);
+          setRestoreModalOpen(true);
+        } else {
+          addToast({
+            type: 'error',
+            title: 'ملف غير صالح',
+            message: 'الملف المختار ليس ملف نسخة احتياطية صالح لنظام العيادات.',
+          });
+        }
+      } catch {
+        addToast({
+          type: 'error',
+          title: 'خطأ في قراءة الملف',
+          message: 'تعذر قراءة ملف JSON المختار. تأكد من صحة الملف.',
+        });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  // تأكيد استرجاع البيانات من الملف
+  const handleConfirmRestore = async () => {
+    if (!pendingRestoreData) return;
+    setIsRestoring(true);
+    try {
+      if (Array.isArray(pendingRestoreData.clinics) && pendingRestoreData.clinics.length > 0) {
+        saveClinics(pendingRestoreData.clinics);
+      }
+      if (Array.isArray(pendingRestoreData.doctors) && pendingRestoreData.doctors.length > 0) {
+        saveDoctors(pendingRestoreData.doctors);
+      }
+      if (Array.isArray(pendingRestoreData.bookings) && pendingRestoreData.bookings.length > 0) {
+        saveBookings(pendingRestoreData.bookings);
+      }
+      if (Array.isArray(pendingRestoreData.shiftHandovers)) {
+        saveShiftHandovers(pendingRestoreData.shiftHandovers);
+        if (isSupabaseConfigured) {
+          await saveShiftHandoversToDb(pendingRestoreData.shiftHandovers).catch(() => {});
+        }
+      }
+      if (pendingRestoreData.financeLedger && typeof pendingRestoreData.financeLedger === 'object') {
+        saveFinanceLedger(pendingRestoreData.financeLedger);
+        if (isSupabaseConfigured) {
+          await saveFinanceLedgerToDb(pendingRestoreData.financeLedger).catch(() => {});
+        }
+      }
+      if (Array.isArray(pendingRestoreData.insuranceContracts)) {
+        saveInsuranceContracts(pendingRestoreData.insuranceContracts);
+        if (isSupabaseConfigured) {
+          await saveInsuranceContractsToDb(pendingRestoreData.insuranceContracts).catch(() => {});
+        }
+      }
+      if (pendingRestoreData.trialLicenseConfig && typeof pendingRestoreData.trialLicenseConfig === 'object') {
+        saveTrialLicenseConfig(pendingRestoreData.trialLicenseConfig);
+        setDraftConfig(pendingRestoreData.trialLicenseConfig);
+        if (isSupabaseConfigured) {
+          await saveTrialLicenseConfigToDb(pendingRestoreData.trialLicenseConfig).catch(() => {});
+        }
+      }
+
+      setRestoreModalOpen(false);
+      setPendingRestoreData(null);
+      addToast({
+        type: 'success',
+        title: 'تم استرجاع النسخة الاحتياطية بنجاح 🔄',
+        message: 'تم استرجاع السجلات ودمجها مع قاعدة البيانات بنجاح.',
+      });
+      setTimeout(() => {
+        window.location.reload();
+      }, 1200);
+    } catch {
+      addToast({
+        type: 'error',
+        title: 'فشل الاسترجاع',
+        message: 'حدث خطأ أثناء تطبيق بيانات النسخة الاحتياطية.',
+      });
+    } finally {
+      setIsRestoring(false);
+    }
+  };
+
+  const nextArchiveMs = draftConfig.nextArchiveDate
+    ? new Date(draftConfig.nextArchiveDate).getTime()
+    : new Date(draftConfig.startedAt || Date.now()).getTime() + 4 * 30 * 24 * 60 * 60 * 1000;
+  const isArchiveDue = Number.isFinite(nextArchiveMs) ? Date.now() >= nextArchiveMs : false;
+  const daysUntilArchive = Math.ceil((nextArchiveMs - Date.now()) / (24 * 60 * 60 * 1000));
+  const keepDaysNum = Math.max(1, Math.min(365, Number(keepRecentDaysInput) || 10));
+  const cutoffTimeMs = Date.now() - keepDaysNum * 24 * 60 * 60 * 1000;
+  const cutoffDateStr = new Date(cutoffTimeMs).toISOString().slice(0, 10);
+  const eligibleForArchiveCount = bookings.filter((b) => b.date < cutoffDateStr).length;
+  const preservedRecentBookingsCount = bookings.filter((b) => b.date >= cutoffDateStr).length;
+  const estimatedDbSizeKb = Math.round(
+    bookings.length * 1.2 + clinics.length * 0.8 + doctors.length * 0.9 + 50
+  );
 
   return (
     <>
@@ -1301,6 +1631,86 @@ export const TrialLicensePortal: React.FC = () => {
                 </button>
               </div>
 
+              {/* شريط التبويبات فائق السرعة والمصمم لسرعة التبديل والتنقل الفوري 0ms */}
+              <div className="bg-slate-100 dark:bg-slate-950 border-b border-slate-200 dark:border-slate-800 px-3 sm:px-6 py-2.5 flex items-center gap-1.5 sm:gap-2 overflow-x-auto shrink-0 scrollbar-none">
+                {[
+                  {
+                    id: 'license',
+                    label: '⏱️ الترخيص والمدة',
+                    badge:
+                      draftConfig.mode === 'permanent'
+                        ? 'دائم'
+                        : isSystemLocked
+                        ? 'مغلق'
+                        : `${liveRemaining.days}ي`,
+                    badgeColor:
+                      draftConfig.mode === 'permanent'
+                        ? 'bg-emerald-600 text-white'
+                        : isSystemLocked
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-amber-600 text-white',
+                  },
+                  {
+                    id: 'archive',
+                    label: '💾 الأرشفة وتفريغ Supabase',
+                    badge: isArchiveDue ? '⚠️ موعد الأرشيف' : `${daysUntilArchive} يوم`,
+                    badgeColor: isArchiveDue
+                      ? 'bg-rose-600 text-white animate-pulse'
+                      : 'bg-blue-600 text-white',
+                  },
+                  {
+                    id: 'demo',
+                    label: '🧪 البيانات المعزولة',
+                    badge: isolatedDemoRecordsCount > 0 ? `${isolatedDemoRecordsCount}` : undefined,
+                    badgeColor: 'bg-emerald-600 text-white',
+                  },
+                  {
+                    id: 'shields',
+                    label: '🛡️ الحماية وDMCA',
+                    badge: draftConfig.enforceAuthorizedDomainLock ? 'قفل الدومين' : undefined,
+                    badgeColor: 'bg-indigo-600 text-white',
+                  },
+                  {
+                    id: 'devices',
+                    label: '📡 المتصلين والرادار',
+                    badge:
+                      liveConnectedDevices.length > 0
+                        ? `${liveConnectedDevices.length} متصل`
+                        : undefined,
+                    badgeColor: 'bg-emerald-600 text-white',
+                  },
+                  {
+                    id: 'purge',
+                    label: '🧹 تصفير رسمي',
+                    badge: undefined,
+                    badgeColor: '',
+                  },
+                ].map((tab) => {
+                  const isActive = activePortalTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setActivePortalTab(tab.id as any)}
+                      className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black transition-all shrink-0 select-none ${
+                        isActive
+                          ? 'bg-[#062142] text-amber-300 shadow-md ring-2 ring-amber-400/50 scale-[1.02]'
+                          : 'bg-white dark:bg-slate-900 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-800'
+                      }`}
+                    >
+                      <span>{tab.label}</span>
+                      {tab.badge && (
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${tab.badgeColor}`}
+                        >
+                          {tab.badge}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
               {/* محتوى البوابة القابل للتمرير */}
               <div className="p-5 sm:p-7 overflow-y-auto space-y-6 flex-1">
                 {/* ملخص الحالة الحية الحالية */}
@@ -1350,366 +1760,659 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 1: اختيار وضع الترخيص السريع */}
-                <div className="space-y-3">
-                  <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                    <Sliders className="w-4 h-4 text-emerald-600" />
-                    <span>1. اختر وضع تشغيل المنظومة (تبديل فوري)</span>
-                  </h3>
+                {/* 1. تبويب أوضاع الترخيص والتحكم في المدة */}
+                {activePortalTab === 'license' && (
+                  <div className="space-y-6">
+                    {/* القسم 1: اختيار وضع الترخيص السريع */}
+                    <div className="space-y-3">
+                      <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                        <Sliders className="w-4 h-4 text-emerald-600" />
+                        <span>1. اختر وضع تشغيل المنظومة (تبديل فوري)</span>
+                      </h3>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftConfig((prev) => ({
-                          ...prev,
-                          mode: 'trial',
-                        }))
-                      }
-                      className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
-                        draftConfig.mode === 'trial'
-                          ? 'border-amber-500 bg-amber-50/70 dark:bg-amber-950/30 shadow-sm'
-                          : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
-                          <Clock className="w-5 h-5" />
-                        </span>
-                        {draftConfig.mode === 'trial' && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-white">
-                            محدد حالياً
-                          </span>
-                        )}
-                      </div>
-                      <div>
-                        <div className="font-extrabold text-sm text-slate-900 dark:text-white">
-                          ⏳ وضع الفترة التجريبية
-                        </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                          يعمل البرنامج بكامل مميزاته لعدد الأيام المحدد ثم يقفل تلقائياً لحين
-                          الاعتماد.
-                        </p>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftConfig((prev) => ({
-                          ...prev,
-                          mode: 'permanent',
-                        }))
-                      }
-                      className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
-                        draftConfig.mode === 'permanent'
-                          ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 shadow-sm'
-                          : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
-                          <CheckCircle2 className="w-5 h-5" />
-                        </span>
-                        {draftConfig.mode === 'permanent' && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-600 text-white">
-                            محدد حالياً
-                          </span>
-                        )}
-                      </div>
-                      <div>
-                        <div className="font-extrabold text-sm text-slate-900 dark:text-white">
-                          ✅ تفعيل النسخة الدائمة
-                        </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                          إلغاء المؤقت التجريبي نهائياً وتحويل المنظومة للنسخة الرسمية الدائمة مدى
-                          الحياة.
-                        </p>
-                      </div>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setDraftConfig((prev) => ({
-                          ...prev,
-                          mode: 'locked',
-                        }))
-                      }
-                      className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
-                        draftConfig.mode === 'locked'
-                          ? 'border-rose-600 bg-rose-50/70 dark:bg-rose-950/30 shadow-sm'
-                          : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center">
-                          <Power className="w-5 h-5" />
-                        </span>
-                        {draftConfig.mode === 'locked' && (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-600 text-white">
-                            محدد حالياً
-                          </span>
-                        )}
-                      </div>
-                      <div>
-                        <div className="font-extrabold text-sm text-slate-900 dark:text-white">
-                          🔒 إيقاف وقفل فوري (Kill Switch)
-                        </div>
-                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
-                          قفل المنظومة في نفس الثانية على جميع الأجهزة المفتوحة مع حفظ كافة
-                          البيانات.
-                        </p>
-                      </div>
-                    </button>
-                  </div>
-                </div>
-
-                {/* القسم 2: تعديل عدد الأيام والتاريخ والوقت بحرية كاملة */}
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                      <Calendar className="w-4 h-4 text-[#062142] dark:text-amber-400" />
-                      <span>2. التحكم الحر في عدد أيام التجربة وتاريخ الانتهاء</span>
-                    </h3>
-                    <span className="text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 px-2.5 py-1 rounded-lg border border-amber-200 dark:border-amber-800">
-                      المدة في المسودة الآن: {draftRemaining.days} يوم و {draftRemaining.hours} ساعة
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                        اكتب عدد أيام التجربة الذي تريده (من الآن):
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          min={1}
-                          max={3650}
-                          value={customDaysInput}
-                          onChange={(e) => setCustomDaysInput(e.target.value)}
-                          className="w-28 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-extrabold text-sm text-center"
-                        />
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                         <button
                           type="button"
-                          onClick={() => applyDaysFromNow(Number(customDaysInput) || 7)}
-                          className="px-4 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs font-extrabold transition-all shadow-xs"
-                        >
-                          ضبط من اللحظة الحالية ({customDaysInput || 7} يوم)
-                        </button>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                        {[
-                          { label: 'يوم واحد', days: 1 },
-                          { label: '3 أيام', days: 3 },
-                          { label: '5 أيام', days: 5 },
-                          { label: '7 أيام (أسبوع)', days: 7 },
-                          { label: '14 يوم (أسبوعين)', days: 14 },
-                          { label: '30 يوم (شهر)', days: 30 },
-                        ].map((preset) => (
-                          <button
-                            key={preset.days}
-                            type="button"
-                            onClick={() => applyDaysFromNow(preset.days)}
-                            className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-bold transition-colors"
-                          >
-                            {preset.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="space-y-2">
-                      <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
-                        أو حدد تاريخ وساعة انتهاء الفترة التجريبية بالضبط:
-                      </label>
-                      <input
-                        type="datetime-local"
-                        value={toLocalDateTimeInputValue(draftConfig.expiresAt)}
-                        onChange={(e) => {
-                          if (!e.target.value) return;
-                          const picked = new Date(e.target.value);
-                          if (!isNaN(picked.getTime())) {
-                            const diffDays = Math.max(
-                              1,
-                              Math.ceil((picked.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-                            );
-                            setCustomDaysInput(String(diffDays));
+                          onClick={() =>
                             setDraftConfig((prev) => ({
                               ...prev,
                               mode: 'trial',
-                              trialDays: diffDays,
-                              expiresAt: picked.toISOString(),
-                            }));
+                            }))
                           }
-                        }}
-                        className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-bold text-xs"
-                      />
+                          className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
+                            draftConfig.mode === 'trial'
+                              ? 'border-amber-500 bg-amber-50/70 dark:bg-amber-950/30 shadow-sm'
+                              : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="w-9 h-9 rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center">
+                              <Clock className="w-5 h-5" />
+                            </span>
+                            {draftConfig.mode === 'trial' && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-amber-500 text-white">
+                                محدد حالياً
+                              </span>
+                            )}
+                          </div>
+                          <div>
+                            <div className="font-extrabold text-sm text-slate-900 dark:text-white">
+                              ⏳ وضع الفترة التجريبية
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                              يعمل البرنامج بكامل مميزاته لعدد الأيام المحدد ثم يقفل تلقائياً لحين
+                              الاعتماد.
+                            </p>
+                          </div>
+                        </button>
 
-                      <div className="flex flex-wrap items-center gap-1.5 pt-1">
                         <button
                           type="button"
-                          onClick={() => shiftCurrentExpiry(24)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
+                          onClick={() =>
+                            setDraftConfig((prev) => ({
+                              ...prev,
+                              mode: 'permanent',
+                            }))
+                          }
+                          className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
+                            draftConfig.mode === 'permanent'
+                              ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 shadow-sm'
+                              : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                          }`}
                         >
-                          <Plus className="w-3 h-3" />
-                          <span>تمديد +1 يوم</span>
+                          <div className="flex items-center justify-between">
+                            <span className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                              <CheckCircle2 className="w-5 h-5" />
+                            </span>
+                            {draftConfig.mode === 'permanent' && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-600 text-white">
+                                محدد حالياً
+                              </span>
+                            )}
+                          </div>
+                          <div>
+                            <div className="font-extrabold text-sm text-slate-900 dark:text-white">
+                              ✅ تفعيل النسخة الدائمة
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                              إلغاء المؤقت التجريبي نهائياً وتحويل المنظومة للنسخة الرسمية الدائمة مدى
+                              الحياة.
+                            </p>
+                          </div>
                         </button>
+
                         <button
                           type="button"
-                          onClick={() => shiftCurrentExpiry(72)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
+                          onClick={() =>
+                            setDraftConfig((prev) => ({
+                              ...prev,
+                              mode: 'locked',
+                            }))
+                          }
+                          className={`p-4 rounded-2xl border-2 text-right transition-all flex flex-col justify-between gap-2 ${
+                            draftConfig.mode === 'locked'
+                              ? 'border-rose-600 bg-rose-50/70 dark:bg-rose-950/30 shadow-sm'
+                              : 'border-slate-200 dark:border-slate-800 hover:border-slate-300'
+                          }`}
                         >
-                          <Plus className="w-3 h-3" />
-                          <span>تمديد +3 أيام</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => shiftCurrentExpiry(168)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
-                        >
-                          <Plus className="w-3 h-3" />
-                          <span>تمديد +7 أيام</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => shiftCurrentExpiry(-24)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[11px] font-bold"
-                        >
-                          <Minus className="w-3 h-3" />
-                          <span>إنقاص -1 يوم</span>
+                          <div className="flex items-center justify-between">
+                            <span className="w-9 h-9 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+                              <Power className="w-5 h-5" />
+                            </span>
+                            {draftConfig.mode === 'locked' && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-600 text-white">
+                                محدد حالياً
+                              </span>
+                            )}
+                          </div>
+                          <div>
+                            <div className="font-extrabold text-sm text-slate-900 dark:text-white">
+                              🔒 إيقاف وقفل فوري (Kill Switch)
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-relaxed">
+                              قفل المنظومة في نفس الثانية على جميع الأجهزة المفتوحة مع حفظ كافة
+                              البيانات.
+                            </p>
+                          </div>
                         </button>
                       </div>
                     </div>
-                  </div>
-                </div>
 
-                {/* القسم 3: حقن وسحب بيانات العرض التجريبية المعزولة بضغطة زر */}
-                <div className="rounded-2xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 p-4 sm:p-5 space-y-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
-                        <Database className="w-4 h-4" />
-                      </span>
-                      <div>
-                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                          3. بيانات العرض التجريبية المعزولة (بدون لمس أي بيانات أصلية أو مدخلة)
+                    {/* القسم 2: تعديل عدد الأيام والتاريخ والوقت بحرية كاملة */}
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                          <Calendar className="w-4 h-4 text-[#062142] dark:text-amber-400" />
+                          <span>2. التحكم الحر في عدد أيام التجربة وتاريخ الانتهاء</span>
                         </h3>
-                        <p className="text-[11px] text-slate-600 dark:text-slate-300">
-                          بضغطة زر يمكنك إضافة حركات تجريبية لمعاينة التقارير، وبضغطة زر تسحبها
-                          وحدها وتترك كل بياناتهم كما هي 100%
-                        </p>
+                        <span className="text-xs font-bold text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/50 px-2.5 py-1 rounded-lg border border-amber-200 dark:border-amber-800">
+                          المدة في المسودة الآن: {draftRemaining.days} يوم و {draftRemaining.hours} ساعة
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                            اكتب عدد أيام التجربة الذي تريده (من الآن):
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              min={1}
+                              max={3650}
+                              value={customDaysInput}
+                              onChange={(e) => setCustomDaysInput(e.target.value)}
+                              className="w-28 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-extrabold text-sm text-center"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => applyDaysFromNow(Number(customDaysInput) || 7)}
+                              className="px-4 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs font-extrabold transition-all shadow-xs"
+                            >
+                              ضبط من اللحظة الحالية ({customDaysInput || 7} يوم)
+                            </button>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            {[
+                              { label: 'يوم واحد', days: 1 },
+                              { label: '3 أيام', days: 3 },
+                              { label: '5 أيام', days: 5 },
+                              { label: '7 أيام (أسبوع)', days: 7 },
+                              { label: '14 يوم (أسبوعين)', days: 14 },
+                              { label: '30 يوم (شهر)', days: 30 },
+                            ].map((preset) => (
+                              <button
+                                key={preset.days}
+                                type="button"
+                                onClick={() => applyDaysFromNow(preset.days)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-[11px] font-bold transition-colors"
+                              >
+                                {preset.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                            أو حدد تاريخ وساعة انتهاء الفترة التجريبية بالضبط:
+                          </label>
+                          <input
+                            type="datetime-local"
+                            value={toLocalDateTimeInputValue(draftConfig.expiresAt)}
+                            onChange={(e) => {
+                              if (!e.target.value) return;
+                              const picked = new Date(e.target.value);
+                              if (!isNaN(picked.getTime())) {
+                                const diffDays = Math.max(
+                                  1,
+                                  Math.ceil((picked.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+                                );
+                                setCustomDaysInput(String(diffDays));
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  mode: 'trial',
+                                  trialDays: diffDays,
+                                  expiresAt: picked.toISOString(),
+                                }));
+                              }
+                            }}
+                            className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-bold text-xs"
+                          />
+
+                          <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => shiftCurrentExpiry(24)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>تمديد +1 يوم</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => shiftCurrentExpiry(72)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>تمديد +3 أيام</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => shiftCurrentExpiry(168)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 text-[11px] font-bold"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>تمديد +7 أيام</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => shiftCurrentExpiry(-24)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 text-[11px] font-bold"
+                            >
+                              <Minus className="w-3 h-3" />
+                              <span>إنقاص -1 يوم</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. تبويب الأرشفة الذكية وتفريغ مساحة Supabase وحفظ النسخ الاحتياطية */}
+                {activePortalTab === 'archive' && (
+                  <div className="space-y-6">
+                    {/* بانر القسم الرئيسي */}
+                    <div className="rounded-2xl border-2 border-[#062142] dark:border-amber-400/40 bg-gradient-to-br from-[#062142] via-[#0b315e] to-[#04152b] text-white p-5 sm:p-6 space-y-3 shadow-lg">
+                      <div className="flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shrink-0 shadow-inner">
+                          <Archive className="w-6 h-6" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h3 className="text-base sm:text-lg font-black text-white">
+                              مركز إدارة الأرشفة الدورية وتفريغ مساحة Supabase الذكي
+                            </h3>
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40">
+                              Rolling Retention & Safe Archiving
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                            تنظيم دوري للنسخ الاحتياطية وتنزيلها على جهازك بتسمية وتواريخ دقيقة، مع تفريغ الحجوزات القديمة دورياً لإبقاء قاعدة بيانات Supabase خفيفة وسريعة ومجانية 100% مدى الحياة، مع الحفاظ التام على آخر أيام العمل والعيادات والأطباء.
+                          </p>
+                        </div>
                       </div>
                     </div>
 
-                    <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
-                      السجلات التجريبية المعزولة حالياً: {isolatedDemoRecordsCount} سجل
-                    </span>
+                    {/* 1. إعدادات دورة الأرشفة وتحديد فترة الإبقاء */}
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                      {/* كارت دورة الأرشفة بالشهور */}
+                      <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5 space-y-3 shadow-2xs">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <label className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-2">
+                            <Clock className="w-4 h-4 text-[#062142] dark:text-amber-400" />
+                            <span>1. تحديد دورة الأرشفة (كل كم شهر؟):</span>
+                          </label>
+                          <span
+                            className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold ${
+                              isArchiveDue
+                                ? 'bg-rose-500 text-white animate-pulse'
+                                : 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300'
+                            }`}
+                          >
+                            {isArchiveDue ? '⚠️ حان موعد الأرشفة والتفريغ' : `متبقي ${daysUntilArchive} يوم`}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={24}
+                            value={archiveCycleInput}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setArchiveCycleInput(val);
+                              const num = Number(val);
+                              if (num > 0) {
+                                const nextDate = new Date();
+                                nextDate.setMonth(nextDate.getMonth() + num);
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  archiveCycleMonths: num,
+                                  nextArchiveDate: nextDate.toISOString(),
+                                }));
+                              }
+                            }}
+                            className="w-24 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-black text-sm text-center"
+                          />
+                          <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                            شهر (دورة النسخ الدوري)
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          {[
+                            { label: 'كل شهر', months: 1 },
+                            { label: 'كل شهرين', months: 2 },
+                            { label: 'كل 3 شهور', months: 3 },
+                            { label: 'كل 4 شهور (الموصى به)', months: 4 },
+                            { label: 'كل 6 شهور', months: 6 },
+                          ].map((item) => (
+                            <button
+                              key={item.months}
+                              type="button"
+                              onClick={() => {
+                                setArchiveCycleInput(String(item.months));
+                                const nextDate = new Date();
+                                nextDate.setMonth(nextDate.getMonth() + item.months);
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  archiveCycleMonths: item.months,
+                                  nextArchiveDate: nextDate.toISOString(),
+                                }));
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                                Number(archiveCycleInput) === item.months
+                                  ? 'bg-[#062142] text-amber-300 ring-2 ring-amber-400/50'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 text-xs space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-500 font-bold">موعد الأرشفة القادم:</span>
+                            <span className="font-extrabold text-slate-900 dark:text-white">
+                              {new Date(nextArchiveMs).toLocaleDateString('ar-EG', {
+                                year: 'numeric',
+                                month: 'long',
+                                day: 'numeric',
+                              })}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-slate-500 font-bold">آخر أرشفة مسجلة:</span>
+                            <span className="font-semibold text-slate-700 dark:text-slate-300">
+                              {draftConfig.lastArchiveDate
+                                ? new Date(draftConfig.lastArchiveDate).toLocaleDateString('ar-EG')
+                                : 'لم تُجرَ أرشفة بعد'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* كارت فترة الحماية والإبقاء (Retention Window) */}
+                      <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5 space-y-3 shadow-2xs">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <label className="text-xs font-black text-slate-900 dark:text-white flex items-center gap-2">
+                            <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                            <span>2. فترة الإبقاء والحماية (كم يوماً أخيراً يظل محفوظاً؟):</span>
+                          </label>
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300">
+                            محمي 100%
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={365}
+                            value={keepRecentDaysInput}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setKeepRecentDaysInput(val);
+                              const num = Number(val);
+                              if (num > 0) {
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  keepRecentDaysDefault: num,
+                                }));
+                              }
+                            }}
+                            className="w-24 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white font-black text-sm text-center"
+                          />
+                          <span className="text-xs font-bold text-slate-600 dark:text-slate-300">
+                            يوماً (لا يتم مسحها أبداً)
+                          </span>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          {[
+                            { label: 'آخر 7 أيام (أسبوع)', days: 7 },
+                            { label: 'آخر 10 أيام (المثالي)', days: 10 },
+                            { label: 'آخر 14 يوم (أسبوعين)', days: 14 },
+                            { label: 'آخر 30 يوم (شهر)', days: 30 },
+                          ].map((item) => (
+                            <button
+                              key={item.days}
+                              type="button"
+                              onClick={() => {
+                                setKeepRecentDaysInput(String(item.days));
+                                setDraftConfig((prev) => ({
+                                  ...prev,
+                                  keepRecentDaysDefault: item.days,
+                                }));
+                              }}
+                              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all ${
+                                Number(keepRecentDaysInput) === item.days
+                                  ? 'bg-emerald-700 text-white ring-2 ring-emerald-400/50'
+                                  : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700'
+                              }`}
+                            >
+                              {item.label}
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800/60 text-xs space-y-1">
+                          <div className="flex items-center justify-between text-[11px]">
+                            <span className="text-emerald-800 dark:text-emerald-300 font-bold">
+                              تاريخ نقطة الفصل (Cutoff):
+                            </span>
+                            <span className="font-extrabold text-slate-900 dark:text-white font-mono">
+                              {cutoffDateStr}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-emerald-700 dark:text-emerald-400 font-medium">
+                            الحجوزات من ({cutoffDateStr}) حتى اللحظة ({preservedRecentBookingsCount} حجز) محمية ومستمرة كلياً، وما قبل ذلك ({eligibleForArchiveCount} حجز) يدخل في الأرشيف والتفريغ.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2. كروت إحصائيات السجلات والمساحة في Supabase */}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-1">
+                        <span className="text-[11px] font-bold text-slate-500">إجمالي الحجوزات السحابية:</span>
+                        <div className="text-xl sm:text-2xl font-black text-slate-900 dark:text-white">
+                          {bookings.length} <span className="text-xs font-normal text-slate-500">حجز</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 rounded-2xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 space-y-1">
+                        <span className="text-[11px] font-bold text-amber-800 dark:text-amber-300">
+                          المرشحة للأرشفة والتفريغ:
+                        </span>
+                        <div className="text-xl sm:text-2xl font-black text-amber-700 dark:text-amber-400">
+                          {eligibleForArchiveCount} <span className="text-xs font-normal">حجز قديم</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 rounded-2xl bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 space-y-1">
+                        <span className="text-[11px] font-bold text-emerald-800 dark:text-emerald-300">
+                          المحمية الجارية (آخر {keepDaysNum} يوماً):
+                        </span>
+                        <div className="text-xl sm:text-2xl font-black text-emerald-700 dark:text-emerald-400">
+                          {preservedRecentBookingsCount} <span className="text-xs font-normal">حجز نشط</span>
+                        </div>
+                      </div>
+
+                      <div className="p-4 rounded-2xl bg-blue-50/70 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-800 space-y-1">
+                        <span className="text-[11px] font-bold text-blue-800 dark:text-blue-300">العيادات والأطباء:</span>
+                        <div className="text-sm sm:text-base font-black text-blue-900 dark:text-blue-200 pt-1">
+                          {clinics.length} عيادة • {doctors.length} طبيب
+                        </div>
+                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-extrabold block">
+                          محفوظة للأبد 100%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* 3. خطوات العمل الآمنة: تنزيل الأرشيف ثم تفريغ السحابة */}
+                    <div className="rounded-2xl border-2 border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+                      <h4 className="text-xs sm:text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                        <HardDriveDownload className="w-4 h-4 text-emerald-600" />
+                        <span>الخطوة 1: تنزيل ملف الأرشيف وحفظه على جهاز الكمبيوتر</span>
+                      </h4>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <button
+                          type="button"
+                          onClick={handleDownloadFullBackup}
+                          className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-right transition-all flex items-start gap-3 group"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-[#062142] text-amber-300 flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                            <FolderDown className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="font-black text-xs sm:text-sm text-slate-900 dark:text-white">
+                              تحميل الأرشيف الشامل (Full Backup)
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              ملف JSON يحمل اسم النطاق الزمني بالكامل مع العيادات والأطباء والإعدادات.
+                            </p>
+                            <span className="inline-block mt-2 px-2.5 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 text-[10px] font-mono font-bold">
+                              Sharaya_Archive_From_{bookings.length > 0 ? (bookings.map(b => b.date).filter(Boolean).sort()[0] || 'start') : 'none'}_To_...json
+                            </span>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleDownloadOldArchiveOnly}
+                          disabled={eligibleForArchiveCount === 0}
+                          className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/60 hover:bg-slate-100 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 text-right transition-all flex items-start gap-3 group disabled:opacity-50"
+                        >
+                          <div className="w-10 h-10 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 group-hover:scale-105 transition-transform">
+                            <Archive className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <div className="font-black text-xs sm:text-sm text-slate-900 dark:text-white">
+                              تحميل أرشيف السجلات القديمة فقط ({eligibleForArchiveCount} حجز)
+                            </div>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                              ملف مخصص للحجوزات السابقة لتاريخ ({cutoffDateStr}) تمهيداً لتفريغها.
+                            </p>
+                            <span className="inline-block mt-2 px-2.5 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 text-[10px] font-mono font-bold">
+                              Sharaya_Old_Archive_Before_{cutoffDateStr}.json
+                            </span>
+                          </div>
+                        </button>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-0.5">
+                          <h4 className="text-xs sm:text-sm font-black text-rose-700 dark:text-rose-400 flex items-center gap-1.5">
+                            <Trash2 className="w-4 h-4" />
+                            <span>الخطوة 2: تفريغ الحجوزات المؤرشفة فقط من Supabase</span>
+                          </h4>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                            يتم تنفيذها بعد حفظ الملف على جهازك لتوفير المساحة وتصفير المؤقت للدورة القادمة.
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          disabled={eligibleForArchiveCount === 0}
+                          onClick={() => setConfirmArchivePruneOpen(true)}
+                          className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black shadow-md transition-all shrink-0 flex items-center justify-center gap-2 disabled:opacity-40"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                          <span>تفريغ السجلات المؤرشفة ({eligibleForArchiveCount} حجز) 🧹</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 4. استرجاع ورفع أرشيف سابق إلى Supabase */}
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 p-4 sm:p-5 space-y-3">
+                      <div className="flex items-center justify-between flex-wrap gap-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                            <FolderUp className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="text-xs sm:text-sm font-black text-slate-900 dark:text-white">
+                              استرجاع ورفع أرشيف سابق (Restore Backup) 🔄
+                            </h4>
+                            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                              إذا أردت إعادة أي ملف أرشيف سابق ورفعه مرة أخرى إلى Supabase
+                            </p>
+                          </div>
+                        </div>
+
+                        <label className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 border-2 border-slate-300 dark:border-slate-700 text-xs font-black cursor-pointer shadow-xs transition-all">
+                          <HardDriveUpload className="w-4 h-4 text-emerald-600" />
+                          <span>اختيار ملف الأرشيف (.json) للاسترجاع</span>
+                          <input
+                            type="file"
+                            accept=".json,application/json"
+                            onChange={handleFileRestoreSelected}
+                            className="hidden"
+                          />
+                        </label>
+                      </div>
+                    </div>
                   </div>
+                )}
 
-                  <div className="flex flex-wrap items-center gap-3 pt-1">
-                    <button
-                      type="button"
-                      disabled={isDemoLoading}
-                      onClick={async () => {
-                        setIsDemoLoading(true);
-                        await injectIsolatedDemoData();
-                        setIsDemoLoading(false);
-                      }}
-                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-extrabold shadow-sm transition-all"
-                    >
-                      <Layers className="w-4 h-4" />
-                      <span>➕ حقن بيانات عرض تجريبية واقعية الآن</span>
-                    </button>
+                {/* 3. تبويب بيانات العرض التجريبية المعزولة */}
+                {activePortalTab === 'demo' && (
+                  <div className="rounded-2xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 p-4 sm:p-5 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center">
+                          <Database className="w-4 h-4" />
+                        </span>
+                        <div>
+                          <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                            3. بيانات العرض التجريبية المعزولة (بدون لمس أي بيانات أصلية أو مدخلة)
+                          </h3>
+                          <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                            بضغطة زر يمكنك إضافة حركات تجريبية لمعاينة التقارير، وبضغطة زر تسحبها
+                            وحدها وتترك كل بياناتهم كما هي 100%
+                          </p>
+                        </div>
+                      </div>
 
-                    <button
-                      type="button"
-                      disabled={isDemoLoading || isolatedDemoRecordsCount === 0}
-                      onClick={async () => {
-                        setIsDemoLoading(true);
-                        await removeIsolatedDemoDataOnly();
-                        setIsDemoLoading(false);
-                      }}
-                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-amber-50 text-amber-800 dark:text-amber-300 border-2 border-amber-400/60 text-xs font-extrabold transition-all disabled:opacity-50"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      <span>🧹 سحب وإزالة البيانات التجريبية فقط (مع حفظ بياناتهم 100%)</span>
-                    </button>
-                  </div>
-                </div>
+                      <span className="px-3 py-1 rounded-full bg-white dark:bg-slate-900 border border-emerald-300 dark:border-emerald-700 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
+                        السجلات التجريبية المعزولة حالياً: {isolatedDemoRecordsCount} سجل
+                      </span>
+                    </div>
 
-                {/* القسم 4: إرسال رسالة منبثقة فورية لجميع الشاشات المفتوحة الآن */}
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-3 bg-white dark:bg-slate-900">
-                  <div className="flex items-center justify-between flex-wrap gap-2">
-                    <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                      <Megaphone className="w-4 h-4 text-amber-500" />
-                      <span>4. إرسال رسالة منبثقة فورية على شاشة الإدارة والموظفين لايف</span>
-                    </h3>
-                    {draftConfig.activeBroadcastMessage && (
+                    <div className="flex flex-wrap items-center gap-3 pt-1">
                       <button
                         type="button"
-                        onClick={handleClearLiveBroadcast}
-                        className="px-3 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 text-xs font-bold border border-rose-200 dark:border-rose-800"
+                        disabled={isDemoLoading}
+                        onClick={async () => {
+                          setIsDemoLoading(true);
+                          await injectIsolatedDemoData();
+                          setIsDemoLoading(false);
+                        }}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-extrabold shadow-sm transition-all"
                       >
-                        إلغاء وإخفاء الرسالة المعروضة حالياً
+                        <Layers className="w-4 h-4" />
+                        <span>➕ حقن بيانات عرض تجريبية واقعية الآن</span>
                       </button>
-                    )}
-                  </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <input
-                      type="text"
-                      value={broadcastTitleInput}
-                      onChange={(e) => setBroadcastTitleInput(e.target.value)}
-                      placeholder="عنوان الرسالة..."
-                      className="px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
-                    />
-                    <input
-                      type="text"
-                      value={broadcastBodyInput}
-                      onChange={(e) => setBroadcastBodyInput(e.target.value)}
-                      placeholder="اكتب نص الرسالة الفورية التي ستظهر في منتصف الشاشة..."
-                      className="sm:col-span-2 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-white"
-                    />
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 text-xs font-bold text-slate-700 dark:text-slate-300">
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="bcastTarget"
-                          checked={broadcastTargetInput === 'staff_only'}
-                          onChange={() => setBroadcastTargetInput('staff_only')}
-                        />
-                        <span>للموظفين والإدارة فقط</span>
-                      </label>
-                      <label className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="radio"
-                          name="bcastTarget"
-                          checked={broadcastTargetInput === 'everyone'}
-                          onChange={() => setBroadcastTargetInput('everyone')}
-                        />
-                        <span>لجميع الشاشات المفتوحة (بما فيها الرئيسية)</span>
-                      </label>
+                      <button
+                        type="button"
+                        disabled={isDemoLoading || isolatedDemoRecordsCount === 0}
+                        onClick={async () => {
+                          setIsDemoLoading(true);
+                          await removeIsolatedDemoDataOnly();
+                          setIsDemoLoading(false);
+                        }}
+                        className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white dark:bg-slate-900 hover:bg-amber-50 text-amber-800 dark:text-amber-300 border-2 border-amber-400/60 text-xs font-extrabold transition-all disabled:opacity-50"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                        <span>🧹 سحب وإزالة البيانات التجريبية فقط (مع حفظ بياناتهم 100%)</span>
+                      </button>
                     </div>
-
-                    <button
-                      type="button"
-                      onClick={handleSendLiveBroadcast}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs font-extrabold shadow-xs"
-                    >
-                      <Send className="w-3.5 h-3.5 text-amber-300" />
-                      <span>إرسال الرسالة للشاشات الآن 🚀</span>
-                    </button>
                   </div>
-                </div>
+                )}
 
-                {/* القسم 5: دروع الحماية السيبرانية وخيارات العرض */}
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
+                {/* 4. تبويب دروع الحماية السيبرانية وبصمة الملكية الفكرية DMCA */}
+                {activePortalTab === 'shields' && (
+                  <div className="space-y-6">
+                    {/* القسم 5: دروع الحماية السيبرانية وخيارات العرض */}
+                    <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
                   <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
                     5. دروع الحماية السيبرانية وخيارات العرض
                   </h3>
@@ -2088,6 +2791,79 @@ I am the original creator and copyright holder of the source code, UI architectu
                     )}
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* 5. تبويب المتصلين لايف والرادار والبث الفوري */}
+            {activePortalTab === 'devices' && (
+              <div className="space-y-6">
+                {/* إرسال رسالة منبثقة فورية لجميع الشاشات المفتوحة الآن */}
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-3 bg-white dark:bg-slate-900">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
+                      <Megaphone className="w-4 h-4 text-amber-500" />
+                      <span>إرسال رسالة منبثقة فورية على شاشة الإدارة والموظفين لايف</span>
+                    </h3>
+                    {draftConfig.activeBroadcastMessage && (
+                      <button
+                        type="button"
+                        onClick={handleClearLiveBroadcast}
+                        className="px-3 py-1 rounded-lg bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-300 text-xs font-bold border border-rose-200 dark:border-rose-800"
+                      >
+                        إلغاء وإخفاء الرسالة المعروضة حالياً
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input
+                      type="text"
+                      value={broadcastTitleInput}
+                      onChange={(e) => setBroadcastTitleInput(e.target.value)}
+                      placeholder="عنوان الرسالة..."
+                      className="px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={broadcastBodyInput}
+                      onChange={(e) => setBroadcastBodyInput(e.target.value)}
+                      placeholder="اكتب نص الرسالة الفورية التي ستظهر في منتصف الشاشة..."
+                      className="sm:col-span-2 px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-white"
+                    />
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 text-xs font-bold text-slate-700 dark:text-slate-300">
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bcastTarget"
+                          checked={broadcastTargetInput === 'staff_only'}
+                          onChange={() => setBroadcastTargetInput('staff_only')}
+                        />
+                        <span>للموظفين والإدارة فقط</span>
+                      </label>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input
+                          type="radio"
+                          name="bcastTarget"
+                          checked={broadcastTargetInput === 'everyone'}
+                          onChange={() => setBroadcastTargetInput('everyone')}
+                        />
+                        <span>لجميع الشاشات المفتوحة (بما فيها الرئيسية)</span>
+                      </label>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleSendLiveBroadcast}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-white text-xs font-extrabold shadow-xs"
+                    >
+                      <Send className="w-3.5 h-3.5 text-amber-300" />
+                      <span>إرسال الرسالة للشاشات الآن 🚀</span>
+                    </button>
+                  </div>
+                </div>
 
                 {/* القسم 6: الأجهزة المتصلة بالنظام الآن لايف (Live Online Sessions) */}
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-3 bg-white dark:bg-slate-900">
@@ -2375,14 +3151,19 @@ I am the original creator and copyright holder of the source code, UI architectu
                     </div>
                   )}
                 </div>
+              </div>
+            )}
 
+            {/* 6. تبويب تصفير العمليات الرسمي */}
+            {activePortalTab === 'purge' && (
+              <div className="space-y-6">
                 {/* القسم 8: تصفير شامل لجميع الحجوزات عند بدء التشغيل الرسمي */}
                 <div className="rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h4 className="text-xs sm:text-sm font-extrabold text-rose-900 dark:text-rose-300 flex items-center gap-1.5">
                       <Trash2 className="w-4 h-4" />
                       <span>
-                        8. مسح شامل لجميع الحجوزات والعمليات (لتسليم النظام فارغاً بالكامل)
+                        مسح شامل لجميع الحجوزات والعمليات (لتسليم النظام فارغاً بالكامل)
                       </span>
                     </h4>
                     <p className="text-[11px] text-rose-700 dark:text-rose-400 leading-relaxed">
@@ -2420,6 +3201,8 @@ I am the original creator and copyright holder of the source code, UI architectu
                   )}
                 </div>
               </div>
+            )}
+          </div>
 
               {/* فوتر البوابة السرية وأزرار الحفظ والمزامنة */}
               <div className="bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 px-5 py-4 sm:px-7 flex flex-wrap items-center justify-between gap-3 shrink-0">
@@ -2456,6 +3239,188 @@ I am the original creator and copyright holder of the source code, UI architectu
                     )}
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* نافذة تأكيد تفريغ الأرشيف من Supabase */}
+      <AnimatePresence>
+        {confirmArchivePruneOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10000] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 no-print"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 border-2 border-rose-500/50 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5"
+            >
+              <div className="flex items-center gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div className="w-11 h-11 rounded-2xl bg-rose-500/20 text-rose-600 dark:text-rose-400 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-black text-slate-900 dark:text-white text-base">
+                    تأكيد تفريغ السجلات المؤرشفة من Supabase 🧹
+                  </h3>
+                  <p className="text-xs text-rose-600 dark:text-rose-400 font-bold">
+                    تفريغ ذكي وآمن: حذف القديم فقط مع الحماية الكاملة لآخر الأيام
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-rose-50/80 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800 text-xs text-rose-800 dark:text-rose-200 space-y-2.5 leading-relaxed">
+                <p className="font-extrabold text-sm">
+                  هل قمت بتحميل ملف الأرشيف وحفظه على جهازك أولاً؟
+                </p>
+                <ul className="list-disc list-inside space-y-1 font-semibold text-slate-700 dark:text-slate-300">
+                  <li>
+                    سيتم حذف <strong className="text-rose-600 font-black">{eligibleForArchiveCount} حجز قديم</strong> تم إجراؤها ما قبل تاريخ ({cutoffDateStr}) من Supabase.
+                  </li>
+                  <li>
+                    سيتم الإبقاء بنسبة 100% على <strong className="text-emerald-600 font-black">{preservedRecentBookingsCount} حجز جاري</strong> (آخر {keepDaysNum} يوماً).
+                  </li>
+                  <li>
+                    العيادات ({clinics.length})، الأطباء ({doctors.length})، وحسابات الموظفين <strong className="text-emerald-600 font-black">لن تُمَس أبداً</strong>.
+                  </li>
+                  <li>
+                    سيتم تصفير عداد الدورة وتحديد موعد الأرشفة القادم بعد ({archiveCycleInput || 4}) شهور تلقائياً.
+                  </li>
+                </ul>
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  disabled={isPruningArchive}
+                  onClick={() => setConfirmArchivePruneOpen(false)}
+                  className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  تراجع وإلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={isPruningArchive || eligibleForArchiveCount === 0}
+                  onClick={handlePruneBeforeDays}
+                  className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-black shadow-md flex items-center gap-2 disabled:opacity-50"
+                >
+                  {isPruningArchive ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>جاري التفريغ من Supabase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>نعم، قمت بالتحميل — تفريغ {eligibleForArchiveCount} حجز قديم</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* نافذة تأكيد استرجاع ورفع الأرشيف إلى Supabase */}
+      <AnimatePresence>
+        {restoreModalOpen && pendingRestoreData && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[10000] bg-black/80 backdrop-blur-md flex items-center justify-center p-4 no-print"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-slate-900 border-2 border-emerald-500/50 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5"
+            >
+              <div className="flex items-center gap-3 border-b border-slate-100 dark:border-slate-800 pb-4">
+                <div className="w-11 h-11 rounded-2xl bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
+                  <FolderUp className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="font-black text-slate-900 dark:text-white text-base">
+                    تأكيد استرجاع ورفع الأرشيف إلى Supabase 🔄
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    تم فحص محتويات ملف النسخة الاحتياطية بنجاح
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-3 bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 font-bold">تاريخ إنشاء الأرشيف:</span>
+                  <span className="font-extrabold text-slate-900 dark:text-white font-mono">
+                    {pendingRestoreData.backupMetadata?.generatedAt
+                      ? new Date(pendingRestoreData.backupMetadata.generatedAt).toLocaleString('ar-EG')
+                      : 'ملف خارجي'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 font-bold">عدد الحجوزات في الملف:</span>
+                  <span className="font-extrabold text-emerald-600 dark:text-emerald-400">
+                    {Array.isArray(pendingRestoreData.bookings) ? pendingRestoreData.bookings.length : 0} حجز
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 font-bold">نطاق التواريخ:</span>
+                  <span className="font-bold text-slate-700 dark:text-slate-200 font-mono">
+                    {pendingRestoreData.backupMetadata?.firstBookingDate || '-'} إلى{' '}
+                    {pendingRestoreData.backupMetadata?.lastBookingDate || '-'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-500 font-bold">العيادات والأطباء:</span>
+                  <span className="font-extrabold text-slate-900 dark:text-white">
+                    {Array.isArray(pendingRestoreData.clinics) ? pendingRestoreData.clinics.length : 0} عيادة •{' '}
+                    {Array.isArray(pendingRestoreData.doctors) ? pendingRestoreData.doctors.length : 0} طبيب
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-300 font-semibold leading-relaxed">
+                ⚠️ تنبيه: سيتم دمج هذه البيانات مع السجلات الحالية ورفعها ومزامنتها مباشرة إلى قاعدة بيانات Supabase.
+              </div>
+
+              <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
+                <button
+                  type="button"
+                  disabled={isRestoring}
+                  onClick={() => {
+                    setRestoreModalOpen(false);
+                    setPendingRestoreData(null);
+                  }}
+                  className="px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-xs font-bold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="button"
+                  disabled={isRestoring}
+                  onClick={handleConfirmRestore}
+                  className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black shadow-md flex items-center gap-2"
+                >
+                  {isRestoring ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>جاري الاسترجاع والرفع إلى Supabase...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>تأكيد الاسترجاع والرفع السحابي الآن</span>
+                    </>
+                  )}
+                </button>
               </div>
             </motion.div>
           </motion.div>

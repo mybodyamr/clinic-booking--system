@@ -394,6 +394,10 @@ export interface SystemTrialLicenseConfig {
   showTrialWatermark?: boolean;
   enforceAuthorizedDomainLock?: boolean;
   authorizedDomainsList?: string[];
+  archiveCycleMonths?: number;
+  lastArchiveDate?: string;
+  nextArchiveDate?: string;
+  keepRecentDaysDefault?: number;
   demoPreviewActive?: boolean;
   isolatedDemoBookings?: Booking[];
   activeBroadcastMessage?: DeveloperBroadcastMessage | null;
