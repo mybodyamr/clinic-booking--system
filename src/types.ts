@@ -331,7 +331,8 @@ export type SecurityAttemptType =
   | 'clock_rollback'
   | 'storage_tamper'
   | 'brute_force_login'
-  | 'vpn_geo_block';
+  | 'vpn_geo_block'
+  | 'unauthorized_domain_clone';
 
 export interface SecurityIntrusionAttempt {
   id: string;
@@ -391,6 +392,8 @@ export interface SystemTrialLicenseConfig {
   blockNonEgyptVpn?: boolean;
   antiCopyAndPrint?: boolean;
   showTrialWatermark?: boolean;
+  enforceAuthorizedDomainLock?: boolean;
+  authorizedDomainsList?: string[];
   demoPreviewActive?: boolean;
   isolatedDemoBookings?: Booking[];
   activeBroadcastMessage?: DeveloperBroadcastMessage | null;

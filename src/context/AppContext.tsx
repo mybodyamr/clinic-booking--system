@@ -5172,6 +5172,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         storage_tamper: 'محاولة تلاعب وتزوير في ملفات المتصفح (LocalStorage / Session)',
         brute_force_login: 'محاولات متكررة لتخمين كلمة المرور (Brute Force)',
         vpn_geo_block: 'محاولة اتصال عبر VPN أو من خارج جمهورية مصر العربية',
+        unauthorized_domain_clone: 'محاولة تشغيل نسخة منسوخة على دومين غير مصرح به (Domain Clone)',
       };
 
       const prevConfig = trialConfigRef.current;

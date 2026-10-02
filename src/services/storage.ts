@@ -57,7 +57,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v19_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v20_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -2406,6 +2406,9 @@ export async function fetchVisitorNetworkIdentity(): Promise<{
 
 const CLOCK_WATERMARK_KEY = 'sharaya_clock_watermark_v1';
 const CLOCK_WATERMARK_SEAL_KEY = 'sharaya_clock_watermark_seal_v1';
+
+export const DMCA_OWNERSHIP_CERTIFICATE_ID =
+  'DMCA-AMR-SHARAYA-2026-SHA256-3B98F9A66E18F5D4A97E2A58E17C389186B86D6C54558134851E8B701A560098';
 
 /**
  * تحديث بصمة أحدث توقيت معروف للنظام لمنع إرجاع ساعة الجهاز للوراء (Anti-Time Travel)

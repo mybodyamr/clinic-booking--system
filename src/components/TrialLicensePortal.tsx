@@ -32,6 +32,8 @@ import {
   LogOut,
   Database,
   Layers,
+  Copy,
+  FileCheck2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -45,6 +47,7 @@ import {
   getHardwareDeviceFingerprint,
   fetchVisitorNetworkIdentity,
   checkClockRollbackTamper,
+  DMCA_OWNERSHIP_CERTIFICATE_ID,
 } from '../services/storage';
 
 // حفظ المراجع الأصلية لدوال الكونسول قبل تعطيلها لإمكانية استعادتها عند رغبة المطور
@@ -134,6 +137,40 @@ export const TrialLicensePortal: React.FC = () => {
               b.ip === myNetworkInfo.ip)
         )
       : undefined;
+
+  // فحص قفل الدومين ضد نسخ الكود وتشغيله على موقع آخر غير معتمد (Anti-Clone Domain Protection)
+  const currentHost =
+    typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : 'localhost';
+  const configuredDomains = Array.isArray(trialLicenseConfig.authorizedDomainsList)
+    ? trialLicenseConfig.authorizedDomainsList.map((d) => d.trim().toLowerCase()).filter(Boolean)
+    : [];
+  const isBuiltInSafeDevHost =
+    currentHost === 'localhost' ||
+    currentHost === '127.0.0.1' ||
+    currentHost.endsWith('.run.app');
+  const isAuthorizedHost =
+    !trialLicenseConfig.enforceAuthorizedDomainLock ||
+    isBuiltInSafeDevHost ||
+    configuredDomains.length === 0 ||
+    configuredDomains.some((d) => currentHost === d || currentHost.endsWith(`.${d}`));
+  const isUnauthorizedDomainClone =
+    Boolean(trialLicenseConfig.enforceAuthorizedDomainLock) &&
+    !isAuthorizedHost &&
+    !isDeveloperPortalOpen &&
+    !devSessionBypass;
+
+  const domainCloneReportedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (isUnauthorizedDomainClone && !domainCloneReportedRef.current) {
+      domainCloneReportedRef.current = true;
+      reportSecurityIntrusion(
+        'unauthorized_domain_clone',
+        `محاولة تشغيل نسخة مقلدة/منسوخة على دومين غير مصرح به (${currentHost})`
+      );
+    } else if (!isUnauthorizedDomainClone) {
+      domainCloneReportedRef.current = false;
+    }
+  }, [isUnauthorizedDomainClone, currentHost]);
 
   // فحص حظر الـ VPN أو الاتصال من خارج جمهورية مصر العربية (Geo-Fence Egypt Only)
   const isVpnOrOutsideEgyptBlocked =
@@ -385,6 +422,7 @@ export const TrialLicensePortal: React.FC = () => {
   );
   const [manualBanTarget, setManualBanTarget] = useState('');
   const [manualBanReason, setManualBanReason] = useState('');
+  const [newDomainInput, setNewDomainInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [confirmPurgeOpen, setConfirmPurgeOpen] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
@@ -790,6 +828,53 @@ export const TrialLicensePortal: React.FC = () => {
                   className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-bold border border-white/10 transition-all"
                 >
                   بوابة المطور 🔑
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 0-أ-1. شاشة قفل النسخ المقلدة عند تشغيل الكود على دومين غير مصرح به (DMCA Anti-Clone Lock) */}
+      <AnimatePresence>
+        {isUnauthorizedDomainClone && !matchedBanEntity && !isDeveloperPortalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9998] bg-gradient-to-br from-[#2a040a] via-[#13061f] to-slate-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 text-center no-print select-none"
+          >
+            <div className="max-w-lg w-full bg-white/5 backdrop-blur-xl border-2 border-rose-500/60 rounded-3xl p-6 sm:p-9 shadow-2xl space-y-5">
+              <div className="w-20 h-20 rounded-3xl bg-rose-500/20 border-2 border-rose-400/60 text-rose-300 flex items-center justify-center mx-auto shadow-lg">
+                <FileCheck2 className="w-10 h-10" />
+              </div>
+
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-400/40 text-rose-300 text-xs font-extrabold">
+                  حماية حقوق الملكية الفكرية الرقمية (DMCA Anti-Clone)
+                </span>
+                <h2 className="text-xl sm:text-2xl font-black text-white">
+                  ⛔ هذا النطاق ({currentHost}) غير مرخص لتشغيل المنظومة
+                </h2>
+              </div>
+
+              <p className="text-sm text-slate-200 leading-relaxed font-medium bg-white/5 border border-white/10 rounded-2xl p-4">
+                تم رصد محاولة تشغيل نسخة منسوخة على نطاق غير معتمد. هذه المنظومة محمية ببصمة الملكية
+                الفكرية المشفرة (<code className="text-amber-300">{DMCA_OWNERSHIP_CERTIFICATE_ID.slice(0, 28)}...</code>) وتم إرسال عنوان النطاق والـ IP إلى رادار المطور الأصلي.
+              </p>
+
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUnlockUser('');
+                    setUnlockPass('');
+                    setUnlockError('');
+                    setUnlockModalOpen(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-slate-300 text-xs font-bold border border-white/15"
+                >
+                  بوابة المطور الأصلي 🔑
                 </button>
               </div>
             </div>
@@ -1843,6 +1928,164 @@ export const TrialLicensePortal: React.FC = () => {
                         className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-slate-900 dark:text-white text-xs font-bold"
                       />
                     </div>
+                  </div>
+                </div>
+
+                {/* القسم 5-ب: شهادة الملكية الفكرية الرقمية وحماية الدومين ضد النسخ (DMCA & Anti-Clone Shield) */}
+                <div className="rounded-2xl border-2 border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 p-4 sm:p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-9 h-9 rounded-xl bg-[#062142] text-amber-300 flex items-center justify-center">
+                        <FileCheck2 className="w-5 h-5" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                          📜 بصمة الملكية الفكرية الرقمية (DMCA) وحماية الدومين ضد النسخ والتقليد
+                        </h3>
+                        <p className="text-[11px] text-slate-600 dark:text-slate-300">
+                          إثبات ملكيتك المشفر داخل الكود وبيانات جوجل (Schema.org) لإغلاق أي موقع مقلد
+                          من جوجل والاستضافة فوراً
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const dmcaReportText = `DMCA Copyright Infringement & Impersonation Takedown Notice
+Original Copyright Holder & Lead Software Engineer: Eng. Amr (Amrr)
+Original System Title: منظومة عيادات الجمعية الشرعية التخصصية بأوسيم (Sharaya Specialized Medical Clinics System)
+Official Authorized URL: ${typeof window !== 'undefined' ? window.location.origin : ''}
+Cryptographic DMCA Ownership Signature (Embedded in HTML Meta & Schema.org JSON-LD):
+${DMCA_OWNERSHIP_CERTIFICATE_ID}
+
+Statement of Good Faith:
+I am the original creator and copyright holder of the source code, UI architecture, and digital schema bearing the cryptographic ownership signature above. Any unauthorized reproduction, clone, or impersonation of this medical platform infringes upon my intellectual property rights under the Digital Millennium Copyright Act (DMCA).`;
+                        navigator.clipboard?.writeText(dmcaReportText);
+                        addToast({
+                          type: 'success',
+                          title: 'تم نسخ وثيقة بلاغ DMCA الرسمية 📋',
+                          message:
+                            'تم نسخ النص القانوني وبصمة الملكية المشفرة لتقديمها لجوجل أو شركة الاستضافة لإغلاق أي موقع مقلد.',
+                        });
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#062142] hover:bg-[#0b315e] text-amber-300 text-xs font-extrabold shadow-xs transition-all"
+                    >
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>📋 نسخ وثيقة بلاغ جوجل DMCA الجاهزة</span>
+                    </button>
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-amber-300/60 dark:border-amber-700/50 text-xs space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-slate-600 dark:text-slate-300">
+                        بصمة الملكية المشفرة المزروعة في الكود ومحرك بحث جوجل:
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/70 text-emerald-800 dark:text-emerald-300 font-extrabold text-[11px]">
+                        مفعّلة وموثقة في index.html + Schema.org ✅
+                      </span>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-900 text-amber-300 font-mono text-[11px] break-all select-all">
+                      {DMCA_OWNERSHIP_CERTIFICATE_ID}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 pt-1">
+                    <label className="flex items-start gap-3 p-3 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(draftConfig.enforceAuthorizedDomainLock)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          const currentList = Array.isArray(draftConfig.authorizedDomainsList)
+                            ? draftConfig.authorizedDomainsList
+                            : [];
+                          const nextList =
+                            checked && currentList.length === 0 && currentHost
+                              ? [currentHost, 'vercel.app']
+                              : currentList;
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            enforceAuthorizedDomainLock: checked,
+                            authorizedDomainsList: nextList,
+                          }));
+                        }}
+                        className="mt-1 w-4 h-4 accent-[#062142]"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          🔒 تفعيل قفل الدومين المعتمد (منع تشغيل الكود إذا تم نسخه لدومين آخر)
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          إذا قام أي شخص بنسخ ملفات الموقع ورفعها على دومين آخر غير مكتوب بالأسفل،
+                          يقفل الموقع في وجهه بشاشة انتهاك ملكية فكرية ويبلّغك في الرادار!
+                        </p>
+                      </div>
+                    </label>
+
+                    {draftConfig.enforceAuthorizedDomainLock && (
+                      <div className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 space-y-3">
+                        <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
+                          النطاقات (Domains) المسموح لها بتشغيل المنظومة (الدومين الحالي:{' '}
+                          <code className="text-emerald-600 font-extrabold">{currentHost}</code>):
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {(draftConfig.authorizedDomainsList || []).map((dom) => (
+                            <span
+                              key={dom}
+                              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-slate-100 dark:bg-slate-800 text-xs font-mono font-bold text-slate-800 dark:text-slate-200 border border-slate-300 dark:border-slate-700"
+                            >
+                              <span>{dom}</span>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDraftConfig((prev) => ({
+                                    ...prev,
+                                    authorizedDomainsList: (prev.authorizedDomainsList || []).filter(
+                                      (item) => item !== dom
+                                    ),
+                                  }))
+                                }
+                                className="text-rose-500 hover:text-rose-700"
+                                title="حذف النطاق"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            value={newDomainInput}
+                            onChange={(e) => setNewDomainInput(e.target.value)}
+                            placeholder="أضف دومين معتمد (مثال: my-clinic.vercel.app)"
+                            className="flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-mono font-bold text-slate-900 dark:text-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const clean = newDomainInput
+                                .trim()
+                                .toLowerCase()
+                                .replace(/^https?:\/\//, '')
+                                .replace(/\/.*$/, '');
+                              if (!clean) return;
+                              setDraftConfig((prev) => ({
+                                ...prev,
+                                authorizedDomainsList: Array.from(
+                                  new Set([...(prev.authorizedDomainsList || []), clean])
+                                ),
+                              }));
+                              setNewDomainInput('');
+                            }}
+                            className="px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-extrabold"
+                          >
+                            + إضافة الدومين
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
