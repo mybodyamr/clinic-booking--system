@@ -21,10 +21,24 @@ import {
   Power,
   Plus,
   Minus,
+  Ban,
+  Unlock,
+  Cpu,
+  Globe,
+  Radar,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { SystemTrialLicenseConfig } from '../types';
-import { verifySecretDeveloperCredentials } from '../services/storage';
+import {
+  SystemTrialLicenseConfig,
+  BlockedSecurityEntity,
+  SecurityIntrusionAttempt,
+} from '../types';
+import {
+  verifySecretDeveloperCredentials,
+  getHardwareDeviceFingerprint,
+  fetchVisitorNetworkIdentity,
+  checkClockRollbackTamper,
+} from '../services/storage';
 
 // حفظ المراجع الأصلية لدوال الكونسول قبل تعطيلها لإمكانية استعادتها عند رغبة المطور
 const ORIGINAL_CONSOLE = {
@@ -41,6 +55,7 @@ export const TrialLicensePortal: React.FC = () => {
   const {
     trialLicenseConfig,
     updateTrialLicenseConfig,
+    reportSecurityIntrusion,
     isDeveloperPortalOpen,
     setIsDeveloperPortalOpen,
     currentView,
@@ -53,10 +68,60 @@ export const TrialLicensePortal: React.FC = () => {
   const [devSessionBypass, setDevSessionBypass] = useState<boolean>(false);
   const devToolsStrikeCountRef = useRef<number>(0);
 
+  // بيانات بصمة الجهاز الحالي وعنوان الـ IP
+  const [myDeviceHw] = useState(() => getHardwareDeviceFingerprint());
+  const [myNetworkInfo, setMyNetworkInfo] = useState<{ ip: string; ispLocation: string }>({
+    ip: 'جاري الفحص...',
+    ispLocation: '',
+  });
+
+  useEffect(() => {
+    let mounted = true;
+    fetchVisitorNetworkIdentity().then((info) => {
+      if (mounted) setMyNetworkInfo(info);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
   const isShieldEnabled =
     trialLicenseConfig.blockDevTools !== false &&
     !isDeveloperPortalOpen &&
     !devSessionBypass;
+
+  // فحص ما إذا كان هذا الجهاز (ببصمة الهاردوير أو عنوان الـ IP) محظوراً أمنياً
+  const matchedBanEntity: BlockedSecurityEntity | undefined =
+    !isDeveloperPortalOpen && !devSessionBypass
+      ? (trialLicenseConfig.blockedEntities || []).find(
+          (b) =>
+            (b.deviceFingerprint && b.deviceFingerprint === myDeviceHw.fingerprintId) ||
+            (b.ip &&
+              myNetworkInfo.ip &&
+              myNetworkInfo.ip !== 'غير معروف' &&
+              myNetworkInfo.ip !== 'جاري الفحص...' &&
+              b.ip === myNetworkInfo.ip)
+        )
+      : undefined;
+
+  // فحص التلاعب بتأخير ساعة الجهاز (Anti-Time Travel)
+  const clockTamperStatus =
+    !isDeveloperPortalOpen && !devSessionBypass
+      ? checkClockRollbackTamper(trialLicenseConfig)
+      : { isTampered: false, behindByMinutes: 0 };
+
+  const clockTamperReportedRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (clockTamperStatus.isTampered && !clockTamperReportedRef.current) {
+      clockTamperReportedRef.current = true;
+      reportSecurityIntrusion(
+        'clock_rollback',
+        `محاولة تأخير ساعة الجهاز للوراء بمقدار (${clockTamperStatus.behindByMinutes} دقيقة) لخداع الفترة التجريبية`
+      );
+    } else if (!clockTamperStatus.isTampered) {
+      clockTamperReportedRef.current = false;
+    }
+  }, [clockTamperStatus.isTampered, clockTamperStatus.behindByMinutes]);
 
   // تحديث العداد كل 15 ثانية لضمان دقة العد التنازلي والإغلاق اللحظي فور انتهاء الوقت
   useEffect(() => {
@@ -69,7 +134,6 @@ export const TrialLicensePortal: React.FC = () => {
   // ==================== درع الحماية رباعي الطبقات ضد فتح الكونسول والفحص (Anti-DevTools Shield) ====================
   useEffect(() => {
     if (!isShieldEnabled) {
-      // استعادة الكونسول الطبيعي إذا قام المطور (Amrr) بفتح البوابة السرية أو إيقاف الحماية
       console.log = ORIGINAL_CONSOLE.log;
       console.info = ORIGINAL_CONSOLE.info;
       console.warn = ORIGINAL_CONSOLE.warn;
@@ -89,7 +153,7 @@ export const TrialLicensePortal: React.FC = () => {
           'color: #ef4444; font-size: 22px; font-weight: 900; font-family: Cairo, sans-serif; text-shadow: 0 1px 2px rgba(0,0,0,0.3);'
         );
         ORIGINAL_CONSOLE.log(
-          '%cهذه المنظومة الطبية محمية بالكامل. يُحظر تماماً فتح أدوات المطور (Console / Inspect) أو محاولة فحص أو نسخ الشيفرة المصدرية.',
+          '%cهذه المنظومة الطبية محمية بالكامل. يتم تسجيل عنوان الـ IP وبصمة الهاردوير الخاصة بجهازك تلقائياً عند أي محاولة فحص أو تلاعب.',
           'color: #fbbf24; font-size: 14px; font-weight: bold; font-family: Cairo, sans-serif;'
         );
       } catch {}
@@ -112,7 +176,7 @@ export const TrialLicensePortal: React.FC = () => {
       return false;
     };
 
-    // 3. منع جميع اختصارات الكيبورد الخاصة بفتح الكونسول أو عرض المصدر (F12, Ctrl+Shift+I/J/C/K, Ctrl+U, Ctrl+S)
+    // 3. منع جميع اختصارات الكيبورد الخاصة بفتح الكونسول أو عرض المصدر (F12, Ctrl+Shift+I/J/C/K, Ctrl+U)
     const handleKeyDown = (e: KeyboardEvent) => {
       const key = (e.key || '').toUpperCase();
       const code = e.keyCode || e.which;
@@ -121,17 +185,28 @@ export const TrialLicensePortal: React.FC = () => {
       const isCtrlOrCmd = e.ctrlKey || e.metaKey;
       const isShift = e.shiftKey || e.altKey;
 
-      // Ctrl+Shift+I / J / C / K أو Cmd+Option+I / J / C / K
       const isInspectShortcut =
-        isCtrlOrCmd && isShift && (key === 'I' || key === 'J' || key === 'C' || key === 'K' || code === 73 || code === 74 || code === 67 || code === 75);
+        isCtrlOrCmd &&
+        isShift &&
+        (key === 'I' ||
+          key === 'J' ||
+          key === 'C' ||
+          key === 'K' ||
+          code === 73 ||
+          code === 74 ||
+          code === 67 ||
+          code === 75);
 
-      // Ctrl+U (عرض المصدر)
       const isViewSource = isCtrlOrCmd && (key === 'U' || code === 85);
 
       if (isF12 || isInspectShortcut || isViewSource) {
         e.preventDefault();
         e.stopPropagation();
         printSecurityWarning();
+        reportSecurityIntrusion(
+          'shortcut_inspect',
+          `محاولة فتح الفحص عبر اختصار لوحة المفاتيح (${isF12 ? 'F12' : isViewSource ? 'Ctrl+U' : 'Ctrl+Shift+' + key})`
+        );
         return false;
       }
     };
@@ -140,7 +215,6 @@ export const TrialLicensePortal: React.FC = () => {
     const detectOpenDevTools = () => {
       let detectedNow = false;
 
-      // أ) فحص فرق أبعاد النافذة على أجهزة الكمبيوتر (خارج الـ iframe وبشاشة غير ملمسية)
       const isStandaloneWindow = window.self === window.top;
       const isDesktopDevice =
         typeof navigator !== 'undefined' &&
@@ -162,7 +236,6 @@ export const TrialLicensePortal: React.FC = () => {
         }
       }
 
-      // ب) مصيدة التوقيت وفحص الكونسول (Debugger Timing Trap)
       const start = performance.now();
       try {
         // eslint-disable-next-line no-debugger
@@ -176,9 +249,13 @@ export const TrialLicensePortal: React.FC = () => {
       if (detectedNow) {
         devToolsStrikeCountRef.current += 1;
         printSecurityWarning();
-        if (devToolsStrikeCountRef.current >= 1) {
-          setDevToolsDetected(true);
+        if (devToolsStrikeCountRef.current === 1) {
+          reportSecurityIntrusion(
+            'devtools_open',
+            'فتح نافذة أدوات المطور / الكونسول من قائمة المتصفح'
+          );
         }
+        setDevToolsDetected(true);
       } else {
         devToolsStrikeCountRef.current = 0;
         setDevToolsDetected(false);
@@ -212,6 +289,8 @@ export const TrialLicensePortal: React.FC = () => {
   const [customDaysInput, setCustomDaysInput] = useState<string>(
     String(trialLicenseConfig.trialDays || 7)
   );
+  const [manualBanTarget, setManualBanTarget] = useState('');
+  const [manualBanReason, setManualBanReason] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [confirmPurgeOpen, setConfirmPurgeOpen] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
@@ -267,7 +346,6 @@ export const TrialLicensePortal: React.FC = () => {
   const liveRemaining = getRemainingParts(trialLicenseConfig.expiresAt);
   const draftRemaining = getRemainingParts(draftConfig.expiresAt);
 
-  // تحويل ISO إلى قيمة مناسبة لـ input[type="datetime-local"] بالتوقيت المحلي
   const toLocalDateTimeInputValue = (isoString: string): string => {
     try {
       const d = new Date(isoString);
@@ -350,10 +428,90 @@ export const TrialLicensePortal: React.FC = () => {
           ? 'تم تفعيل النسخة الدائمة النهائية بنجاح وإلغاء جميع قيود الفترة التجريبية.'
           : targetConfig.mode === 'locked'
           ? 'تم قفل وإيقاف النظام فورياً على جميع الأجهزة المتصلة.'
-          : `تم ضبط الفترة التجريبية بنجاح (تنتهي في ${new Date(
-              targetConfig.expiresAt
-            ).toLocaleString('ar-EG')}).`,
+          : `تم ضبط الفترة التجريبية وإعدادات الحماية بنجاح.`,
     });
+  };
+
+  // حظر فوري لـ IP وبصمة جهاز من سجل الرادار
+  const handleBanAttemptEntity = async (attempt: SecurityIntrusionAttempt) => {
+    const currentBlocked = Array.isArray(draftConfig.blockedEntities)
+      ? draftConfig.blockedEntities
+      : [];
+    const alreadyBanned = currentBlocked.some(
+      (b) =>
+        (b.deviceFingerprint && b.deviceFingerprint === attempt.deviceFingerprint) ||
+        (b.ip && attempt.ip !== 'غير معروف' && b.ip === attempt.ip)
+    );
+    if (alreadyBanned) return;
+
+    const newBan: BlockedSecurityEntity = {
+      id: `ban-${Date.now()}`,
+      ip: attempt.ip !== 'غير معروف' ? attempt.ip : undefined,
+      deviceFingerprint: attempt.deviceFingerprint,
+      deviceDetails: attempt.deviceDetails,
+      reason: `حظر بأمر المطور بسبب: ${attempt.typeLabel}`,
+      blockedAt: new Date().toISOString(),
+      autoBlocked: false,
+    };
+
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      blockedEntities: [newBan, ...currentBlocked],
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // إلغاء حظر IP أو بصمة جهاز
+  const handleUnbanEntity = async (banId: string) => {
+    const currentBlocked = Array.isArray(draftConfig.blockedEntities)
+      ? draftConfig.blockedEntities
+      : [];
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      blockedEntities: currentBlocked.filter((b) => b.id !== banId),
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // إضافة حظر يدوي لـ IP أو بصمة جهاز
+  const handleAddManualBan = async () => {
+    const target = manualBanTarget.trim();
+    if (!target) return;
+    const isFingerprint = target.toUpperCase().startsWith('FP-');
+    const currentBlocked = Array.isArray(draftConfig.blockedEntities)
+      ? draftConfig.blockedEntities
+      : [];
+
+    const newBan: BlockedSecurityEntity = {
+      id: `ban-${Date.now()}`,
+      ip: isFingerprint ? undefined : target,
+      deviceFingerprint: isFingerprint ? target.toUpperCase() : undefined,
+      deviceDetails: isFingerprint ? 'حظر يدوي ببصمة الجهاز' : `حظر يدوي لعنوان IP (${target})`,
+      reason: manualBanReason.trim() || 'حظر يدوي مباشر بواسطة مسؤول تطوير المنظومة',
+      blockedAt: new Date().toISOString(),
+      autoBlocked: false,
+    };
+
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      blockedEntities: [newBan, ...currentBlocked],
+    };
+    setManualBanTarget('');
+    setManualBanReason('');
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // مسح سجل رادار المحاولات
+  const handleClearIntrusionLogs = async () => {
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      intrusionLogs: [],
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
   };
 
   const handleQuickPurgeTrialData = async () => {
@@ -376,9 +534,122 @@ export const TrialLicensePortal: React.FC = () => {
 
   return (
     <>
-      {/* 0. شاشة الحماية الفورية عند رصد فتح أدوات المطور / الكونسول (Anti-DevTools Lock Overlay) */}
+      {/* 0-أ. شاشة الحظر الأمني الكامل للـ IP وبصمة عتاد الجهاز (حتى مع تشغيل VPN) */}
       <AnimatePresence>
-        {devToolsDetected && isShieldEnabled && (
+        {matchedBanEntity && !isDeveloperPortalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9998] bg-gradient-to-br from-[#2a040a] via-[#170409] to-[#080204] text-white flex flex-col items-center justify-center p-4 sm:p-6 text-center no-print select-none"
+          >
+            <div className="max-w-lg w-full bg-white/5 backdrop-blur-xl border-2 border-rose-500/50 rounded-3xl p-6 sm:p-9 shadow-2xl space-y-5">
+              <div className="w-20 h-20 rounded-3xl bg-rose-500/20 border-2 border-rose-400/60 text-rose-400 flex items-center justify-center mx-auto shadow-lg">
+                <Ban className="w-11 h-11" />
+              </div>
+
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-rose-500/20 border border-rose-400/40 text-rose-300 text-xs font-extrabold">
+                  قرار حظر أمني مشدد
+                </span>
+                <h1 className="text-xl sm:text-2xl font-black text-white">
+                  ⛔ تم حظر هذا الجهاز وعنوان الـ IP من الوصول للمنظومة
+                </h1>
+              </div>
+
+              <p className="text-sm text-rose-100/90 leading-relaxed font-semibold bg-rose-950/50 border border-rose-500/30 rounded-2xl p-4">
+                {matchedBanEntity.reason ||
+                  'تم رصد محاولات فحص أو تلاعب أمني غير مصرح بها من هذا الجهاز وتم إدراج بصمة العتاد وعنوان الشبكة في قائمة الحظر.'}
+              </p>
+
+              <div className="bg-black/40 border border-white/10 rounded-2xl p-3.5 text-xs text-slate-300 space-y-1.5 font-mono text-right">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 font-sans font-bold">بصمة عتاد الجهاز:</span>
+                  <span className="text-amber-300 font-bold">{myDeviceHw.fingerprintId}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 font-sans font-bold">عنوان الشبكة (IP):</span>
+                  <span className="text-rose-300 font-bold">{myNetworkInfo.ip}</span>
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUnlockUser('');
+                    setUnlockPass('');
+                    setUnlockError('');
+                    setUnlockModalOpen(true);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-400 hover:text-white text-xs font-bold border border-white/10 transition-all"
+                >
+                  بوابة المطور 🔑
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 0-ب. شاشة الحماية ضد تأخير تاريخ وساعة الجهاز (Anti-Time Travel Overlay) */}
+      <AnimatePresence>
+        {clockTamperStatus.isTampered && !matchedBanEntity && !isDeveloperPortalOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[9997] bg-gradient-to-br from-[#04152b] via-[#1e1b4b] to-slate-950 text-white flex flex-col items-center justify-center p-4 sm:p-6 text-center no-print select-none"
+          >
+            <div className="max-w-lg w-full bg-white/5 backdrop-blur-xl border-2 border-amber-400/50 rounded-3xl p-6 sm:p-9 shadow-2xl space-y-5">
+              <div className="w-20 h-20 rounded-3xl bg-amber-400/20 border-2 border-amber-400/60 text-amber-300 flex items-center justify-center mx-auto shadow-lg">
+                <Clock className="w-10 h-10" />
+              </div>
+
+              <div className="space-y-2">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-400/20 border border-amber-400/40 text-amber-300 text-xs font-extrabold">
+                  حماية التوقيت السحابي المركزي
+                </span>
+                <h2 className="text-xl sm:text-2xl font-black text-white">
+                  ⏱️ تم رصد تلاعب في تاريخ وساعة الجهاز
+                </h2>
+              </div>
+
+              <p className="text-sm text-slate-200 leading-relaxed font-medium bg-white/5 border border-white/10 rounded-2xl p-4">
+                ساعة هذا الجهاز متأخرة عن التوقيت الفعلي للخادم السحابي. لا يمكن تشغيل المنظومة أو
+                تجاوز الفترة التجريبية عبر إرجاع تاريخ الكمبيوتر أو الهاتف للوراء. يرجى ضبط التاريخ
+                والساعة الصحيحين للمتابعة.
+              </p>
+
+              <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setNowMs(Date.now())}
+                  className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-extrabold shadow-md transition-all"
+                >
+                  لقد قمت بضبط الساعة — إعادة الفحص
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUnlockUser('');
+                    setUnlockPass('');
+                    setUnlockError('');
+                    setUnlockModalOpen(true);
+                  }}
+                  className="px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 text-xs font-bold border border-white/15 transition-all"
+                >
+                  بوابة المطور 🔑
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 0-ج. شاشة الحماية الفورية عند رصد فتح أدوات المطور / الكونسول (Anti-DevTools Lock Overlay) */}
+      <AnimatePresence>
+        {devToolsDetected && isShieldEnabled && !matchedBanEntity && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -401,8 +672,8 @@ export const TrialLicensePortal: React.FC = () => {
 
               <p className="text-sm text-slate-200 leading-relaxed font-medium bg-white/5 border border-white/10 rounded-2xl p-4">
                 لأسباب أمنية ولحماية خصوصية بيانات المرضى والشيفرة المصدرية للمنظومة، يُمنع فتح
-                نافذة الفحص أو وحدة التحكم (Console). يرجى إغلاق نافذة أدوات المطور فوراً للعودة إلى
-                شاشة العمل تلقائياً.
+                نافذة الفحص أو وحدة التحكم (Console). تم تسجيل بصمة الجهاز ({myDeviceHw.fingerprintId}
+                ) وعنوان الـ IP ({myNetworkInfo.ip}) في رادار الحماية. يرجى إغلاق النافذة فوراً.
               </p>
 
               <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
@@ -477,7 +748,7 @@ export const TrialLicensePortal: React.FC = () => {
 
       {/* 2. شاشة القفل الكاملة عند انتهاء الفترة التجريبية أو القفل الفوري عن بُعد */}
       <AnimatePresence>
-        {shouldShowLockScreen && !isDeveloperPortalOpen && (
+        {shouldShowLockScreen && !matchedBanEntity && !isDeveloperPortalOpen && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -646,7 +917,7 @@ export const TrialLicensePortal: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* 4. البوابة السرية الكاملة للمطور (م. عمرو) للتحكم في الفترة التجريبية والترخيص عن بُعد */}
+      {/* 4. البوابة السرية الكاملة للمطور (م. عمرو) للتحكم في الفترة التجريبية والرادار الأمني عن بُعد */}
       <AnimatePresence>
         {isDeveloperPortalOpen && (
           <motion.div
@@ -659,7 +930,7 @@ export const TrialLicensePortal: React.FC = () => {
               initial={{ scale: 0.96, opacity: 0, y: 12 }}
               animate={{ scale: 1, opacity: 1, y: 0 }}
               exit={{ scale: 0.96, opacity: 0, y: 12 }}
-              className="bg-white dark:bg-slate-900 border-2 border-[#062142] dark:border-amber-400/40 rounded-3xl max-w-4xl w-full max-h-[92vh] flex flex-col shadow-2xl overflow-hidden my-auto"
+              className="bg-white dark:bg-slate-900 border-2 border-[#062142] dark:border-amber-400/40 rounded-3xl max-w-5xl w-full max-h-[93vh] flex flex-col shadow-2xl overflow-hidden my-auto"
             >
               {/* هيدر البوابة السرية */}
               <div className="bg-gradient-to-r from-[#062142] via-[#0b315e] to-[#062142] text-white px-5 py-4 sm:px-7 sm:py-5 flex items-center justify-between gap-4 shrink-0 border-b border-amber-400/30">
@@ -670,7 +941,7 @@ export const TrialLicensePortal: React.FC = () => {
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
                       <h2 className="text-base sm:text-lg font-black text-white">
-                        بوابة المطور السرية — التحكم المركزي في الترخيص والفترة التجريبية
+                        بوابة المطور السرية — التحكم في الترخيص ورادار الحماية السيبرانية
                       </h2>
                       <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-400/40">
                         Supabase Realtime Sync
@@ -678,7 +949,7 @@ export const TrialLicensePortal: React.FC = () => {
                     </div>
                     <p className="text-xs text-slate-300 mt-0.5">
                       مرحباً م. عمرو (`Amrr`) • تحكم كامل عن بُعد في أيام التجربة، منع الكونسول،
-                      الإيقاف الفوري، أو التفعيل الدائم
+                      رادار كشف المخترقين، وحظر الـ IP وبصمة الجهاز
                     </p>
                   </div>
                 </div>
@@ -736,8 +1007,8 @@ export const TrialLicensePortal: React.FC = () => {
                       </span>
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      آخر تحديث:{' '}
-                      {new Date(trialLicenseConfig.updatedAt).toLocaleString('ar-EG')}
+                      جهازك الحالي كمطور: <code className="font-bold">{myDeviceHw.fingerprintId}</code> • IP:{' '}
+                      <code className="font-bold">{myNetworkInfo.ip}</code> (مستثنى دائماً)
                     </div>
                   </div>
                 </div>
@@ -750,7 +1021,6 @@ export const TrialLicensePortal: React.FC = () => {
                   </h3>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    {/* بطاقة وضع الفترة التجريبية */}
                     <button
                       type="button"
                       onClick={() =>
@@ -786,7 +1056,6 @@ export const TrialLicensePortal: React.FC = () => {
                       </div>
                     </button>
 
-                    {/* بطاقة التفعيل الدائم النهائي */}
                     <button
                       type="button"
                       onClick={() =>
@@ -822,7 +1091,6 @@ export const TrialLicensePortal: React.FC = () => {
                       </div>
                     </button>
 
-                    {/* بطاقة القفل الفوري عن بعد */}
                     <button
                       type="button"
                       onClick={() =>
@@ -872,7 +1140,6 @@ export const TrialLicensePortal: React.FC = () => {
                     </span>
                   </div>
 
-                  {/* إدخال رقم أيام مخصص + أزرار جاهزة */}
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
@@ -896,7 +1163,6 @@ export const TrialLicensePortal: React.FC = () => {
                         </button>
                       </div>
 
-                      {/* أزرار سريعة لعدد الأيام */}
                       <div className="flex flex-wrap items-center gap-1.5 pt-1">
                         {[
                           { label: 'يوم واحد', days: 1 },
@@ -918,7 +1184,6 @@ export const TrialLicensePortal: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* تحديد تاريخ وساعة انتهاء دقيقة أو زيادة/إنقاص سريع */}
                     <div className="space-y-2">
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
                         أو حدد تاريخ وساعة انتهاء الفترة التجريبية بالضبط:
@@ -984,14 +1249,14 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 3: إعدادات الحماية ضد الكونسول وعرض الشريط ورسالة القفل */}
+                {/* القسم 3: دروع الحماية السيبرانية وخيارات العرض */}
                 <div className="rounded-2xl border border-slate-200 dark:border-slate-800 p-4 sm:p-5 space-y-4 bg-white dark:bg-slate-900">
                   <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
-                    3. درع منع الكونسول وخيارات العرض ورسالة التوقف
+                    3. دروع الحماية السيبرانية وخيارات العرض
                   </h3>
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <label className="flex items-start gap-3 p-3 rounded-xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 cursor-pointer hover:bg-emerald-50 dark:hover:bg-emerald-950/40">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <label className="flex items-start gap-3 p-3 rounded-xl border-2 border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-950/20 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={draftConfig.blockDevTools !== false}
@@ -1005,10 +1270,55 @@ export const TrialLicensePortal: React.FC = () => {
                       />
                       <div>
                         <div className="text-xs font-extrabold text-slate-900 dark:text-white">
-                          🛡️ تفعيل درع منع الكونسول والفحص (Anti-DevTools)
+                          🛡️ درع منع الكونسول والفحص (Anti-DevTools)
                         </div>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
                           يعطل F12، كليك يمين، اختصارات الفحص، ويقفل الشاشة إذا فتح أي شخص الكونسول.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 rounded-xl border-2 border-rose-500/40 bg-rose-50/40 dark:bg-rose-950/20 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={draftConfig.autoBanAfterStrikes !== false}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            autoBanAfterStrikes: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-rose-600"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          🚫 حظر تلقائي بعد 3 محاولات اختراق (Auto-Ban)
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يحظر الـ IP وبصمة عتاد جهاز المخترق تلقائياً بعد 3 محاولات فحص أو تلاعب.
+                        </p>
+                      </div>
+                    </label>
+
+                    <label className="flex items-start gap-3 p-3 rounded-xl border-2 border-amber-500/40 bg-amber-50/40 dark:bg-amber-950/20 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={draftConfig.antiClockTamper !== false}
+                        onChange={(e) =>
+                          setDraftConfig((prev) => ({
+                            ...prev,
+                            antiClockTamper: e.target.checked,
+                          }))
+                        }
+                        className="mt-1 w-4 h-4 accent-amber-600"
+                      />
+                      <div>
+                        <div className="text-xs font-extrabold text-slate-900 dark:text-white">
+                          ⏱️ حماية التوقيت السحابي (منع تأخير الساعة)
+                        </div>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يكشف فوراً أي محاولة لإرجاع تاريخ الكمبيوتر أو الموبايل للوراء لخداع
+                          التجربة.
                         </p>
                       </div>
                     </label>
@@ -1049,16 +1359,16 @@ export const TrialLicensePortal: React.FC = () => {
                       />
                       <div>
                         <div className="text-xs font-extrabold text-slate-900 dark:text-white">
-                          إغلاق جميع الشاشات (بما فيها الرئيسية والحجز) عند الانتهاء
+                          إغلاق جميع الشاشات عند انتهاء المهلة
                         </div>
                         <p className="text-[11px] text-slate-500 dark:text-slate-400">
-                          تغلق المنظومة بالكامل وتظهر شاشة الاعتماد الرسمية فور انتهاء المهلة.
+                          تغلق المنظومة بالكامل وتظهر شاشة الاعتماد الرسمية فور انتهاء الوقت.
                         </p>
                       </div>
                     </label>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
                     <div className="sm:col-span-2">
                       <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1">
                         رسالة شاشة انتهاء الفترة التجريبية / الإيقاف:
@@ -1096,12 +1406,215 @@ export const TrialLicensePortal: React.FC = () => {
                   </div>
                 </div>
 
-                {/* القسم 4: تصفير داتا التجربة لبدء التشغيل الرسمي النظيف */}
+                {/* القسم 4: رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز */}
+                <div className="rounded-2xl border-2 border-[#062142]/30 dark:border-amber-400/30 bg-slate-50/70 dark:bg-slate-800/40 p-4 sm:p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="w-8 h-8 rounded-xl bg-rose-500/15 text-rose-600 dark:text-rose-400 flex items-center justify-center">
+                        <Radar className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                          4. رادار كشف محاولات الاختراق وحظر الـ IP وبصمة الجهاز (حتى مع VPN)
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يسجل عنوان الـ IP، شركة الإنترنت، وبصمة كارت الشاشة والمعالج لأي شخص يحاول
+                          فحص الكود أو التلاعب بالنظام
+                        </p>
+                      </div>
+                    </div>
+
+                    {(draftConfig.intrusionLogs?.length || 0) > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearIntrusionLogs}
+                        className="px-3 py-1.5 rounded-xl bg-white dark:bg-slate-800 hover:bg-rose-50 text-rose-600 border border-rose-200 dark:border-rose-800 text-xs font-bold"
+                      >
+                        مسح سجل الرادار ({draftConfig.intrusionLogs?.length})
+                      </button>
+                    )}
+                  </div>
+
+                  {/* خانة إضافة حظر يدوي لـ IP أو بصمة جهاز */}
+                  <div className="bg-white dark:bg-slate-900 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                    <input
+                      type="text"
+                      value={manualBanTarget}
+                      onChange={(e) => setManualBanTarget(e.target.value)}
+                      placeholder="أدخل عنوان IP (مثال: 197.55.x.x) أو بصمة جهاز (FP-XXXXXXXX)..."
+                      className="flex-1 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                    />
+                    <input
+                      type="text"
+                      value={manualBanReason}
+                      onChange={(e) => setManualBanReason(e.target.value)}
+                      placeholder="سبب الحظر (اختياري)..."
+                      className="sm:w-56 px-3 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-semibold text-slate-900 dark:text-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddManualBan}
+                      className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold shrink-0"
+                    >
+                      <Ban className="w-3.5 h-3.5" />
+                      <span>إضافة للحظر الفوري</span>
+                    </button>
+                  </div>
+
+                  {/* قائمة المحظورين حالياً */}
+                  {(draftConfig.blockedEntities?.length || 0) > 0 && (
+                    <div className="space-y-2">
+                      <div className="text-xs font-extrabold text-rose-700 dark:text-rose-400 flex items-center gap-1.5">
+                        <Ban className="w-3.5 h-3.5" />
+                        <span>
+                          قائمة عناوين الـ IP والأجهزة المحظورة حالياً (
+                          {draftConfig.blockedEntities?.length}):
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {(draftConfig.blockedEntities || []).map((ban) => (
+                          <div
+                            key={ban.id}
+                            className="p-3 rounded-xl bg-rose-50/80 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-800/70 flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0 space-y-0.5">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {ban.ip && (
+                                  <span className="px-2 py-0.5 rounded-md bg-rose-600 text-white text-[11px] font-mono font-bold">
+                                    IP: {ban.ip}
+                                  </span>
+                                )}
+                                {ban.deviceFingerprint && (
+                                  <span className="px-2 py-0.5 rounded-md bg-slate-900 text-amber-300 text-[11px] font-mono font-bold">
+                                    {ban.deviceFingerprint}
+                                  </span>
+                                )}
+                                {ban.autoBlocked && (
+                                  <span className="text-[10px] font-extrabold text-rose-700 dark:text-rose-300">
+                                    (حظر تلقائي)
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] font-bold text-slate-700 dark:text-slate-200 truncate">
+                                {ban.reason}
+                              </p>
+                              {ban.deviceDetails && (
+                                <p className="text-[10px] text-slate-500 dark:text-slate-400 truncate">
+                                  {ban.deviceDetails}
+                                </p>
+                              )}
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => handleUnbanEntity(ban.id)}
+                              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-extrabold shrink-0 shadow-2xs"
+                            >
+                              <Unlock className="w-3 h-3" />
+                              <span>فك الحظر</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* جدول سجل الرادار للمحاولات المرصودة */}
+                  {(draftConfig.intrusionLogs?.length || 0) === 0 ? (
+                    <div className="p-6 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-center text-xs text-slate-500 dark:text-slate-400 font-bold">
+                      ✅ لم يتم رصد أي محاولات اختراق أو تلاعب حتى الآن. أي محاولة لفتح الكونسول أو
+                      تأخير الساعة أو تعديل المتصفح ستظهر هنا فوراً بكامل بيانات الجهاز والـ IP.
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1">
+                      {(draftConfig.intrusionLogs || []).map((item) => {
+                        const matchingBan = (draftConfig.blockedEntities || []).find(
+                          (b) =>
+                            (b.deviceFingerprint &&
+                              b.deviceFingerprint === item.deviceFingerprint) ||
+                            (b.ip && item.ip !== 'غير معروف' && b.ip === item.ip)
+                        );
+
+                        return (
+                          <div
+                            key={item.id}
+                            className="p-3.5 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shadow-2xs"
+                          >
+                            <div className="space-y-1.5 min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="px-2.5 py-0.5 rounded-full bg-rose-100 dark:bg-rose-950/80 text-rose-800 dark:text-rose-300 text-xs font-extrabold border border-rose-200 dark:border-rose-800">
+                                  ⚠️ {item.typeLabel}
+                                </span>
+                                {item.strikeCount && (
+                                  <span className="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 text-[10px] font-extrabold">
+                                    المحاولة رقم {item.strikeCount}
+                                  </span>
+                                )}
+                                <span className="text-[11px] font-bold text-slate-500">
+                                  🕒 {new Date(item.timestamp).toLocaleString('ar-EG')}
+                                </span>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2 text-xs">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-900 dark:text-white font-mono font-bold">
+                                  <Globe className="w-3 h-3 text-blue-600" />
+                                  <span>IP: {item.ip}</span>
+                                </span>
+                                {item.ispLocation && (
+                                  <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-300">
+                                    ({item.ispLocation})
+                                  </span>
+                                )}
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-[#062142] text-amber-300 font-mono text-[11px] font-bold">
+                                  <Cpu className="w-3 h-3" />
+                                  <span>{item.deviceFingerprint}</span>
+                                </span>
+                                <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400">
+                                  👤 الحساب: {item.activeUsername || 'زائر'}
+                                </span>
+                              </div>
+
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">
+                                💻 مواصفات الجهاز: {item.deviceDetails}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0">
+                              {matchingBan ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnbanEntity(matchingBan.id)}
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-extrabold shadow-xs"
+                                >
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>محظور — فك الحظر</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleBanAttemptEntity(item)}
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-extrabold shadow-xs"
+                                >
+                                  <Ban className="w-3.5 h-3.5" />
+                                  <span>حظر هذا الـ IP والجهاز فوراً</span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* القسم 5: تصفير داتا التجربة لبدء التشغيل الرسمي النظيف */}
                 <div className="rounded-2xl border border-rose-200 dark:border-rose-900/60 bg-rose-50/50 dark:bg-rose-950/20 p-4 sm:p-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="space-y-1">
                     <h4 className="text-xs sm:text-sm font-extrabold text-rose-900 dark:text-rose-300 flex items-center gap-1.5">
                       <Trash2 className="w-4 h-4" />
-                      <span>تصفير الحجوزات والعمليات التجريبية لبدء التشغيل الرسمي (بضغطة واحدة)</span>
+                      <span>
+                        5. تصفير الحجوزات والعمليات التجريبية لبدء التشغيل الرسمي (بضغطة واحدة)
+                      </span>
                     </h4>
                     <p className="text-[11px] text-rose-700 dark:text-rose-400 leading-relaxed">
                       يمسح جميع الحجوزات التجريبية، تسليمات الشفتات، المصروفات التجريبية، وبصمات

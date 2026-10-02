@@ -325,6 +325,37 @@ export interface SystemErrorLog {
 
 export type SystemLicenseMode = 'trial' | 'permanent' | 'locked';
 
+export type SecurityAttemptType =
+  | 'devtools_open'
+  | 'shortcut_inspect'
+  | 'clock_rollback'
+  | 'storage_tamper'
+  | 'brute_force_login';
+
+export interface SecurityIntrusionAttempt {
+  id: string;
+  type: SecurityAttemptType;
+  typeLabel: string;
+  ip: string;
+  ispLocation?: string;
+  deviceFingerprint: string;
+  deviceDetails: string;
+  activeUsername?: string;
+  activeRole?: string;
+  timestamp: string;
+  strikeCount?: number;
+}
+
+export interface BlockedSecurityEntity {
+  id: string;
+  ip?: string;
+  deviceFingerprint?: string;
+  deviceDetails?: string;
+  reason: string;
+  blockedAt: string;
+  autoBlocked?: boolean;
+}
+
 export interface SystemTrialLicenseConfig {
   mode: SystemLicenseMode;
   trialDays: number;
@@ -333,6 +364,12 @@ export interface SystemTrialLicenseConfig {
   showBannerToStaff: boolean;
   lockPublicPagesOnExpiry: boolean;
   blockDevTools?: boolean;
+  autoBanAfterStrikes?: boolean;
+  maxStrikesBeforeBan?: number;
+  antiClockTamper?: boolean;
+  lastKnownServerTimeMs?: number;
+  blockedEntities?: BlockedSecurityEntity[];
+  intrusionLogs?: SecurityIntrusionAttempt[];
   lockMessage: string;
   developerPhone?: string;
   updatedAt: string;

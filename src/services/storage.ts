@@ -20,7 +20,10 @@ import {
   FinanceExpenseRecord,
   InsuranceClaimSettlementRecord,
   DoctorCommissionRule,
-  SystemTrialLicenseConfig
+  SystemTrialLicenseConfig,
+  SecurityAttemptType,
+  SecurityIntrusionAttempt,
+  BlockedSecurityEntity
 } from '../types';
 import { INITIAL_CLINICS, INITIAL_DOCTORS, INITIAL_BOOKINGS } from '../data/mockData';
 import * as XLSX from 'xlsx';
@@ -54,7 +57,7 @@ const STORAGE_KEYS = {
 };
 
 const CLOUD_CACHE_VERSION_KEY = 'sharaya_cloud_sync_version';
-const CURRENT_CLOUD_CACHE_VERSION = 'v17_supabase_live_sync';
+const CURRENT_CLOUD_CACHE_VERSION = 'v18_supabase_live_sync';
 
 if (typeof window !== 'undefined') {
   try {
@@ -503,6 +506,23 @@ export function getStoredSession(): UserSession | null {
   try {
     const raw = sessionStorage.getItem(STORAGE_KEYS.SESSION);
     if (!raw) return null;
+    const savedSeal = sessionStorage.getItem('sharaya_session_seal_v2');
+    const expectedSeal = computeSyncSecuritySeal(raw);
+    if (savedSeal && savedSeal !== expectedSeal) {
+      sessionStorage.removeItem(STORAGE_KEYS.SESSION);
+      sessionStorage.removeItem('sharaya_session_seal_v2');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('sharaya:security-tamper-detected', {
+            detail: {
+              type: 'storage_tamper',
+              label: 'محاولة تزوير جلسة الدخول (Session Storage Tampering)',
+            },
+          })
+        );
+      }
+      return null;
+    }
     return JSON.parse(raw);
   } catch (e) {
     return null;
@@ -513,11 +533,14 @@ export function saveSession(session: UserSession | null): void {
   try {
     if (!session) {
       sessionStorage.removeItem(STORAGE_KEYS.SESSION);
+      sessionStorage.removeItem('sharaya_session_seal_v2');
       localStorage.removeItem(STORAGE_KEYS.SESSION);
       localStorage.removeItem(STORAGE_KEYS.BOOKINGS);
       localStorage.removeItem(STORAGE_KEYS.STAFF_PASSWORDS);
     } else {
-      sessionStorage.setItem(STORAGE_KEYS.SESSION, JSON.stringify(session));
+      const json = JSON.stringify(session);
+      sessionStorage.setItem(STORAGE_KEYS.SESSION, json);
+      sessionStorage.setItem('sharaya_session_seal_v2', computeSyncSecuritySeal(json));
     }
   } catch (e) {
     console.error('فشل حفظ الجلسة:', e);
@@ -814,6 +837,17 @@ export function recordFailedLogin(username: string): { locked: boolean; attempts
       lockUntilMinutes = 15;
       userRecord.lockUntil = Date.now() + lockUntilMinutes * 60 * 1000;
       locked = true;
+    }
+
+    if (userRecord.attempts >= 3 && typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('sharaya:security-tamper-detected', {
+          detail: {
+            type: 'brute_force_login',
+            label: `تخمين متكرر لكلمة المرور على حساب (${cleanUser}) — المحاولة رقم ${userRecord.attempts}`,
+          },
+        })
+      );
     }
 
     attemptsMap[cleanUser] = userRecord;
@@ -2104,15 +2138,60 @@ export const DEFAULT_TRIAL_LICENSE_CONFIG: SystemTrialLicenseConfig = {
   showBannerToStaff: true,
   lockPublicPagesOnExpiry: true,
   blockDevTools: true,
+  autoBanAfterStrikes: true,
+  maxStrikesBeforeBan: 3,
+  antiClockTamper: true,
+  blockedEntities: [],
+  intrusionLogs: [],
   lockMessage:
     'انتهت الفترة التجريبية المخصصة لمعاينة ومراجعة المنظومة بنجاح. جميع البيانات والإعدادات محفوظة بالكامل — لتفعيل النسخة الدائمة المعتمدة يرجى التواصل مع مسؤول تطوير المنظومة.',
   updatedAt: '2026-10-02T00:00:00.000Z',
 };
 
+/**
+ * ختم رقمي متزامن (Cryptographic-style Seal) لكشف أي تعديل يدوي في LocalStorage أو SessionStorage
+ */
+export function computeSyncSecuritySeal(payload: string): string {
+  const secret = '__SHARAYA_CYBER_VAULT_2026_AMRR_9981__';
+  const combined = `${secret}:${payload}:${secret}`;
+  let h1 = 0xdeadbeef ^ combined.length;
+  let h2 = 0x41c6ce57 ^ combined.length;
+  for (let i = 0; i < combined.length; i++) {
+    const ch = combined.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (
+    'SEAL-' +
+    (h1 >>> 0).toString(16).padStart(8, '0') +
+    (h2 >>> 0).toString(16).padStart(8, '0')
+  ).toUpperCase();
+}
+
 export function getStoredTrialLicenseConfig(): SystemTrialLicenseConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.TRIAL_LICENSE);
     if (!raw) return DEFAULT_TRIAL_LICENSE_CONFIG;
+    const savedSeal = localStorage.getItem('sharaya_trial_license_seal_v1');
+    const expectedSeal = computeSyncSecuritySeal(raw);
+    if (savedSeal && savedSeal !== expectedSeal) {
+      // تم رصد تلاعب يدوي في LocalStorage لتزوير الفترة التجريبية
+      localStorage.removeItem(STORAGE_KEYS.TRIAL_LICENSE);
+      localStorage.removeItem('sharaya_trial_license_seal_v1');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('sharaya:security-tamper-detected', {
+            detail: {
+              type: 'storage_tamper',
+              label: 'محاولة تلاعب ببيانات الفترة التجريبية في LocalStorage',
+            },
+          })
+        );
+      }
+      return DEFAULT_TRIAL_LICENSE_CONFIG;
+    }
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || !parsed.mode || !parsed.expiresAt) {
       return DEFAULT_TRIAL_LICENSE_CONFIG;
@@ -2120,6 +2199,8 @@ export function getStoredTrialLicenseConfig(): SystemTrialLicenseConfig {
     return {
       ...DEFAULT_TRIAL_LICENSE_CONFIG,
       ...parsed,
+      blockedEntities: Array.isArray(parsed.blockedEntities) ? parsed.blockedEntities : [],
+      intrusionLogs: Array.isArray(parsed.intrusionLogs) ? parsed.intrusionLogs : [],
     };
   } catch {
     return DEFAULT_TRIAL_LICENSE_CONFIG;
@@ -2128,8 +2209,251 @@ export function getStoredTrialLicenseConfig(): SystemTrialLicenseConfig {
 
 export function saveTrialLicenseConfig(config: SystemTrialLicenseConfig): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.TRIAL_LICENSE, JSON.stringify(config));
+    const cleanConfig: SystemTrialLicenseConfig = {
+      ...DEFAULT_TRIAL_LICENSE_CONFIG,
+      ...config,
+      blockedEntities: Array.isArray(config.blockedEntities)
+        ? config.blockedEntities.slice(0, 100)
+        : [],
+      intrusionLogs: Array.isArray(config.intrusionLogs)
+        ? config.intrusionLogs.slice(0, 80)
+        : [],
+    };
+    const json = JSON.stringify(cleanConfig);
+    localStorage.setItem(STORAGE_KEYS.TRIAL_LICENSE, json);
+    localStorage.setItem('sharaya_trial_license_seal_v1', computeSyncSecuritySeal(json));
   } catch {}
+}
+
+// ==================== بصمة الهاردوير (Hardware Fingerprint) وعنوان الـ IP ومكافحة تأخير الساعة ====================
+
+let cachedHardwareFingerprint: { fingerprintId: string; deviceDetails: string } | null = null;
+let cachedVisitorIpInfo: { ip: string; ispLocation: string } | null = null;
+
+/**
+ * استخراج بصمة عتاد الجهاز الفريدة (GPU + CPU + RAM + Screen + OS + Canvas)
+ * تظل ثابتة حتى لو استخدم المخترق VPN أو فتح المتصفح الخفي (Incognito)
+ */
+export function getHardwareDeviceFingerprint(): {
+  fingerprintId: string;
+  deviceDetails: string;
+} {
+  if (cachedHardwareFingerprint) return cachedHardwareFingerprint;
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+    return { fingerprintId: 'FP-SERVER', deviceDetails: 'Server Environment' };
+  }
+
+  try {
+    const ua = navigator.userAgent || '';
+    const platform = (navigator as any).userAgentData?.platform || navigator.platform || 'Unknown';
+    const cores = navigator.hardwareConcurrency || 4;
+    const ram = (navigator as any).deviceMemory ? `${(navigator as any).deviceMemory}GB RAM` : '';
+    const screenRes = `${window.screen?.width || 0}x${window.screen?.height || 0}x${
+      window.screen?.colorDepth || 24
+    }`;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+
+    // استخراج اسم كارت الشاشة الحقيقي (WebGL Unmasked Renderer)
+    let gpuInfo = 'Standard GPU';
+    try {
+      const canvas = document.createElement('canvas');
+      const gl =
+        (canvas.getContext('webgl') as WebGLRenderingContext | null) ||
+        (canvas.getContext('experimental-webgl') as WebGLRenderingContext | null);
+      if (gl) {
+        const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+        if (debugInfo) {
+          const renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+          if (renderer) {
+            gpuInfo = String(renderer).replace(/ANGLE \((.+)\)/i, '$1').slice(0, 60);
+          }
+        }
+      }
+    } catch {}
+
+    // بصمة رسم ثنائية الأبعاد (Canvas 2D Geometry Seed)
+    let canvasSeed = '';
+    try {
+      const c2d = document.createElement('canvas');
+      c2d.width = 120;
+      c2d.height = 30;
+      const ctx = c2d.getContext('2d');
+      if (ctx) {
+        ctx.textBaseline = 'top';
+        ctx.font = '13px Arial';
+        ctx.fillStyle = '#062142';
+        ctx.fillRect(10, 2, 50, 18);
+        ctx.fillStyle = '#fbbf24';
+        ctx.fillText('SharayaFP-2026', 4, 4);
+        canvasSeed = c2d.toDataURL().slice(-48);
+      }
+    } catch {}
+
+    // تحديد نظام التشغيل والمتصفح بشكل مقروء
+    let osName = platform;
+    if (/Windows NT 10\.0/i.test(ua)) osName = 'Windows 10/11';
+    else if (/Windows/i.test(ua)) osName = 'Windows';
+    else if (/Android/i.test(ua)) {
+      const m = ua.match(/Android\s([0-9.]+)/i);
+      osName = m ? `Android ${m[1]}` : 'Android';
+    } else if (/iPhone|iPad|iPod/i.test(ua)) osName = 'iOS (iPhone/iPad)';
+    else if (/Mac OS X/i.test(ua)) osName = 'macOS';
+    else if (/Linux/i.test(ua)) osName = 'Linux';
+
+    let browserName = 'Browser';
+    if (/Edg\//i.test(ua)) browserName = 'Edge';
+    else if (/OPR\//i.test(ua)) browserName = 'Opera';
+    else if (/Chrome\//i.test(ua)) browserName = 'Chrome';
+    else if (/Firefox\//i.test(ua)) browserName = 'Firefox';
+    else if (/Safari\//i.test(ua)) browserName = 'Safari';
+
+    const hardwareRaw = `${osName}|${cores}|${ram}|${screenRes}|${tz}|${gpuInfo}|${canvasSeed}`;
+    const seal = computeSyncSecuritySeal(hardwareRaw).replace('SEAL-', '');
+    const fingerprintId = `FP-${seal.slice(0, 10).toUpperCase()}`;
+
+    const deviceDetails = [
+      `${osName} (${browserName})`,
+      `المعالج: ${cores} أنوية${ram ? ` • ${ram}` : ''}`,
+      `الشاشة: ${window.screen?.width || 0}×${window.screen?.height || 0}`,
+      `كارت الشاشة: ${gpuInfo}`,
+    ].join(' | ');
+
+    cachedHardwareFingerprint = { fingerprintId, deviceDetails };
+    return cachedHardwareFingerprint;
+  } catch {
+    return { fingerprintId: 'FP-UNKNOWN', deviceDetails: 'جهاز غير محدد' };
+  }
+}
+
+/**
+ * جلب عنوان الـ IP الحقيقي للزائر + شركة الإنترنت والمدينة + وقت السيرفر الحقيقي
+ */
+export async function fetchVisitorNetworkIdentity(): Promise<{
+  ip: string;
+  ispLocation: string;
+}> {
+  if (cachedVisitorIpInfo && cachedVisitorIpInfo.ip !== 'غير معروف') {
+    return cachedVisitorIpInfo;
+  }
+
+  // المحاولة 1: ipwho.is (يدعم HTTPS و CORS ويعطي الـ IP والمدينة وشركة الإنترنت)
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const res = await fetch('https://ipwho.is/', { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.ip) {
+        const isp = data.connection?.isp || data.connection?.org || '';
+        const loc = [data.country, data.city, isp].filter(Boolean).join(' • ');
+        cachedVisitorIpInfo = {
+          ip: String(data.ip),
+          ispLocation: loc || 'اتصال مباشر',
+        };
+        return cachedVisitorIpInfo;
+      }
+    }
+  } catch {}
+
+  // المحاولة 2: api.ipify.org
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    const res = await fetch('https://api.ipify.org?format=json', { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.ip) {
+        cachedVisitorIpInfo = {
+          ip: String(data.ip),
+          ispLocation: 'شبكة إنترنت عامة',
+        };
+        return cachedVisitorIpInfo;
+      }
+    }
+  } catch {}
+
+  return { ip: 'غير معروف', ispLocation: 'غير متاح' };
+}
+
+const CLOCK_WATERMARK_KEY = 'sharaya_clock_watermark_v1';
+const CLOCK_WATERMARK_SEAL_KEY = 'sharaya_clock_watermark_seal_v1';
+
+/**
+ * تحديث بصمة أحدث توقيت معروف للنظام لمنع إرجاع ساعة الجهاز للوراء (Anti-Time Travel)
+ */
+export function updateMonotonicClockWatermark(referenceTimeMs?: number): void {
+  try {
+    const candidateMs = referenceTimeMs && referenceTimeMs > 0 ? referenceTimeMs : Date.now();
+    const currentRaw = localStorage.getItem(CLOCK_WATERMARK_KEY);
+    const currentMs = currentRaw ? Number(currentRaw) : 0;
+    if (!Number.isFinite(currentMs) || candidateMs > currentMs) {
+      const str = String(candidateMs);
+      localStorage.setItem(CLOCK_WATERMARK_KEY, str);
+      localStorage.setItem(CLOCK_WATERMARK_SEAL_KEY, computeSyncSecuritySeal(str));
+    }
+  } catch {}
+}
+
+/**
+ * فحص ما إذا قام المستخدم بتأخير ساعة الكمبيوتر أو الهاتف للوراء لخداع الفترة التجريبية
+ */
+export function checkClockRollbackTamper(config: SystemTrialLicenseConfig): {
+  isTampered: boolean;
+  behindByMinutes: number;
+} {
+  if (config.antiClockTamper === false || config.mode === 'permanent') {
+    return { isTampered: false, behindByMinutes: 0 };
+  }
+
+  try {
+    const now = Date.now();
+    let maxKnownTimeMs = 0;
+
+    // 1. مقارنة بوقت آخر تحديث للإعدادات على السحابة
+    const updatedMs = new Date(config.updatedAt).getTime();
+    if (Number.isFinite(updatedMs) && updatedMs > maxKnownTimeMs) {
+      maxKnownTimeMs = updatedMs;
+    }
+
+    const startedMs = new Date(config.startedAt).getTime();
+    if (Number.isFinite(startedMs) && startedMs > maxKnownTimeMs) {
+      maxKnownTimeMs = startedMs;
+    }
+
+    if (config.lastKnownServerTimeMs && config.lastKnownServerTimeMs > maxKnownTimeMs) {
+      maxKnownTimeMs = config.lastKnownServerTimeMs;
+    }
+
+    // 2. مقارنة بأحدث وقت وصل له المتصفح سابقاً (مع فحص الختم)
+    const rawWatermark = localStorage.getItem(CLOCK_WATERMARK_KEY);
+    const watermarkSeal = localStorage.getItem(CLOCK_WATERMARK_SEAL_KEY);
+    if (rawWatermark && watermarkSeal === computeSyncSecuritySeal(rawWatermark)) {
+      const wm = Number(rawWatermark);
+      if (Number.isFinite(wm) && wm > maxKnownTimeMs) {
+        maxKnownTimeMs = wm;
+      }
+    }
+
+    // إذا كانت ساعة الجهاز متأخرة بأكثر من 20 دقيقة عن آخر وقت حقيقي مسجل
+    const driftMs = maxKnownTimeMs - now;
+    if (driftMs > 20 * 60 * 1000) {
+      return {
+        isTampered: true,
+        behindByMinutes: Math.round(driftMs / (60 * 1000)),
+      };
+    }
+
+    // إذا كان الوقت طبيعياً، نحدث العلامة المائية للأمام
+    if (now >= maxKnownTimeMs) {
+      updateMonotonicClockWatermark(now);
+    }
+
+    return { isTampered: false, behindByMinutes: 0 };
+  } catch {
+    return { isTampered: false, behindByMinutes: 0 };
+  }
 }
 
 

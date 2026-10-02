@@ -27,7 +27,10 @@ import {
   FinanceExpenseRecord,
   InsuranceClaimSettlementRecord,
   DoctorCommissionRule,
-  SystemTrialLicenseConfig
+  SystemTrialLicenseConfig,
+  SecurityAttemptType,
+  SecurityIntrusionAttempt,
+  BlockedSecurityEntity
 } from '../types';
 import { 
   getStoredClinics, 
@@ -91,7 +94,10 @@ import {
   saveFinanceLedger,
   getStoredTrialLicenseConfig,
   saveTrialLicenseConfig,
-  verifySecretDeveloperCredentials
+  verifySecretDeveloperCredentials,
+  getHardwareDeviceFingerprint,
+  fetchVisitorNetworkIdentity,
+  updateMonotonicClockWatermark
 } from '../services/storage';
 import { 
   checkClinicAvailability, 
@@ -307,6 +313,7 @@ interface AppContextType {
   ) => Promise<{ success: boolean; summary: string }>;
   trialLicenseConfig: SystemTrialLicenseConfig;
   updateTrialLicenseConfig: (nextConfig: SystemTrialLicenseConfig) => Promise<boolean>;
+  reportSecurityIntrusion: (type: SecurityAttemptType, customLabel?: string) => Promise<void>;
   isDeveloperPortalOpen: boolean;
   setIsDeveloperPortalOpen: (open: boolean) => void;
 }
@@ -635,6 +642,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (parsedTrial && typeof parsedTrial === 'object' && parsedTrial.mode) {
               setTrialLicenseConfig(parsedTrial);
               saveTrialLicenseConfig(parsedTrial);
+              if (parsedTrial.updatedAt) {
+                const srvMs = new Date(parsedTrial.updatedAt).getTime();
+                if (Number.isFinite(srvMs)) updateMonotonicClockWatermark(srvMs);
+              }
             }
           } catch {}
         }
@@ -1078,6 +1089,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (!stored) {
         setCurrentUser(null);
       }
+      // فحص سلامة ختم إعدادات الفترة التجريبية
+      getStoredTrialLicenseConfig();
     };
     window.addEventListener('storage', handleStorageTamper);
 
@@ -1501,6 +1514,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: 'مرحباً بك م. عمرو — تم فتح لوحة التحكم في الفترة التجريبية والترخيص عن بُعد.'
       });
       return { success: true };
+    }
+
+    // 0-ب. فحص حالة الترخيص والحظر الأمني قبل السماح بأي تسجيل دخول
+    const liveTrialCfg = trialConfigRef.current;
+    const hwFp = getHardwareDeviceFingerprint().fingerprintId;
+    const isDeviceBanned = (liveTrialCfg.blockedEntities || []).some(
+      (b) => b.deviceFingerprint && b.deviceFingerprint === hwFp
+    );
+    if (isDeviceBanned) {
+      const banMsg = '⛔ تم حظر هذا الجهاز من الوصول للمنظومة لأسباب أمنية.';
+      addToast({ type: 'error', title: 'جهاز محظور أمنياً', message: banMsg });
+      return { success: false, error: banMsg };
+    }
+    const isTrialExpiredNow =
+      liveTrialCfg.mode === 'locked' ||
+      (liveTrialCfg.mode === 'trial' && Date.now() >= new Date(liveTrialCfg.expiresAt).getTime());
+    if (isTrialExpiredNow) {
+      const expMsg = 'انتهت الفترة التجريبية المخصصة لمعاينة المنظومة. يرجى التواصل مع مسؤول تطوير النظام لتفعيل الترخيص.';
+      addToast({ type: 'warning', title: 'الفترة التجريبية منتهية', message: expMsg });
+      return { success: false, error: expMsg };
     }
 
     // 1. فحص حماية القوة العمياء والحد الأقصى للمحاولات (Brute Force Protection)
@@ -5029,14 +5062,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const lastIntrusionReportAtRef = React.useRef<number>(0);
+  const trialConfigRef = React.useRef<SystemTrialLicenseConfig>(trialLicenseConfig);
+  useEffect(() => {
+    trialConfigRef.current = trialLicenseConfig;
+  }, [trialLicenseConfig]);
+
   const updateTrialLicenseConfig = async (
     nextConfig: SystemTrialLicenseConfig
   ): Promise<boolean> => {
+    const nowIso = new Date().toISOString();
     const stamped: SystemTrialLicenseConfig = {
       ...nextConfig,
-      updatedAt: new Date().toISOString(),
+      lastKnownServerTimeMs: Date.now(),
+      updatedAt: nowIso,
     };
+    updateMonotonicClockWatermark(Date.now());
     lastSettingsSaveAtRef.current = Date.now();
+    trialConfigRef.current = stamped;
     setTrialLicenseConfig(stamped);
     saveTrialLicenseConfig(stamped);
 
@@ -5046,6 +5089,110 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     return true;
   };
+
+  const reportSecurityIntrusion = async (
+    type: SecurityAttemptType,
+    customLabel?: string
+  ): Promise<void> => {
+    const now = Date.now();
+    if (now - lastIntrusionReportAtRef.current < 5000) return;
+    lastIntrusionReportAtRef.current = now;
+
+    try {
+      const hw = getHardwareDeviceFingerprint();
+      const net = await fetchVisitorNetworkIdentity();
+      const activeUser = getStoredSession();
+
+      const defaultLabels: Record<SecurityAttemptType, string> = {
+        devtools_open: 'فتح أدوات المطور / الكونسول (DevTools / Inspect)',
+        shortcut_inspect: 'محاولة ضغط اختصار فحص الكود (F12 / Ctrl+Shift+I / Ctrl+U)',
+        clock_rollback: 'محاولة تأخير تاريخ وساعة الجهاز لخداع الفترة التجريبية',
+        storage_tamper: 'محاولة تلاعب وتزوير في ملفات المتصفح (LocalStorage / Session)',
+        brute_force_login: 'محاولات متكررة لتخمين كلمة المرور (Brute Force)',
+      };
+
+      const prevConfig = trialConfigRef.current;
+      const existingLogs = Array.isArray(prevConfig.intrusionLogs) ? prevConfig.intrusionLogs : [];
+      const existingBlocked = Array.isArray(prevConfig.blockedEntities)
+        ? prevConfig.blockedEntities
+        : [];
+
+      const previousStrikesForDevice = existingLogs.filter(
+        (item) =>
+          item.deviceFingerprint === hw.fingerprintId ||
+          (net.ip !== 'غير معروف' && item.ip === net.ip)
+      ).length;
+
+      const newStrikeCount = previousStrikesForDevice + 1;
+
+      const newAttempt: SecurityIntrusionAttempt = {
+        id: `intr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        type,
+        typeLabel: customLabel || defaultLabels[type] || 'محاولة غير مصرح بها',
+        ip: net.ip,
+        ispLocation: net.ispLocation,
+        deviceFingerprint: hw.fingerprintId,
+        deviceDetails: hw.deviceDetails,
+        activeUsername: activeUser ? `${activeUser.displayName} (${activeUser.username})` : 'زائر غير مسجل',
+        activeRole: activeUser?.role || 'visitor',
+        timestamp: new Date().toISOString(),
+        strikeCount: newStrikeCount,
+      };
+
+      const nextLogs = [newAttempt, ...existingLogs].slice(0, 80);
+      let nextBlocked = [...existingBlocked];
+
+      const maxStrikes = prevConfig.maxStrikesBeforeBan || 3;
+      const shouldAutoBan = prevConfig.autoBanAfterStrikes !== false && newStrikeCount >= maxStrikes;
+
+      if (shouldAutoBan) {
+        const alreadyBlocked = nextBlocked.some(
+          (b) =>
+            (b.deviceFingerprint && b.deviceFingerprint === hw.fingerprintId) ||
+            (b.ip && net.ip !== 'غير معروف' && b.ip === net.ip)
+        );
+        if (!alreadyBlocked) {
+          const autoBanItem: BlockedSecurityEntity = {
+            id: `ban-${Date.now()}`,
+            ip: net.ip !== 'غير معروف' ? net.ip : undefined,
+            deviceFingerprint: hw.fingerprintId,
+            deviceDetails: hw.deviceDetails,
+            reason: `حظر تلقائي بعد ${newStrikeCount} محاولات اختراق (${newAttempt.typeLabel})`,
+            blockedAt: new Date().toISOString(),
+            autoBlocked: true,
+          };
+          nextBlocked = [autoBanItem, ...nextBlocked].slice(0, 100);
+        }
+      }
+
+      const updatedConfig: SystemTrialLicenseConfig = {
+        ...prevConfig,
+        intrusionLogs: nextLogs,
+        blockedEntities: nextBlocked,
+        updatedAt: new Date().toISOString(),
+      };
+
+      lastSettingsSaveAtRef.current = Date.now();
+      trialConfigRef.current = updatedConfig;
+      setTrialLicenseConfig(updatedConfig);
+      saveTrialLicenseConfig(updatedConfig);
+
+      if (isSupabaseConfigured) {
+        await saveTrialLicenseConfigToDb(updatedConfig);
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    const onTamperDetected = (evt: Event) => {
+      const custom = evt as CustomEvent<{ type: SecurityAttemptType; label?: string }>;
+      if (custom?.detail?.type) {
+        reportSecurityIntrusion(custom.detail.type, custom.detail.label);
+      }
+    };
+    window.addEventListener('sharaya:security-tamper-detected', onTamperDetected);
+    return () => window.removeEventListener('sharaya:security-tamper-detected', onTamperDetected);
+  }, []);
 
   return (
     <AppContext.Provider
@@ -5137,6 +5284,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         selectivePurgeRecords,
         trialLicenseConfig,
         updateTrialLicenseConfig,
+        reportSecurityIntrusion,
         isDeveloperPortalOpen,
         setIsDeveloperPortalOpen
       }}
