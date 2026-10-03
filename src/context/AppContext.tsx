@@ -210,13 +210,17 @@ interface AppContextType {
   updateConsultationSettings: (defaultDays: number, clinicWindows?: Record<string, number>) => Promise<boolean>;
   checkConsultationEligibility: (
     phone: string,
-    clinicId: string
+    clinicId: string,
+    patientName?: string
   ) => {
     eligible: boolean;
     examDate?: string;
     daysAgo?: number;
     remainingDays?: number;
     daysRemaining?: number;
+    nameMismatch?: boolean;
+    registeredPatientName?: string;
+    patientName?: string;
   };
   getActiveClinicsForBooking: () => { clinic: Clinic; assignedDoctor?: Doctor }[];
   createBooking: (data: {
@@ -4122,9 +4126,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return true;
   };
 
-  const checkConsultationEligibility = (phone: string, clinicId: string) => {
+  const checkConsultationEligibility = (phone: string, clinicId: string, patientName?: string) => {
     const todayStr = getLocalDateStr(new Date());
-    const res = checkPatientConsultationEligibility(phone, clinicId, consultationRegistry, todayStr);
+    const res = checkPatientConsultationEligibility(phone, clinicId, consultationRegistry, todayStr, patientName);
     return {
       ...res,
       daysRemaining: res.remainingDays

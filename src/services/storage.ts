@@ -1818,17 +1818,50 @@ export function saveConsultationRegistry(
   return pruned;
 }
 
+export function normalizeArabicPatientName(name: string): string {
+  if (!name) return '';
+  return String(name)
+    .trim()
+    .toLowerCase()
+    .replace(/[\u064B-\u065F\u0670]/g, '') // حذف التشكيل والحركات
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/[ىيئ]/g, 'ي')
+    .replace(/ؤ/g, 'و')
+    .replace(/\s+/g, ' ');
+}
+
+export function arePatientNamesMatching(nameA?: string, nameB?: string): boolean {
+  const normA = normalizeArabicPatientName(nameA || '');
+  const normB = normalizeArabicPatientName(nameB || '');
+  if (!normA || !normB) return false;
+  if (normA === normB) return true;
+
+  // فحص تطابق الاسمين الأول والثاني على الأقل
+  const partsA = normA.split(' ').filter(Boolean);
+  const partsB = normB.split(' ').filter(Boolean);
+  if (partsA.length >= 2 && partsB.length >= 2) {
+    if (partsA[0] === partsB[0] && partsA[1] === partsB[1]) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function checkPatientConsultationEligibility(
   phone: string,
   clinicId: string,
   registry: ConsultationRegistryState,
-  todayStr?: string
+  todayStr?: string,
+  patientName?: string
 ): {
   eligible: boolean;
   examDate?: string;
   daysAgo?: number;
   remainingDays?: number;
   patientName?: string;
+  nameMismatch?: boolean;
+  registeredPatientName?: string;
 } {
   const cleanPhone = String(phone || '').replace(/\D/g, '');
   const cleanClinicId = String(clinicId || '').trim();
@@ -1848,12 +1881,28 @@ export function checkPatientConsultationEligibility(
   if (daysAgo < 0 || daysAgo > effectiveWindow) {
     return { eligible: false };
   }
+
+  // التحقق الذكي من اسم المريض لمنع أخذ استشارة شخص آخر بنفس رقم الهاتف
+  if (patientName && patientName.trim()) {
+    const isSamePerson = arePatientNamesMatching(match.patientName, patientName);
+    if (!isSamePerson) {
+      return {
+        eligible: false,
+        nameMismatch: true,
+        registeredPatientName: match.patientName,
+        examDate: match.examDate,
+        remainingDays: Math.max(0, effectiveWindow - daysAgo),
+      };
+    }
+  }
+
   return {
     eligible: true,
     examDate: match.examDate,
     daysAgo,
     remainingDays: Math.max(0, effectiveWindow - daysAgo),
     patientName: match.patientName,
+    registeredPatientName: match.patientName,
   };
 }
 

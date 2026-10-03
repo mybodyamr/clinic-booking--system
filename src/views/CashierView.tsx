@@ -172,6 +172,7 @@ export const CashierView: React.FC = () => {
   const [selectedInsCardCategory, setSelectedInsCardCategory] = useState<string>('');
   const [insCardNumber, setInsCardNumber] = useState<string>('');
   const [insCopayRawInput, setInsCopayRawInput] = useState<string>('20%');
+  const [insBaseFeeInput, setInsBaseFeeInput] = useState<string>('50');
   const [insFormError, setInsFormError] = useState<string>('');
 
   const activeInsuranceContracts = React.useMemo(
@@ -199,11 +200,14 @@ export const CashierView: React.FC = () => {
 
   const openInsurancePaymentModal = (booking: Booking) => {
     const firstComp = activeInsuranceContracts[0];
+    const clinicFee = clinics.find(c => c.id === booking.clinicId)?.fee || 50;
+    const effectiveFee = booking.fee && booking.fee > 0 ? booking.fee : clinicFee;
     setInsuranceModalBooking(booking);
     setSelectedInsCompanyId(firstComp?.id || '');
     setSelectedInsCardCategory(firstComp?.cardCategories?.[0] || 'فضي (Silver)');
     setInsCardNumber(booking.insuranceDetails?.cardNumber || '');
     setInsCopayRawInput(booking.insuranceDetails?.copayInputRaw || '20%');
+    setInsBaseFeeInput(String(effectiveFee));
     setInsFormError('');
   };
 
@@ -226,7 +230,9 @@ export const CashierView: React.FC = () => {
       return;
     }
 
-    const originalFee = insuranceModalBooking.fee || 0;
+    const clinicFee = clinics.find(c => c.id === insuranceModalBooking.clinicId)?.fee || 50;
+    const parsedBase = parseFloat(insBaseFeeInput);
+    const originalFee = !isNaN(parsedBase) && parsedBase > 0 ? parsedBase : (insuranceModalBooking.fee && insuranceModalBooking.fee > 0 ? insuranceModalBooking.fee : clinicFee);
     const patientPaidAmount = Math.round((originalFee * parsedCopayPercentage) / 100);
     const insuranceCoveredAmount = Math.max(0, originalFee - patientPaidAmount);
 
@@ -246,6 +252,7 @@ export const CashierView: React.FC = () => {
     if (ok) {
       const updatedBooking: Booking = {
         ...insuranceModalBooking,
+        fee: originalFee,
         paymentStatus: 'paid',
         paymentMethod: 'insurance',
         paidAt: new Date().toISOString(),
@@ -471,7 +478,8 @@ export const CashierView: React.FC = () => {
     if (!effectiveLookupPhone || effectiveLookupPhone.length < 10) return [];
     return clinics
       .map(clinic => {
-        const elig = checkConsultationEligibility(effectiveLookupPhone, clinic.id);
+        const searchName = consultPatientName.trim();
+        const elig = checkConsultationEligibility(effectiveLookupPhone, clinic.id, searchName);
         if (!elig.eligible) return null;
         const activePair = activeClinicsWithDoctors.find(item => item.clinic.id === clinic.id);
         const fallbackDoc = doctors.find(d => d.clinicId === clinic.id);
@@ -489,11 +497,12 @@ export const CashierView: React.FC = () => {
           isOpenToday: Boolean(activePair),
           examDate: elig.examDate || '',
           daysRemaining: elig.daysRemaining ?? 0,
+          registeredPatientName: elig.registeredPatientName || elig.patientName || '',
           existingUnpaidToday
         };
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-  }, [effectiveLookupPhone, clinics, checkConsultationEligibility, activeClinicsWithDoctors, doctors, bookings]);
+  }, [effectiveLookupPhone, clinics, checkConsultationEligibility, consultPatientName, activeClinicsWithDoctors, doctors, bookings]);
 
   // تفعيل وإصدار تذكرة الاستشارة المجانية لعيادة محددة بضغطة واحدة
   const handleActivateClinicConsultation = async (clinicId: string) => {
@@ -1572,7 +1581,7 @@ export const CashierView: React.FC = () => {
               <div className="divide-y divide-slate-100 dark:divide-slate-800">
                 {filteredList.map(b => {
                   const consultationEligibility = b.paymentStatus === 'unpaid'
-                    ? checkConsultationEligibility(b.patientPhone, b.clinicId)
+                    ? checkConsultationEligibility(b.patientPhone, b.clinicId, b.patientName)
                     : null;
                   return (
                   <div
@@ -1612,6 +1621,12 @@ export const CashierView: React.FC = () => {
                           <span className="px-2.5 py-0.5 rounded-full text-[11px] font-extrabold bg-teal-100 dark:bg-teal-950/90 text-teal-800 dark:text-teal-200 border border-teal-400 dark:border-teal-700 flex items-center gap-1 shadow-2xs">
                             <Stethoscope className="w-3 h-3 text-teal-700 dark:text-teal-300" />
                             <span>مستحق لاستشارة مجانية (كشف: {consultationEligibility.examDate} • متبقي {consultationEligibility.daysRemaining} يوم)</span>
+                          </span>
+                        )}
+                        {consultationEligibility?.nameMismatch && (
+                          <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 dark:bg-amber-950/90 text-amber-900 dark:text-amber-200 border border-amber-400 dark:border-amber-700 flex items-center gap-1 shadow-2xs">
+                            <AlertTriangle className="w-3 h-3 text-amber-700 dark:text-amber-400 shrink-0" />
+                            <span>الاستشارة مسجلة باسم ({consultationEligibility.registeredPatientName}) وليست لـ ({b.patientName})</span>
                           </span>
                         )}
                       </div>
@@ -2434,7 +2449,7 @@ export const CashierView: React.FC = () => {
                       </label>
                       {(() => {
                         const walkInElig = (walkInPhone && walkInClinicId)
-                          ? checkConsultationEligibility(walkInPhone, walkInClinicId)
+                          ? checkConsultationEligibility(walkInPhone, walkInClinicId, walkInName)
                           : null;
                         return (
                           <>
@@ -2451,6 +2466,12 @@ export const CashierView: React.FC = () => {
                                 >
                                   اختيار استشارة
                                 </button>
+                              </div>
+                            )}
+                            {walkInElig?.nameMismatch && (
+                              <div className="p-2 rounded-xl bg-amber-50 dark:bg-amber-950/70 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs flex items-center gap-1.5 mb-2 font-bold">
+                                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                <span>تنبيه: الاستشارة المسجلة لهذا الرقم تخص المريض ({walkInElig.registeredPatientName}) وليست لـ ({walkInName}) — يتم تحصيل كشف جديد.</span>
                               </div>
                             )}
                             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-xs">
@@ -2788,13 +2809,23 @@ export const CashierView: React.FC = () => {
                     {scannedBooking.paymentStatus === 'unpaid' ? (
                       <div className="space-y-2">
                         {(() => {
-                          const scanElig = checkConsultationEligibility(scannedBooking.patientPhone, scannedBooking.clinicId);
-                          return scanElig.eligible ? (
-                            <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/80 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-xs font-bold flex items-center gap-2">
-                              <Stethoscope className="w-4 h-4 text-teal-600 shrink-0" />
-                              <span>مستحق لاستشارة مجانية (كشف سابق يوم {scanElig.examDate} • متبقي {scanElig.daysRemaining} يوم) — يُمسح الختم تلقائياً بعد الدخول.</span>
-                            </div>
-                          ) : null;
+                          const scanElig = checkConsultationEligibility(scannedBooking.patientPhone, scannedBooking.clinicId, scannedBooking.patientName);
+                          return (
+                            <>
+                              {scanElig.eligible && (
+                                <div className="p-3 rounded-xl bg-teal-50 dark:bg-teal-950/80 border border-teal-300 dark:border-teal-700 text-teal-900 dark:text-teal-200 text-xs font-bold flex items-center gap-2">
+                                  <Stethoscope className="w-4 h-4 text-teal-600 shrink-0" />
+                                  <span>مستحق لاستشارة مجانية (كشف سابق يوم {scanElig.examDate} • متبقي {scanElig.daysRemaining} يوم) — يُمسح الختم تلقائياً بعد الدخول.</span>
+                                </div>
+                              )}
+                              {scanElig.nameMismatch && (
+                                <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/80 border border-amber-300 dark:border-amber-700 text-amber-900 dark:text-amber-200 text-xs font-bold flex items-center gap-2">
+                                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                                  <span>تنبيه: الاستشارة المسجلة لهذا الرقم تخص المريض ({scanElig.registeredPatientName}) وليست لـ ({scannedBooking.patientName}) — يتم تحصيل كشف جديد.</span>
+                                </div>
+                              )}
+                            </>
+                          );
                         })()}
                         <div className="text-xs font-bold text-slate-700 dark:text-slate-300">
                           اختر طريقة السداد لتسجيل الدفع وإدراج المريض فوراً في طابور انتظار الاستقبال:
@@ -3374,9 +3405,32 @@ export const CashierView: React.FC = () => {
                   </div>
                 </div>
 
+                {/* 5. سعر الكشف الأساسي وحسابات التحمل التلقائية */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                      ٥. سعر الكشف الأساسي (ج.م):
+                    </label>
+                    <span className="text-[11px] text-blue-600 dark:text-blue-400 font-bold">
+                      سعر العيادة الرسمي: {clinics.find(c => c.id === insuranceModalBooking.clinicId)?.fee || 50} ج.م
+                    </span>
+                  </div>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={insBaseFeeInput}
+                    onChange={e => setInsBaseFeeInput(e.target.value)}
+                    placeholder="اكتب سعر الكشف الأساسي..."
+                    className="w-full px-3.5 py-2 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm font-mono font-bold text-slate-900 dark:text-white"
+                  />
+                </div>
+
                 {/* ملخص الحساب التلقائي للكشف */}
                 {(() => {
-                  const fullFee = insuranceModalBooking.fee || 0;
+                  const clinicFee = clinics.find(c => c.id === insuranceModalBooking.clinicId)?.fee || 50;
+                  const parsedBase = parseFloat(insBaseFeeInput);
+                  const fullFee = !isNaN(parsedBase) && parsedBase > 0 ? parsedBase : (insuranceModalBooking.fee && insuranceModalBooking.fee > 0 ? insuranceModalBooking.fee : clinicFee);
                   const patientShare = Math.round((fullFee * parsedCopayPercentage) / 100);
                   const companyShare = Math.max(0, fullFee - patientShare);
                   return (

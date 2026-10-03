@@ -49,13 +49,14 @@ export const PatientHistoryModal: React.FC = () => {
   const activeConsultationsForPhone = React.useMemo(() => {
     const cleanPhone = searchInput.trim().replace(/\s+/g, '');
     if (!cleanPhone || cleanPhone.length < 8) return [];
+    const detectedName = localMatchingBookings[0]?.patientName || rpcHistoryBookings?.[0]?.patientName;
     return clinics
       .map(c => {
-        const elig = checkConsultationEligibility(cleanPhone, c.id);
+        const elig = checkConsultationEligibility(cleanPhone, c.id, detectedName);
         return elig.eligible ? { clinic: c, ...elig } : null;
       })
       .filter((item): item is NonNullable<typeof item> => item !== null);
-  }, [searchInput, clinics, checkConsultationEligibility]);
+  }, [searchInput, clinics, checkConsultationEligibility, localMatchingBookings, rpcHistoryBookings]);
 
   const patientBookings = React.useMemo(() => {
     if (!rpcHistoryBookings) return localMatchingBookings;
