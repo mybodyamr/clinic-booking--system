@@ -31,7 +31,8 @@ import {
   SecurityAttemptType,
   SecurityIntrusionAttempt,
   BlockedSecurityEntity,
-  LiveConnectedDevice
+  LiveConnectedDevice,
+  LoginAuditRecord
 } from '../types';
 import { 
   getStoredClinics, 
@@ -1560,6 +1561,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
+  const recordLoginAuditEntry = async (params: {
+    username: string;
+    displayName: string;
+    role: string;
+    status: 'success' | 'failed_password' | 'blocked_device' | 'blocked_account';
+  }) => {
+    try {
+      const now = new Date();
+      const todayStr = getLocalDateStr(now);
+      const timeStr = now.toLocaleTimeString('ar-EG', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true,
+      });
+      const hwFp = getHardwareDeviceFingerprint();
+      const currentConfig = trialConfigRef.current;
+      const existingLogs = Array.isArray(currentConfig.loginAuditLogs)
+        ? currentConfig.loginAuditLogs
+        : [];
+
+      const newRecord: LoginAuditRecord = {
+        id: `login-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        timestamp: now.toISOString(),
+        dateStr: todayStr,
+        timeStr,
+        username: params.username,
+        displayName: params.displayName || params.username,
+        role: params.role || 'unknown',
+        status: params.status,
+        deviceFingerprint: hwFp.fingerprintId,
+        deviceDetails: hwFp.deviceDetails || navigator.userAgent,
+      };
+
+      const updatedLogs = [newRecord, ...existingLogs.filter(l => l.id !== newRecord.id)].slice(0, 150);
+
+      const nextConfig: SystemTrialLicenseConfig = {
+        ...currentConfig,
+        loginAuditLogs: updatedLogs,
+        updatedAt: now.toISOString(),
+      };
+
+      trialConfigRef.current = nextConfig;
+      setTrialLicenseConfig(nextConfig);
+      saveTrialLicenseConfig(nextConfig);
+      if (isSupabaseConfigured) {
+        saveTrialLicenseConfigToDb(nextConfig).catch(() => {});
+      }
+    } catch {}
+  };
+
   const login = async (username: string, pass: string): Promise<{ success: boolean; error?: string }> => {
     const cleanUser = sanitizeText(username).toLowerCase().trim();
     
@@ -1579,6 +1631,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         title: 'بوابة التحكم السرية للمطور 🔑',
         message: 'مرحباً بك م. عمرو — تم فتح لوحة التحكم في الفترة التجريبية والترخيص عن بُعد.'
       });
+      recordLoginAuditEntry({
+        username: 'مطور النظام (م. عمرو)',
+        displayName: 'م. عمرو فوزي (المطور)',
+        role: 'admin',
+        status: 'success',
+      });
       return { success: true };
     }
 
@@ -1590,9 +1648,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     if (isDeviceBanned) {
       const banMsg = '⛔ تم حظر هذا الجهاز من الوصول للمنظومة لأسباب أمنية.';
+      recordLoginAuditEntry({
+        username: cleanUser,
+        displayName: cleanUser,
+        role: 'unknown',
+        status: 'blocked_device',
+      });
       addToast({ type: 'error', title: 'جهاز محظور أمنياً', message: banMsg });
       return { success: false, error: banMsg };
     }
+
+    // 0-ج. فحص حظر الحساب الوظيفي بالكامل بأمر المطور
+    const isAccountBanned = (liveTrialCfg.bannedUsernames || []).some(
+      (u) => u.toLowerCase() === cleanUser
+    );
+    if (isAccountBanned) {
+      const banMsg = '⛔ تم إيقاف هذا الحساب الوظيفي عن العمل بأمر إدارة المنظومة.';
+      recordLoginAuditEntry({
+        username: cleanUser,
+        displayName: cleanUser,
+        role: 'unknown',
+        status: 'blocked_account',
+      });
+      addToast({ type: 'error', title: 'حساب موقوف أمنياً', message: banMsg });
+      return { success: false, error: banMsg };
+    }
+
     const isTrialExpiredNow =
       liveTrialCfg.mode === 'locked' ||
       (liveTrialCfg.mode === 'trial' && Date.now() >= new Date(liveTrialCfg.expiresAt).getTime());
@@ -1623,6 +1704,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resetLoginAttempts(cleanUser);
         setCurrentUser(authRes.session);
         saveSession(authRes.session);
+
+        recordLoginAuditEntry({
+          username: authRes.session.username,
+          displayName: authRes.session.displayName,
+          role: authRes.session.role,
+          status: 'success',
+        });
 
         // جلب البيانات الخاصة بصلاحية الموظف فور تسجيل الدخول دون انتظار دورة المزامنة
         if (authRes.session.role !== 'doctor') {
@@ -1720,6 +1808,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       resetLoginAttempts(cleanUser);
       setCurrentUser(matchedUser);
       saveSession(matchedUser);
+
+      recordLoginAuditEntry({
+        username: matchedUser.username,
+        displayName: matchedUser.displayName,
+        role: matchedUser.role,
+        status: 'success',
+      });
+
       addToast({
         type: 'success',
         title: 'تم تسجيل الدخول بنجاح',
@@ -1752,6 +1848,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const record = recordFailedLogin(cleanUser);
       let genericError = 'اسم المستخدم أو كلمة المرور غير صحيحة. يرجى التأكد من البيانات.';
       
+      recordLoginAuditEntry({
+        username: cleanUser,
+        displayName: matchedAccount?.displayName || cleanUser,
+        role: matchedAccount?.role || 'unknown',
+        status: 'failed_password',
+      });
+
       if (record.locked) {
         genericError = `تم قفل الحساب مؤقتاً لمدة ${record.lockUntilMinutes} دقيقة بسبب تجاوز الحد المسموح من المحاولات الخاطئة (5 محاولات).`;
       } else {

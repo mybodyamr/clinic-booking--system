@@ -46,6 +46,9 @@ import {
   Activity,
   CheckCheck,
   RotateCcw,
+  UserX,
+  History,
+  UserCheck,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -54,6 +57,7 @@ import {
   SecurityIntrusionAttempt,
   DeveloperBroadcastMessage,
   GeneratedLicenseKey,
+  LoginAuditRecord,
 } from '../types';
 import {
   verifySecretDeveloperCredentials,
@@ -102,6 +106,16 @@ const VIEW_ARABIC_NAMES: Record<string, string> = {
   cashier: 'شاشة الخزينة والتحصيل',
   finance: 'الإدارة المالية والتأمين',
   admin: 'لوحة الإدارة العليا والتقارير',
+};
+
+const ROLE_ARABIC_NAMES: Record<string, string> = {
+  admin: 'مدير النظام',
+  doctor: 'طبيب',
+  cashier: 'كاشير الخزينة',
+  reception: 'موظف الاستقبال',
+  finance_manager: 'المدير المالي',
+  visitor: 'زائر',
+  unknown: 'مستخدم عام',
 };
 
 export const TrialLicensePortal: React.FC = () => {
@@ -546,6 +560,8 @@ export const TrialLicensePortal: React.FC = () => {
   );
   const [manualBanTarget, setManualBanTarget] = useState('');
   const [manualBanReason, setManualBanReason] = useState('');
+  const [auditLogFilter, setAuditLogFilter] = useState<'today' | 'all' | 'success' | 'failed'>('today');
+  const [manualAccountBanInput, setManualAccountBanInput] = useState('');
   const [newDomainInput, setNewDomainInput] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const [confirmPurgeOpen, setConfirmPurgeOpen] = useState(false);
@@ -561,6 +577,29 @@ export const TrialLicensePortal: React.FC = () => {
       setArchiveCycleInput(String(trialLicenseConfig.archiveCycleMonths || 4));
     }
   }, [isDeveloperPortalOpen, trialLicenseConfig]);
+
+  const todayDateStr = React.useMemo(() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }, []);
+
+  const allAuditLogs = draftConfig.loginAuditLogs || [];
+
+  const filteredAuditLogs = React.useMemo(() => {
+    if (auditLogFilter === 'today') {
+      return allAuditLogs.filter((l) => l.dateStr === todayDateStr);
+    }
+    if (auditLogFilter === 'success') {
+      return allAuditLogs.filter((l) => l.status === 'success');
+    }
+    if (auditLogFilter === 'failed') {
+      return allAuditLogs.filter((l) => l.status !== 'success');
+    }
+    return allAuditLogs;
+  }, [allAuditLogs, auditLogFilter, todayDateStr]);
 
   // الاستماع لحدث الفتح السري (5 ضغطات متتالية على شعار المستشفى في التذييل)
   useEffect(() => {
@@ -814,6 +853,49 @@ export const TrialLicensePortal: React.FC = () => {
     const nextConfig: SystemTrialLicenseConfig = {
       ...draftConfig,
       intrusionLogs: [],
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // حظر حساب وظيفي بالكامل
+  const handleBanUserAccount = async (username: string) => {
+    if (!username) return;
+    const cleanUser = username.toLowerCase().trim();
+    const currentBanned = Array.isArray(draftConfig.bannedUsernames)
+      ? draftConfig.bannedUsernames
+      : [];
+    if (currentBanned.includes(cleanUser)) return;
+
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      bannedUsernames: [...currentBanned, cleanUser],
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+    forceLogoutDevice(cleanUser);
+    setManualAccountBanInput('');
+  };
+
+  // إلغاء حظر حساب وظيفي
+  const handleUnbanUserAccount = async (username: string) => {
+    const cleanUser = username.toLowerCase().trim();
+    const currentBanned = Array.isArray(draftConfig.bannedUsernames)
+      ? draftConfig.bannedUsernames
+      : [];
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      bannedUsernames: currentBanned.filter((u) => u.toLowerCase() !== cleanUser),
+    };
+    setDraftConfig(nextConfig);
+    await handleSaveConfig(nextConfig);
+  };
+
+  // مسح وتفريغ سجل تسجيلات الدخول
+  const handleClearLoginAuditLogs = async () => {
+    const nextConfig: SystemTrialLicenseConfig = {
+      ...draftConfig,
+      loginAuditLogs: [],
     };
     setDraftConfig(nextConfig);
     await handleSaveConfig(nextConfig);
@@ -3763,6 +3845,266 @@ I am the original creator and copyright holder of the source code, UI architectu
                         </div>
                       );
                     })}
+                  </div>
+                </div>
+
+                {/* القسم 6-ب: سجل تدقيق تسجيلات الدخول اليومية — متابعة من دخل النظام مع إمكانية الحظر الفوري */}
+                <div className="rounded-2xl border-2 border-emerald-500/30 dark:border-emerald-500/40 bg-white dark:bg-slate-900 p-4 sm:p-5 space-y-4 shadow-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2.5">
+                      <span className="w-9 h-9 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 flex items-center justify-center">
+                        <History className="w-5 h-5" />
+                      </span>
+                      <div>
+                        <h3 className="text-sm font-black text-slate-900 dark:text-white flex items-center gap-2">
+                          <span>سجل تسجيلات الدخول اليومية — من دخل المنظومة اليوم</span>
+                          <span className="px-2 py-0.5 rounded-full text-[11px] font-extrabold bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 border border-emerald-300 dark:border-emerald-800">
+                            {allAuditLogs.filter((l) => l.dateStr === todayDateStr).length} اليوم
+                          </span>
+                        </h3>
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                          يعرض اسم المستخدم، تاريخ وساعة الدخول، بصمة الجهاز، مع إمكانية حظر الحساب أو الجهاز فوراً
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {allAuditLogs.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleClearLoginAuditLogs}
+                          className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:text-rose-600 text-xs font-bold transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>تفريغ السجل</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* فلاتر سريعة */}
+                  <div className="flex items-center gap-1.5 flex-wrap text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setAuditLogFilter('today')}
+                      className={`px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                        auditLogFilter === 'today'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      تسجيلات اليوم ({allAuditLogs.filter((l) => l.dateStr === todayDateStr).length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuditLogFilter('all')}
+                      className={`px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                        auditLogFilter === 'all'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      كل السجلات ({allAuditLogs.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuditLogFilter('success')}
+                      className={`px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                        auditLogFilter === 'success'
+                          ? 'bg-emerald-600 text-white border-emerald-600 shadow-2xs'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      تسجيلات ناجحة ✓ ({allAuditLogs.filter((l) => l.status === 'success').length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuditLogFilter('failed')}
+                      className={`px-3 py-1.5 rounded-xl border transition-all cursor-pointer ${
+                        auditLogFilter === 'failed'
+                          ? 'bg-rose-600 text-white border-rose-600 shadow-2xs'
+                          : 'bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-700'
+                      }`}
+                    >
+                      محاولات مرفوضة ⚠️ ({allAuditLogs.filter((l) => l.status !== 'success').length})
+                    </button>
+                  </div>
+
+                  {/* قائمة السجلات */}
+                  {filteredAuditLogs.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-center text-xs text-slate-500 font-bold">
+                      لا توجد تسجيلات دخول مسجلة تطابق الفلتر المحدد حالياً.
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+                      {filteredAuditLogs.map((log) => {
+                        const isSuccess = log.status === 'success';
+                        const isAccountBanned = (draftConfig.bannedUsernames || []).some(
+                          (u) => u.toLowerCase() === log.username.toLowerCase()
+                        );
+                        const isDeviceBanned = (draftConfig.blockedEntities || []).some(
+                          (b) => b.deviceFingerprint === log.deviceFingerprint
+                        );
+
+                        return (
+                          <div
+                            key={log.id}
+                            className={`p-3.5 rounded-2xl border transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                              isSuccess
+                                ? 'bg-slate-50 dark:bg-slate-800/60 border-slate-200 dark:border-slate-700'
+                                : 'bg-rose-50/70 dark:bg-rose-950/30 border-rose-200 dark:border-rose-900/60'
+                            }`}
+                          >
+                            <div className="space-y-1.5 min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span
+                                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                                    isSuccess ? 'bg-emerald-500' : 'bg-rose-500 animate-pulse'
+                                  }`}
+                                />
+                                <span className="font-black text-slate-900 dark:text-white text-xs sm:text-sm">
+                                  {log.displayName}
+                                </span>
+                                <span className="font-mono text-slate-500 dark:text-slate-400 text-[11px]">
+                                  (@{log.username})
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-blue-50 dark:bg-blue-950 text-blue-700 dark:text-blue-300 text-[10px] font-extrabold">
+                                  {ROLE_ARABIC_NAMES[log.role] || log.role}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
+                                    log.status === 'success'
+                                      ? 'bg-emerald-100 dark:bg-emerald-950/80 text-emerald-800 dark:text-emerald-300'
+                                      : log.status === 'blocked_account'
+                                      ? 'bg-purple-100 dark:bg-purple-950 text-purple-800 dark:text-purple-300'
+                                      : log.status === 'blocked_device'
+                                      ? 'bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300'
+                                      : 'bg-rose-100 dark:bg-rose-950 text-rose-800 dark:text-rose-300'
+                                  }`}
+                                >
+                                  {log.status === 'success'
+                                    ? 'دخول ناجح ✓'
+                                    : log.status === 'blocked_account'
+                                    ? 'حساب موقوف ⛔'
+                                    : log.status === 'blocked_device'
+                                    ? 'جهاز محظور 🔒'
+                                    : 'كلمة مرور خاطئة ⚠️'}
+                                </span>
+                                {isAccountBanned && (
+                                  <span className="px-2 py-0.5 rounded-md bg-rose-600 text-white text-[10px] font-black">
+                                    الحساب محظور حالياً
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500 dark:text-slate-400">
+                                <span>📅 التاريخ: <strong>{log.dateStr}</strong></span>
+                                <span>⏰ التوقيت: <strong>{log.timeStr}</strong></span>
+                                {log.ip && <span className="font-mono">IP: {log.ip}</span>}
+                                <span className="font-mono">بصمة الجهاز: {log.deviceFingerprint}</span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                {log.deviceDetails}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
+                              {/* زر حظر / إلغاء حظر الحساب */}
+                              {isAccountBanned ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleUnbanUserAccount(log.username)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold shadow-2xs cursor-pointer"
+                                >
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>إلغاء حظر الحساب 🔓</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleBanUserAccount(log.username)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-[11px] font-bold shadow-2xs cursor-pointer"
+                                  title="منع هذا الحساب من تسجيل الدخول نهائياً من أي جهاز"
+                                >
+                                  <UserX className="w-3.5 h-3.5" />
+                                  <span>حظر الحساب 🚫</span>
+                                </button>
+                              )}
+
+                              {/* زر حظر الجهاز */}
+                              {!isDeviceBanned ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleBanAttemptEntity({
+                                      ip: log.ip,
+                                      deviceFingerprint: log.deviceFingerprint,
+                                      deviceDetails: log.deviceDetails,
+                                      typeLabel: `حظر من سجل تسجيلات الدخول (@${log.username})`,
+                                    })
+                                  }
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-[11px] font-bold shadow-2xs cursor-pointer"
+                                >
+                                  <Ban className="w-3.5 h-3.5" />
+                                  <span>حظر الجهاز 🔒</span>
+                                </button>
+                              ) : (
+                                <span className="px-2 py-1 rounded-lg bg-rose-100 dark:bg-rose-950 text-rose-700 dark:text-rose-300 text-[10px] font-extrabold">
+                                  الجهاز محظور
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  {/* كارت الحسابات المحظورة يدوياً */}
+                  <div className="pt-3 border-t border-slate-200 dark:border-slate-800 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-1.5 text-xs font-black text-slate-800 dark:text-slate-200">
+                        <UserX className="w-4 h-4 text-purple-600" />
+                        <span>الحسابات الوظيفية المحظورة حالياً ({(draftConfig.bannedUsernames || []).length})</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={manualAccountBanInput}
+                          onChange={(e) => setManualAccountBanInput(e.target.value)}
+                          placeholder="اكتب اسم المستخدم لحظره فوراً..."
+                          className="px-3 py-1.5 rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-xs font-bold text-slate-900 dark:text-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleBanUserAccount(manualAccountBanInput)}
+                          className="px-3 py-1.5 rounded-xl bg-purple-700 hover:bg-purple-800 text-white text-xs font-bold shadow-2xs cursor-pointer"
+                        >
+                          حظر الحساب
+                        </button>
+                      </div>
+                    </div>
+
+                    {(draftConfig.bannedUsernames || []).length > 0 && (
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {(draftConfig.bannedUsernames || []).map((u) => (
+                          <div
+                            key={u}
+                            className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-purple-50 dark:bg-purple-950/70 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-200 text-xs font-bold"
+                          >
+                            <span>@{u}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleUnbanUserAccount(u)}
+                              className="w-4 h-4 rounded-full bg-purple-200 dark:bg-purple-800 text-purple-800 dark:text-purple-200 flex items-center justify-center hover:bg-rose-500 hover:text-white transition-colors cursor-pointer"
+                              title="إلغاء حظر هذا الحساب"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 

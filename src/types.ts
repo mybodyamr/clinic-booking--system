@@ -353,9 +353,25 @@ export interface BlockedSecurityEntity {
   ip?: string;
   deviceFingerprint?: string;
   deviceDetails?: string;
+  username?: string;
   reason: string;
   blockedAt: string;
   autoBlocked?: boolean;
+}
+
+export interface LoginAuditRecord {
+  id: string;
+  timestamp: string;
+  dateStr: string;
+  timeStr: string;
+  username: string;
+  displayName: string;
+  role: string;
+  status: 'success' | 'failed_password' | 'blocked_device' | 'blocked_account';
+  ip?: string;
+  ispLocation?: string;
+  deviceFingerprint: string;
+  deviceDetails: string;
 }
 
 export interface DeveloperBroadcastMessage {
@@ -417,6 +433,8 @@ export interface SystemTrialLicenseConfig {
   activeBroadcastMessage?: DeveloperBroadcastMessage | null;
   lastKnownServerTimeMs?: number;
   blockedEntities?: BlockedSecurityEntity[];
+  bannedUsernames?: string[];
+  loginAuditLogs?: LoginAuditRecord[];
   intrusionLogs?: SecurityIntrusionAttempt[];
   generatedLicenseKeys?: GeneratedLicenseKey[];
   usedLicenseKeyCodes?: string[];
