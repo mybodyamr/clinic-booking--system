@@ -24,9 +24,36 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Hospital, Moon, Sun, ShieldCheck } from 'lucide-react';
 
 const AppContent: React.FC = () => {
-  const { currentView, currentUser, theme, toggleTheme } = useApp();
+  const {
+    currentView,
+    currentUser,
+    theme,
+    toggleTheme,
+    trialLicenseConfig,
+    isDeveloperPortalOpen,
+  } = useApp();
   const secretClickCountRef = React.useRef<number>(0);
   const secretClickTimerRef = React.useRef<number | null>(null);
+
+  const isStaffView =
+    currentView === 'admin' ||
+    currentView === 'finance' ||
+    currentView === 'reception' ||
+    currentView === 'cashier' ||
+    currentView === 'doctor';
+
+  const expiresAtMs = trialLicenseConfig?.expiresAt
+    ? new Date(trialLicenseConfig.expiresAt).getTime()
+    : NaN;
+  const isTimeExpired = Number.isFinite(expiresAtMs) ? Date.now() >= expiresAtMs : false;
+  const isSystemLocked =
+    trialLicenseConfig?.mode === 'locked' ||
+    (trialLicenseConfig?.mode === 'trial' && isTimeExpired);
+
+  const shouldEnforceLock =
+    isSystemLocked &&
+    Boolean(trialLicenseConfig?.lockPublicPagesOnExpiry || isStaffView) &&
+    !isDeveloperPortalOpen;
 
   const handleFooterSecretClick = () => {
     secretClickCountRef.current += 1;
@@ -90,6 +117,17 @@ const AppContent: React.FC = () => {
         return <LandingView />;
     }
   };
+
+  if (shouldEnforceLock) {
+    return (
+      <div className="min-h-dvh w-full overflow-x-clip bg-[#041224] text-white flex flex-col font-sans select-none">
+        <TrialLicensePortal />
+        <div className="no-print">
+          <ToastContainer />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-dvh w-full overflow-x-clip bg-[#F8FBF9] dark:bg-[#06110E] text-slate-900 dark:text-slate-100 flex flex-col font-sans transition-colors duration-300 print:bg-white print:text-black print:min-h-0">
