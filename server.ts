@@ -836,6 +836,56 @@ export function createApiApp(options?: ServerRecoveryOptions) {
     res.status(200).json({ ok: true });
   });
 
+  // Endpoint إنعاش قاعدة البيانات ومنع تجميد Supabase (Keep-Alive Cron لـ Vercel و GitHub)
+  app.all('/api/keepalive', async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+
+    const startTime = Date.now();
+    let dbStatus = 'unknown';
+    let dbError: string | null = null;
+
+    try {
+      let client: SupabaseClient;
+      try {
+        client = getSupabaseAdminClient();
+      } catch {
+        const supabaseUrl = getServerSupabaseUrl();
+        const publishableKey = getServerPublishableKey();
+        client = createClient(supabaseUrl, publishableKey, {
+          auth: { persistSession: false },
+        });
+      }
+
+      // تنفيذ استعلام خفيف على جدول العيادات لتسجيل نشاط فعلي وإعادة ضبط عداد الـ 7 أيام في Supabase
+      const { data, error } = await client
+        .from('clinics')
+        .select('id')
+        .limit(1);
+
+      if (error) {
+        dbStatus = 'warning';
+        dbError = error.message;
+      } else {
+        dbStatus = 'active_and_awake';
+      }
+    } catch (err: any) {
+      dbStatus = 'error';
+      dbError = err?.message || 'Database ping error';
+    }
+
+    const durationMs = Date.now() - startTime;
+    return res.status(200).json({
+      ok: true,
+      service: 'sharaya-clinics-keepalive',
+      database: dbStatus,
+      durationMs,
+      timestamp: new Date().toISOString(),
+      ...(dbError ? { errorDetails: dbError } : {}),
+    });
+  });
+
   // Endpoint التحقق من جلسة وصلاحية Admin عبر staff_accounts (Phase 2)
   app.get('/api/admin/verify', requireAdminAuth, (req: AuthenticatedRequest, res: Response) => {
     res.status(200).json({

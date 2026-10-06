@@ -1,0 +1,28 @@
+name: Supabase & System Keep-Alive
+
+on:
+  schedule:
+    # Runs every 2 days at 06:00 UTC (9:00 AM Cairo Time)
+    - cron: '0 6 */2 * *'
+  workflow_dispatch: # Allows manual trigger anytime from GitHub Actions tab
+
+jobs:
+  keepalive:
+    name: Prevent Supabase Dormancy & Inactivity Pause
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send Keep-Alive Ping to Supabase Database
+        run: |
+          echo "Sending keep-alive query to Supabase REST API..."
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X GET \
+            -H "apikey: sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2" \
+            -H "Authorization: Bearer sb_publishable_-Xp2D-cOLleLXIrr_vR9qg_kCLhSuC2" \
+            -H "Cache-Control: no-cache, no-store" \
+            "https://rugwzfaiensjdxtoipop.supabase.co/rest/v1/clinics?select=id&limit=1")
+          
+          echo "Supabase response status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 400 ]; then
+            echo "Success: Supabase 7-day inactivity timer successfully reset."
+          else
+            echo "Notice: Non-2xx response ($HTTP_STATUS), request was still received by Supabase edge."
+          fi

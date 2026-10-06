@@ -54,5 +54,11 @@
       "source": "/((?!api/|assets/|sw\\.js|manifest\\.webmanifest|icon-.*\\.svg|pwa-.*\\.png|apple-touch-icon\\.png).*)",
       "destination": "/index.html"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/keepalive",
+      "schedule": "0 10 * * *"
+    }
   ]
 }
